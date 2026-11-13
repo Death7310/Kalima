@@ -1,0 +1,13 @@
+{
+  "name": "kalima",
+  "version": "0.1.0",
+  "description": "Offline Kali Linux training simulator: a simulated terminal, lab network and guided lessons in a single HTML file.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "build": "node tools/build.mjs",
+    "check": "node --test tests/*.test.mjs && node tools/build.mjs"
+  },
+  "license": "MIT"
+}
