@@ -26,8 +26,9 @@
  *   out:    /regex/                      tested against everything the line printed (ANSI stripped)
  *   exit:   0                            exit status of the whole line
  *   cwd:    '/path' | /regex/            working directory after the line ran
- *   user:   'root'                       user who ran it
- *   host:   'web01'                      hostname of the machine the shell is on
+ *   user:   'root'                       user who ran the command (`sudo x` counts as root running x)
+ *   host:   'web01'                      hostname of the machine the command ran on (interactive ssh
+ *                                        sessions and `ssh host command` both count)
  *   file:   { path, exists, contains: /re/, mode: '600', type: 'file'|'dir' }   state on the Kali box after the line
  *   env:    { NAME: /re/ }               shell variable after the line
  *   any:    [check, ...]   all: [check, ...]   not: check
@@ -66,21 +67,33 @@
       if (spec.not && L.check(spec.not, ev)) return false;
       const re = (r, s) => { if (typeof r === 'string') return String(s).indexOf(r) >= 0; r.lastIndex = 0; return r.test(String(s)); };
       const base = (n) => String(n || '').split('/').pop();
-      if (spec.cmd != null || spec.args || spec.argsRe) {
+      const cmdSpec = spec.cmd != null || spec.args || spec.argsRe;
+      if (cmdSpec) {
         const names = spec.cmd == null ? null : Array.isArray(spec.cmd) ? spec.cmd : [spec.cmd];
+        const hasArg = (rest, x) => rest.indexOf(x) >= 0 || (/^-[a-zA-Z]$/.test(x) && rest.some((r) =>
+          (/^-[a-zA-Z]+$/.test(r) && r.indexOf(x[1]) > 0) || (r.indexOf(x) === 0 && r.length > 2 && r[1] !== '-')));
         const hit = (ev.commands || []).some((c) => {
-          let argv = c.argv;
-          // look through wrappers so `sudo nmap ...` still counts as nmap
-          while (argv.length > 1 && /^(sudo|time|command|nohup|exec)$/.test(base(argv[0]))) {
+          // look through wrappers so `sudo nmap ...` also counts as nmap, run by root
+          const variants = [{ argv: c.argv, user: c.user, host: c.host }];
+          let argv = c.argv; let user = c.user;
+          while (argv.length > 1 && /^(sudo|time|command|nohup|exec|env)$/.test(base(argv[0]))) {
+            const w = base(argv[0]);
             argv = argv.slice(1);
-            while (argv.length > 1 && /^-/.test(argv[0]) && base(c.argv[0]) === 'sudo') argv = argv.slice(argv[0] === '-u' ? 2 : 1);
+            if (w === 'sudo') {
+              user = 'root';
+              while (argv.length > 1 && argv[0][0] === '-') {
+                if (argv[0] === '-u' && argv.length > 2) { user = argv[1]; argv = argv.slice(2); } else argv = argv.slice(1);
+              }
+            }
+            variants.push({ argv, user, host: c.host });
           }
-          const variants = argv === c.argv ? [argv] : [argv, c.argv];
-          return variants.some((a) => {
-            if (names && names.indexOf(base(a[0])) < 0) return false;
-            const rest = a.slice(1);
-            if (spec.args && !spec.args.every((x) => rest.indexOf(x) >= 0 || rest.some((r) => r.indexOf(x) === 0 && /^-[a-zA-Z]$/.test(x) && r[0] === '-' && r[1] !== '-'))) return false;
+          return variants.some((v) => {
+            if (names && names.indexOf(base(v.argv[0])) < 0) return false;
+            const rest = v.argv.slice(1);
+            if (spec.args && !spec.args.every((x) => hasArg(rest, x))) return false;
             if (spec.argsRe && !re(spec.argsRe, rest.join(' '))) return false;
+            if (spec.user != null && v.user !== spec.user) return false;
+            if (spec.host != null && v.host !== spec.host) return false;
             return true;
           });
         });
@@ -90,8 +103,8 @@
       if (spec.out && !re(spec.out, K.util.stripAnsi(ev.output || ''))) return false;
       if (spec.exit != null && ev.code !== spec.exit) return false;
       if (spec.cwd != null && !(typeof spec.cwd === 'string' ? ev.cwd === spec.cwd : re(spec.cwd, ev.cwd))) return false;
-      if (spec.user != null && ev.user !== spec.user) return false;
-      if (spec.host != null && ev.host !== spec.host) return false;
+      if (!cmdSpec && spec.user != null && ev.user !== spec.user) return false;
+      if (!cmdSpec && spec.host != null && ev.host !== spec.host && !(ev.commands || []).some((c) => c.host === spec.host)) return false;
       if (spec.file) {
         const f = spec.file; const vfs = K.kali ? K.kali.vfs : null;
         if (!vfs) return false;
