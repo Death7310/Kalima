@@ -894,4 +894,527 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     run: (ctx) => dpkgMain(ctx, 'dpkg-query'),
   });
 
+  /* ================================================== users and groups */
+
+  const NAME_RE = /^[a-z_][a-z0-9_-]{0,31}[$]?$/;
+  const SKEL_FILES = ['.bashrc', '.profile', '.bash_logout', '.zshrc'];
+  const LOGIN_UID_MIN = 1000; const LOGIN_UID_MAX = 59999;
+
+  // New home directories are copied from /etc/skel, which Debian fills with the dotfiles of a fresh user.
+  K.fsSeeds.push((machine) => {
+    const sample = machine.users.find((u) => u.uid >= LOGIN_UID_MIN && u.uid < 60000);
+    if (!sample) return;
+    for (const f of SKEL_FILES) {
+      try { machine.vfs.seed('/etc/skel/' + f, machine.vfs.read(sample.home + '/' + f), { mode: 0o644 }); } catch (e) { /* this profile has no such dotfile */ }
+    }
+  });
+
+  function permissionDenied(ctx, prog, file) {
+    ctx.err(prog + ': Permission denied.\n' + prog + ': cannot lock ' + (file || '/etc/passwd') + '; try again later.\n');
+    return 1;
+  }
+  function nextFree(used, start, max) { let n = start; while (used.has(n) && n <= max) n++; return n; }
+  const nextUid = (m) => nextFree(new Set(m.users.map((u) => u.uid)), LOGIN_UID_MIN, LOGIN_UID_MAX);
+  const nextGid = (m) => nextFree(new Set(m.groups.map((g) => g.gid)), LOGIN_UID_MIN, LOGIN_UID_MAX);
+  const systemId = (m, used) => { let n = 999; while (used.has(n) && n > 100) n--; return n; };
+
+  function authLog(ctx, ident, msg) { log(ctx.machine, { facility: 'auth', ident, pid: ctx.pid, msg }); }
+
+  /** Copy a directory tree inside the VFS giving every entry to uid:gid (used for /etc/skel). */
+  function copyTree(vfs, from, to, uid, gid) {
+    for (const name of vfs.readdir(from)) {
+      const src = from + '/' + name; const dst = to + '/' + name;
+      const st = vfs.lstat(src);
+      if (st.isDir) { vfs.seedDir(dst, { mode: st.mode & 0o7777, uid, gid }); copyTree(vfs, src, dst, uid, gid); }
+      else if (st.isLink) vfs.seedLink(dst, vfs.readlink(src), { uid, gid });
+      else vfs.seed(dst, vfs.read(src), { mode: st.mode & 0o7777, uid, gid });
+    }
+  }
+
+  function createHome(ctx, user, skel) {
+    const vfs = ctx.vfs;
+    if (vfs.exists(user.home)) {
+      ctx.err('useradd: warning: the home directory ' + user.home + ' already exists.\nuseradd: Not copying any file from skel directory into it.\n');
+      return;
+    }
+    vfs.seedDir(user.home, { mode: 0o700, uid: user.uid, gid: user.gid, mtime: K.clock.now() });
+    if (vfs.exists(skel)) copyTree(vfs, skel, user.home, user.uid, user.gid);
+  }
+
+  const gidOf = (m, spec) => { const g = m.groupByName(spec) || (/^\d+$/.test(spec) ? m.groupByGid(parseInt(spec, 10)) : null); return g || null; };
+
+  const USERADD_USAGE = 'Usage: useradd [options] LOGIN\n       useradd -D\n       useradd -D [options]\n\nOptions:\n      --badname                 do not check for bad names\n  -b, --base-dir BASE_DIR       base directory for the home directory of the\n                                new account\n  -c, --comment COMMENT         GECOS field of the new account\n  -d, --home-dir HOME_DIR       home directory of the new account\n  -D, --defaults                print or change default useradd configuration\n  -e, --expiredate EXPIRE_DATE  expiration date of the new account\n  -f, --inactive INACTIVE       password inactivity period of the new account\n  -g, --gid GROUP               name or ID of the primary group of the new\n                                account\n  -G, --groups GROUPS           list of supplementary groups of the new\n                                account\n  -h, --help                    display this help message and exit\n  -k, --skel SKEL_DIR           use this alternative skeleton directory\n  -m, --create-home             create the user\'s home directory\n  -M, --no-create-home          do not create the user\'s home directory\n  -N, --no-user-group           do not create a group with the same name as\n                                the user\n  -o, --non-unique              allow to create users with duplicate\n                                (non-unique) UID\n  -p, --password PASSWORD       encrypted password of the new account\n  -r, --system                  create a system account\n  -s, --shell SHELL             login shell of the new account\n  -u, --uid UID                 user ID of the new account\n  -U, --user-group              create a group with the same name as the user\n\n';
+
+  function useraddMain(ctx) {
+    const g = K.getopt(ctx.args, { short: 'b:c:d:De:f:g:G:hk:K:lmMNop:rR:s:u:UZ:P:', long: ['badname', 'base-dir=', 'comment=', 'home-dir=', 'defaults', 'expiredate=', 'inactive=', 'gid=', 'groups=', 'help', 'skel=', 'key=', 'no-log-init', 'create-home', 'no-create-home', 'no-user-group', 'non-unique', 'password=', 'system', 'root=', 'shell=', 'uid=', 'user-group', 'prefix=', 'selinux-user=', 'extrausers'],
+      alias: { 'base-dir': 'b', comment: 'c', 'home-dir': 'd', defaults: 'D', gid: 'g', groups: 'G', help: 'h', skel: 'k', 'create-home': 'm', 'no-create-home': 'M', 'no-user-group': 'N', 'non-unique': 'o', password: 'p', system: 'r', shell: 's', uid: 'u', 'user-group': 'U' } });
+    if (g.err) { ctx.err('useradd: ' + g.err + '\n' + USERADD_USAGE); return 2; }
+    const o = g.opts; const m = ctx.machine;
+    if (o.h) { ctx.out(USERADD_USAGE); return 0; }
+    if (o.D && !g.rest.length && Object.keys(o).length === 1) { ctx.out('GROUP=100\nHOME=/home\nINACTIVE=-1\nEXPIRE=\nSHELL=/bin/sh\nSKEL=/etc/skel\nCREATE_MAIL_SPOOL=no\n'); return 0; }
+    if (g.rest.length !== 1) { ctx.err(USERADD_USAGE); return 2; }
+    if (!ctx.isRoot) return permissionDenied(ctx, 'useradd');
+    const name = g.rest[0];
+    if (!o.badname && !NAME_RE.test(name)) { ctx.err("useradd: invalid user name '" + name + "': use --badname to ignore\n"); return 3; }
+    if (m.userByName(name)) { ctx.err("useradd: user '" + name + "' already exists\n"); return 9; }
+    let uid;
+    if (o.u != null) {
+      if (!/^\d+$/.test(String(o.u))) { ctx.err("useradd: invalid user ID '" + o.u + "'\n"); return 3; }
+      uid = parseInt(o.u, 10);
+      if (m.userByUid(uid) && !o.o) { ctx.err('useradd: UID ' + uid + ' is not unique\n'); return 4; }
+    } else uid = o.r ? systemId(m, new Set(m.users.map((u) => u.uid))) : nextUid(m);
+    let group = null;
+    if (o.g != null) { group = gidOf(m, String(o.g)); if (!group) { ctx.err("useradd: group '" + o.g + "' does not exist\n"); return 6; } }
+    const extra = [];
+    for (const n of o.G ? String(o.G).split(',').filter(Boolean) : []) {
+      const eg = gidOf(m, n);
+      if (!eg) { ctx.err("useradd: group '" + n + "' does not exist\n"); return 6; }
+      extra.push(eg.name);
+    }
+    if (!group && !o.N) {
+      if (m.groupByName(name)) { ctx.err('useradd: group ' + name + ' exists - if you want to add this user to that group, use -g.\n'); return 9; }
+      const gid = o.r ? uid : (m.groupByGid(uid) ? nextGid(m) : uid);
+      group = { name, gid, members: [] };
+      m.groups.push(group);
+      authLog(ctx, 'useradd', 'new group: name=' + name + ', GID=' + gid);
+    } else if (!group) group = m.groupByName('users');
+    const home = o.d || (o.b || '/home') + '/' + name;
+    const user = m.addUser({ name, uid, gid: group.gid, gecos: o.c || '', home, shell: o.s || '/bin/sh', groups: extra });
+    if (o.p != null) m.passwords[name] = null;
+    if (o.m && !o.M && !o.r) createHome(ctx, user, o.k || '/etc/skel');
+    authLog(ctx, 'useradd', 'new user: name=' + name + ', UID=' + uid + ', GID=' + group.gid + ', home=' + home + ', shell=' + user.shell + ', from=' + (ctx.env.SSH_CONNECTION ? 'pts/0' : '/dev/pts/0'));
+    return 0;
+  }
+
+  const USERMOD_USAGE = 'Usage: usermod [options] LOGIN\n\nOptions:\n  -a, --append                  append the user to the supplemental GROUPS\n                                mentioned by the -G option without removing\n                                the user from other groups\n  -c, --comment COMMENT         new value of the GECOS field\n  -d, --home HOME_DIR           new home directory for the user account\n  -e, --expiredate EXPIRE_DATE  set account expiration date to EXPIRE_DATE\n  -g, --gid GROUP               force use GROUP as new primary group\n  -G, --groups GROUPS           new list of supplementary GROUPS\n  -h, --help                    display this help message and exit\n  -l, --login NEW_LOGIN         new value of the login name\n  -L, --lock                    lock the user account\n  -m, --move-home               move contents of the home directory to the\n                                new location (use only with -d)\n  -o, --non-unique              allow using duplicate (non-unique) UID\n  -s, --shell SHELL             new login shell for the user account\n  -u, --uid UID                 new UID for the user account\n  -U, --unlock                  unlock the user account\n\n';
+
+  function lockAccount(m, name) {
+    const adm = adminState(m);
+    if (adm.locked && adm.locked[name]) return;
+    adm.locked = adm.locked || {};
+    adm.locked[name] = { pw: m.passwords[name] == null ? null : m.passwords[name] };
+    m.passwords[name] = null;
+  }
+  function unlockAccount(m, name) {
+    const adm = adminState(m);
+    const saved = adm.locked && adm.locked[name];
+    if (!saved) return true;
+    if (saved.pw == null) return false;
+    m.passwords[name] = saved.pw; delete adm.locked[name];
+    return true;
+  }
+  const isLocked = (m, name) => !!(adminState(m).locked && adminState(m).locked[name]);
+  const busyProc = (m, name) => m.procs.find((p) => p.user === name && p.pid > 1);
+
+  function usermodMain(ctx) {
+    const g = K.getopt(ctx.args, { short: 'ac:d:e:f:g:G:hl:Lmop:s:u:U', long: ['append', 'comment=', 'home=', 'expiredate=', 'inactive=', 'gid=', 'groups=', 'help', 'login=', 'lock', 'move-home', 'non-unique', 'password=', 'shell=', 'uid=', 'unlock'],
+      alias: { append: 'a', comment: 'c', home: 'd', gid: 'g', groups: 'G', help: 'h', login: 'l', lock: 'L', 'move-home': 'm', 'non-unique': 'o', shell: 's', uid: 'u', unlock: 'U' } });
+    if (g.err) { ctx.err('usermod: ' + g.err + '\n' + USERMOD_USAGE); return 2; }
+    const o = g.opts; const m = ctx.machine;
+    if (o.h) { ctx.out(USERMOD_USAGE); return 0; }
+    if (g.rest.length !== 1) { ctx.err(USERMOD_USAGE); return 2; }
+    if (o.a && o.G == null) { ctx.err('usermod: option -a requires option -G\n'); return 2; }
+    if (o.L && o.U) { ctx.err('usermod: the options -L and -U are incompatible\n'); return 2; }
+    if (!ctx.isRoot) return permissionDenied(ctx, 'usermod');
+    const name = g.rest[0]; const user = m.userByName(name);
+    if (!user) { ctx.err("usermod: user '" + name + "' does not exist\n"); return 6; }
+    const touching = o.l != null || o.u != null || (o.d != null && o.m);
+    if (touching) { const p = busyProc(m, name); if (p) { ctx.err('usermod: user ' + name + ' is currently used by process ' + p.pid + '\n'); return 8; } }
+    if (o.l != null) {
+      if (!NAME_RE.test(o.l)) { ctx.err("usermod: invalid user name '" + o.l + "'\n"); return 3; }
+      if (m.userByName(o.l)) { ctx.err("usermod: user '" + o.l + "' already exists\n"); return 9; }
+    }
+    if (o.u != null) {
+      if (!/^\d+$/.test(String(o.u))) { ctx.err("usermod: invalid user ID '" + o.u + "'\n"); return 3; }
+      if (m.userByUid(parseInt(o.u, 10)) && !o.o) { ctx.err('usermod: UID \'' + o.u + '\' already exists\n'); return 4; }
+    }
+    let primary = null;
+    if (o.g != null) { primary = gidOf(m, String(o.g)); if (!primary) { ctx.err("usermod: group '" + o.g + "' does not exist\n"); return 6; } }
+    let wanted = null;
+    if (o.G != null) {
+      wanted = [];
+      for (const n of String(o.G).split(',').filter(Boolean)) {
+        const gr = gidOf(m, n);
+        if (!gr) { ctx.err("usermod: group '" + n + "' does not exist\n"); return 6; }
+        wanted.push(gr);
+      }
+    }
+    if (wanted) {
+      if (!o.a) for (const gr of m.groups) gr.members = gr.members.filter((x) => x !== name);
+      for (const gr of wanted) if (!gr.members.includes(name)) gr.members.push(name);
+    }
+    if (primary) user.gid = primary.gid;
+    if (o.c != null) user.gecos = o.c === true ? '' : o.c;
+    if (o.s != null) user.shell = o.s === true ? '' : o.s;
+    if (o.u != null) user.uid = parseInt(o.u, 10);
+    if (o.d != null) {
+      if (o.m && ctx.vfs.exists(user.home)) { ctx.vfs.rename(user.home, o.d); }
+      user.home = o.d;
+    }
+    if (o.L) lockAccount(m, name);
+    if (o.U && !unlockAccount(m, name)) { ctx.err('usermod: unlocking the user\'s password would result in a passwordless account.\nYou should set a password with usermod -p to unlock this user\'s password.\n'); return 1; }
+    if (o.l != null) {
+      for (const gr of m.groups) gr.members = gr.members.map((x) => (x === name ? o.l : x));
+      if (name in m.passwords) { m.passwords[o.l] = m.passwords[name]; delete m.passwords[name]; }
+      user.name = o.l;
+    }
+    authLog(ctx, 'usermod', 'change user name \'' + name + '\' to \'' + user.name + '\'');
+    return 0;
+  }
+
+  function userdelMain(ctx) {
+    const g = K.getopt(ctx.args, { short: 'fhrRZ:', long: ['force', 'help', 'remove', 'root=', 'selinux-user'], alias: { force: 'f', help: 'h', remove: 'r' } });
+    const usage = 'Usage: userdel [options] LOGIN\n\nOptions:\n  -f, --force                   force some actions that would fail otherwise\n                                e.g. removal of user still logged in\n                                or files, even if not owned by the user\n  -h, --help                    display this help message and exit\n  -r, --remove                  remove home directory and mail spool\n\n';
+    if (g.err) { ctx.err('userdel: ' + g.err + '\n' + usage); return 2; }
+    if (g.opts.h) { ctx.out(usage); return 0; }
+    if (g.rest.length !== 1) { ctx.err(usage); return 2; }
+    if (!ctx.isRoot) return permissionDenied(ctx, 'userdel');
+    const m = ctx.machine; const name = g.rest[0]; const user = m.userByName(name);
+    if (!user) { ctx.err("userdel: user '" + name + "' does not exist\n"); return 6; }
+    const p = busyProc(m, name);
+    if (p && !g.opts.f) { ctx.err('userdel: user ' + name + ' is currently used by process ' + p.pid + '\n'); return 8; }
+    m.users = m.users.filter((u) => u !== user);
+    for (const gr of m.groups) gr.members = gr.members.filter((x) => x !== name);
+    const own = m.groupByGid(user.gid);
+    if (own && own.name === name && !m.users.some((u) => u.gid === own.gid)) { m.groups = m.groups.filter((x) => x !== own); authLog(ctx, 'userdel', 'removed group \'' + name + '\' owned by \'' + name + '\''); }
+    delete m.passwords[name];
+    const adm = adminState(m); if (adm.locked) delete adm.locked[name];
+    delete m.sudoStamp[name];
+    try { m.vfs.unlink('/var/spool/cron/crontabs/' + name); } catch (e) { /* no crontab */ }
+    if (g.opts.r) {
+      if (m.vfs.exists(user.home)) m.vfs.rmTree(user.home);
+      else ctx.err('userdel: ' + name + ' home directory (' + user.home + ') not found\n');
+      if (m.vfs.exists('/var/mail/' + name)) m.vfs.unlink('/var/mail/' + name);
+      else ctx.err('userdel: ' + name + ' mail spool (/var/mail/' + name + ') not found\n');
+    }
+    authLog(ctx, 'userdel', "delete user '" + name + "'");
+    return 0;
+  }
+
+  function groupaddMain(ctx) {
+    const g = K.getopt(ctx.args, { short: 'fg:hK:op:rR:P:U:', long: ['force', 'gid=', 'help', 'key=', 'non-unique', 'password=', 'system', 'root=', 'prefix='], alias: { force: 'f', gid: 'g', help: 'h', 'non-unique': 'o', password: 'p', system: 'r' } });
+    const usage = 'Usage: groupadd [options] GROUP\n\nOptions:\n  -f, --force                   exit successfully if the group already exists,\n                                and cancel -g if the GID is already used\n  -g, --gid GID                 use GID for the new group\n  -h, --help                    display this help message and exit\n  -o, --non-unique              allow to create groups with duplicate\n                                (non-unique) GID\n  -p, --password PASSWORD       use this encrypted password for the new group\n  -r, --system                  create a system account\n\n';
+    if (g.err) { ctx.err('groupadd: ' + g.err + '\n' + usage); return 2; }
+    if (g.opts.h) { ctx.out(usage); return 0; }
+    if (g.rest.length !== 1) { ctx.err(usage); return 2; }
+    if (!ctx.isRoot) return permissionDenied(ctx, 'groupadd', '/etc/group');
+    const m = ctx.machine; const name = g.rest[0]; const o = g.opts;
+    if (!NAME_RE.test(name)) { ctx.err("groupadd: '" + name + "' is not a valid group name\n"); return 3; }
+    if (m.groupByName(name)) { if (o.f) return 0; ctx.err("groupadd: group '" + name + "' already exists\n"); return 9; }
+    let gid;
+    if (o.g != null) {
+      if (!/^\d+$/.test(String(o.g))) { ctx.err("groupadd: invalid group ID '" + o.g + "'\n"); return 3; }
+      gid = parseInt(o.g, 10);
+      if (m.groupByGid(gid) && !o.o) { if (o.f) gid = o.r ? systemId(m, new Set(m.groups.map((x) => x.gid))) : nextGid(m); else { ctx.err("groupadd: GID '" + gid + "' already exists\n"); return 4; } }
+    } else gid = o.r ? systemId(m, new Set(m.groups.map((x) => x.gid))) : nextGid(m);
+    m.groups.push({ name, gid, members: [] });
+    authLog(ctx, 'groupadd', 'new group: name=' + name + ', GID=' + gid);
+    return 0;
+  }
+
+  function groupdelMain(ctx) {
+    const g = K.getopt(ctx.args, { short: 'fhR:P:', long: ['force', 'help', 'root=', 'prefix='], alias: { force: 'f', help: 'h' } });
+    const usage = 'Usage: groupdel [options] GROUP\n\nOptions:\n  -f, --force                   delete group even if it is the primary group of a user\n  -h, --help                    display this help message and exit\n\n';
+    if (g.err) { ctx.err('groupdel: ' + g.err + '\n' + usage); return 2; }
+    if (g.opts.h) { ctx.out(usage); return 0; }
+    if (g.rest.length !== 1) { ctx.err(usage); return 2; }
+    if (!ctx.isRoot) return permissionDenied(ctx, 'groupdel', '/etc/group');
+    const m = ctx.machine; const name = g.rest[0]; const group = m.groupByName(name);
+    if (!group) { ctx.err("groupdel: group '" + name + "' does not exist\n"); return 6; }
+    const owner = m.users.find((u) => u.gid === group.gid);
+    if (owner && !g.opts.f) { ctx.err("groupdel: cannot remove the primary group of user '" + owner.name + "'\n"); return 8; }
+    m.groups = m.groups.filter((x) => x !== group);
+    authLog(ctx, 'groupdel', "group '" + name + "' removed");
+    return 0;
+  }
+
+  /* ---- passwords ---- */
+
+  function weakPassword(pw, user) {
+    if (pw.length < 4) return 'it is WAY too short';
+    if (pw.length < 6) return 'it is too short';
+    if (/^(.)\1*$/.test(pw)) return 'it does not contain enough DIFFERENT characters';
+    if (pw === user) return 'it is based on your username';
+    return null;
+  }
+
+  /**
+   * Ask twice for a new password, applying the quality check to non-root callers.
+   * Returns the password, or null after printing the failure like passwd does.
+   */
+  async function askNewPassword(ctx, prog, target, root) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const first = await ctx.readLine('New password: ', { hidden: true });
+      if (first == null) { ctx.err(prog + ': Authentication token manipulation error\n' + prog + ': password unchanged\n'); return null; }
+      if (first === '') { ctx.err('No password has been supplied.\n'); continue; }
+      const weak = weakPassword(first, target);
+      if (weak) {
+        ctx.err('BAD PASSWORD: ' + weak + '\n');
+        if (!root) continue;
+      }
+      const second = await ctx.readLine('Retype new password: ', { hidden: true });
+      if (second !== first) { ctx.err('Sorry, passwords do not match.\n' + prog + ': Authentication token manipulation error\n' + prog + ': password unchanged\n'); return null; }
+      return first;
+    }
+    ctx.err(prog + ': Have exhausted maximum number of retries for service\n' + prog + ': password unchanged\n');
+    return null;
+  }
+
+  function setPassword(ctx, name, pw) {
+    const m = ctx.machine; const adm = adminState(m);
+    m.passwords[name] = pw;
+    if (adm.locked) delete adm.locked[name];
+    adm.pwChanged = adm.pwChanged || {};
+    adm.pwChanged[name] = U.isoDate(K.clock.now()).slice(0, 10);
+    authLog(ctx, 'passwd', 'pam_unix(passwd:chauthtok): password changed for ' + name);
+  }
+
+  async function passwdMain(ctx) {
+    const g = K.getopt(ctx.args, { short: 'adehlnqrSuwxi:', long: ['all', 'delete', 'expire', 'help', 'lock', 'unlock', 'status', 'quiet', 'keep-tokens', 'repository=', 'root=', 'mindays=', 'maxdays=', 'warndays=', 'inactive=', 'stdin'],
+      alias: { delete: 'd', expire: 'e', help: 'h', lock: 'l', unlock: 'u', status: 'S', quiet: 'q' } });
+    const usage = 'Usage: passwd [options] [LOGIN]\n\nOptions:\n  -a, --all                     report password status on all accounts\n  -d, --delete                  delete the password for the named account\n  -e, --expire                  force expire the password for the named account\n  -h, --help                    display this help message and exit\n  -k, --keep-tokens             change password only if expired\n  -i, --inactive INACTIVE       set password inactive after expiration\n                                to INACTIVE\n  -l, --lock                    lock the password of the named account\n  -n, --mindays MIN_DAYS        set minimum number of days before password\n                                change to MIN_DAYS\n  -q, --quiet                   quiet mode\n  -r, --repository REPOSITORY   change password in REPOSITORY repository\n  -R, --root CHROOT_DIR         directory to chroot into\n  -S, --status                  report password status on the named account\n  -u, --unlock                  unlock the password of the named account\n  -w, --warndays WARN_DAYS      set expiration warning days to WARN_DAYS\n  -x, --maxdays MAX_DAYS        set maximum number of days before password\n                                change to MAX_DAYS\n\n';
+    if (g.err) { ctx.err('passwd: ' + g.err + '\n' + usage); return 2; }
+    if (g.opts.h) { ctx.out(usage); return 0; }
+    const m = ctx.machine; const o = g.opts;
+    const name = g.rest[0] || ctx.user.name;
+    const user = m.userByName(name);
+    if (!user) { ctx.err("passwd: user '" + name + "' does not exist\n"); return 1; }
+    if (!ctx.isRoot && name !== ctx.user.name) { ctx.err('passwd: You may not view or modify password information for ' + name + '.\n'); return 1; }
+    const adm = adminState(m);
+    if (o.S) {
+      const pw = m.passwords[name];
+      const state = pw === '' ? 'NP' : pw == null ? 'L' : 'P';
+      const stamp = (adm.pwChanged && adm.pwChanged[name]) || '2026-10-26';
+      ctx.out(name + ' ' + state + ' ' + stamp + ' 0 99999 7 -1\n');
+      return 0;
+    }
+    if (o.l || o.u || o.d || o.e) {
+      if (!ctx.isRoot) { ctx.err('passwd: Permission denied.\n'); return 1; }
+      if (o.l) lockAccount(m, name);
+      else if (o.u && !unlockAccount(m, name)) { ctx.err('passwd: unlocking the password would result in a passwordless account.\nYou should set a password with usermod -p to unlock the password of this account.\n'); return 3; }
+      if (o.d) { m.passwords[name] = ''; }
+      ctx.out('passwd: password expiry information changed.\n');
+      return 0;
+    }
+    if (!ctx.isRoot || name === ctx.user.name) ctx.out('Changing password for ' + name + '.\n');
+    if (!ctx.isRoot) {
+      const cur = await ctx.readLine('Current password: ', { hidden: true });
+      if (cur == null || !m.checkPassword(name, cur)) { await sleep(ctx, 1500); ctx.err('passwd: Authentication token manipulation error\npasswd: password unchanged\n'); return 10; }
+    }
+    const pw = await askNewPassword(ctx, 'passwd', name, ctx.isRoot);
+    if (pw == null) return 10;
+    setPassword(ctx, name, pw);
+    ctx.out('passwd: password updated successfully\n');
+    return 0;
+  }
+
+  /* ---- chsh ---- */
+
+  async function chshMain(ctx) {
+    const g = K.getopt(ctx.args, { short: 'ls:uvhR:', long: ['list-shells', 'shell=', 'help', 'version', 'root='], alias: { 'list-shells': 'l', shell: 's', help: 'h', version: 'v' } });
+    if (g.err) { ctx.err('chsh: ' + g.err + "\nTry 'chsh --help' for more information.\n"); return 1; }
+    const m = ctx.machine; const o = g.opts;
+    if (o.h) { ctx.out('\nUsage:\n chsh [options] [<username>]\n\nChange your login shell.\n\nOptions:\n -s, --shell <shell>  specify login shell\n -l, --list-shells    print list of shells and exit\n -u, --help           display this help\n -v, --version        display version\n'); return 0; }
+    if (o.v) { ctx.out('chsh from util-linux 2.41.2\n'); return 0; }
+    const shells = ctx.fs.read('/etc/shells').split('\n').filter((l) => l && l[0] !== '#');
+    if (o.l) { ctx.out(shells.join('\n') + '\n'); return 0; }
+    const name = g.rest[0] || ctx.user.name;
+    const user = m.userByName(name);
+    if (!user) { ctx.err("chsh: user '" + name + "' does not exist\n"); return 1; }
+    if (!ctx.isRoot && name !== ctx.user.name) { ctx.err("chsh: running UID doesn't match UID of user we're asking to change\n"); return 1; }
+    let shell = o.s;
+    if (shell == null || shell === true) {
+      ctx.out('Changing the login shell for ' + name + '\nEnter the new value, or press ENTER for the default\n');
+      const ans = await ctx.readLine('\tLogin Shell [' + user.shell + ']: ');
+      shell = ans ? ans : user.shell;
+    }
+    if (!ctx.isRoot) {
+      const pw = await ctx.readLine('Password: ', { hidden: true });
+      if (pw == null || !m.checkPassword(name, pw)) { ctx.err('chsh: PAM: Authentication failure\n'); return 1; }
+    }
+    if (shell[0] !== '/') { ctx.err('chsh: Shell not changed.\n'); return 1; }
+    if (!ctx.isRoot && !shells.includes(shell)) { ctx.err('chsh: "' + shell + '" is not listed in /etc/shells.\nUse chsh -l to see list.\n'); return 1; }
+    if (!ctx.vfs.exists(shell)) { ctx.err('chsh: "' + shell + '" is not executable.\n'); return 1; }
+    if (shell === user.shell) { ctx.out('Shell not changed.\n'); return 0; }
+    user.shell = shell;
+    return 0;
+  }
+
+  /* ---- adduser ---- */
+
+  async function adduserMain(ctx) {
+    const g = K.getopt(ctx.args, { short: 'qvh', long: ['disabled-password', 'disabled-login', 'gecos=', 'comment=', 'home=', 'shell=', 'uid=', 'gid=', 'ingroup=', 'group', 'system', 'no-create-home', 'quiet', 'verbose', 'add-extra-groups', 'allow-bad-names', 'firstuid=', 'lastuid=', 'conf=', 'help', 'version'], alias: { quiet: 'q', verbose: 'v', help: 'h' } });
+    const usage = 'adduser [--uid id] [--firstuid id] [--lastuid id]\n        [--gid id] [--ingroup group] [--add-extra-groups]\n        [--shell shell] [--comment comment] [--home dir] [--no-create-home]\n        [--allow-all-names] [--disabled-password]\n        [--disabled-login] [--add_extra_groups]\n        [--encrypt-home] user\n   Add a normal user\n\nadduser --system\n        [--uid id] [--group] [--ingroup group] [--gid id]\n        [--shell shell] [--comment comment] [--home dir] [--no-create-home]\n        [--conf file] [--quiet] [--debug] user\n   Add a system user\n\nadduser --group\n        [--gid ID] [--conf FILE] [--quiet] [--debug] group\naddgroup\n        [--gid ID] [--conf FILE] [--quiet] [--debug] group\n   Add a user group\n\nadduser USER GROUP\n   Add an existing user to an existing group\n';
+    if (g.err) { ctx.err('adduser: ' + g.err + '\n'); return 1; }
+    if (g.opts.h) { ctx.out(usage); return 0; }
+    if (g.opts.version) { ctx.out('adduser version 3.152\n'); return 0; }
+    const m = ctx.machine; const o = g.opts; const info = (s) => { if (!o.q) ctx.out('info: ' + s + '\n'); };
+    if (!ctx.isRoot) { ctx.err('adduser: Only root may add a user or group to the system.\n'); return 1; }
+    if (!g.rest.length || g.rest.length > 2) { ctx.err('fatal: Only one or two names allowed.\n'); return 1; }
+    if (g.rest.length === 2) {
+      const [uname, gname] = g.rest;
+      if (!m.userByName(uname)) { ctx.err("fatal: The user `" + uname + "' does not exist.\n"); return 1; }
+      const group = m.groupByName(gname);
+      if (!group) { ctx.err("fatal: The group `" + gname + "' does not exist.\n"); return 1; }
+      if (group.members.includes(uname)) { ctx.out('The user `' + uname + "' is already a member of `" + gname + "'.\n"); return 0; }
+      info("Adding user `" + uname + "' to group `" + gname + "' ...");
+      group.members.push(uname);
+      return 0;
+    }
+    const name = g.rest[0];
+    if (o.group && !o.system) {
+      if (m.groupByName(name)) { ctx.err("fatal: The group `" + name + "' already exists.\n"); return 1; }
+      const gid = o.gid != null ? parseInt(o.gid, 10) : nextGid(m);
+      info("Adding group `" + name + "' (GID " + gid + ") ...");
+      m.groups.push({ name, gid, members: [] });
+      authLog(ctx, 'groupadd', 'new group: name=' + name + ', GID=' + gid);
+      info('Done.');
+      return 0;
+    }
+    if (!o['allow-bad-names'] && !NAME_RE.test(name)) {
+      ctx.err("fatal: Please enter a username matching the regular expression configured\nvia the NAME_REGEX configuration variable.  Use the `--allow-bad-names'\noption to relax this check or reconfigure NAME_REGEX in configuration.\n");
+      return 1;
+    }
+    if (m.userByName(name)) { ctx.err("fatal: The user `" + name + "' already exists.\n"); return 1; }
+    if (m.groupByName(name) && !o.ingroup && !o.gid) { ctx.err("fatal: The group `" + name + "' already exists and is not a system group. Exiting.\n"); return 1; }
+    const sys = !!o.system;
+    info("Adding " + (sys ? 'system ' : '') + "user `" + name + "' ...");
+    const uid = o.uid != null ? parseInt(o.uid, 10) : sys ? systemId(m, new Set(m.users.map((u) => u.uid))) : nextUid(m);
+    if (m.userByUid(uid)) { ctx.err("fatal: The UID " + uid + ' is already in use.\n'); return 1; }
+    if (o.uid == null) info('Selecting UID/GID from range ' + (sys ? '100 to 999' : LOGIN_UID_MIN + ' to ' + LOGIN_UID_MAX) + ' ...');
+    let group;
+    if (o.ingroup) {
+      group = m.groupByName(o.ingroup);
+      if (!group) { ctx.err("fatal: The group `" + o.ingroup + "' does not exist.\n"); return 1; }
+    } else {
+      const gid = o.gid != null ? parseInt(o.gid, 10) : (m.groupByGid(uid) ? nextGid(m) : uid);
+      group = m.groupByGid(gid);
+      if (!group) { group = { name, gid, members: [] }; info("Adding new group `" + name + "' (" + gid + ') ...'); m.groups.push(group); authLog(ctx, 'groupadd', 'new group: name=' + name + ', GID=' + gid); }
+    }
+    const home = o.home || '/home/' + name;
+    const gecos = typeof (o.gecos || o.comment) === 'string' ? (o.gecos || o.comment) : '';
+    const user = m.addUser({ name, uid, gid: group.gid, gecos, home, shell: o.shell || (sys ? '/usr/sbin/nologin' : '/bin/bash') });
+    info("Adding new user `" + name + "' (" + uid + ") with group `" + group.name + ' (' + group.gid + ")' ...");
+    if (!o['no-create-home'] && !(sys && o.home == null)) {
+      info("Creating home directory `" + home + "' ...");
+      info("Copying files from `/etc/skel' ...");
+      ctx.vfs.seedDir(home, { mode: 0o700, uid, gid: group.gid, mtime: K.clock.now() });
+      if (!sys && ctx.vfs.exists('/etc/skel')) copyTree(ctx.vfs, '/etc/skel', home, uid, group.gid);
+    } else user.home = sys ? '/nonexistent' : home;
+    authLog(ctx, 'useradd', 'new user: name=' + name + ', UID=' + uid + ', GID=' + group.gid + ', home=' + user.home + ', shell=' + user.shell + ', from=/dev/pts/0');
+    if (o['disabled-password'] || o['disabled-login'] || sys) {
+      if (o['disabled-login'] || sys) m.passwords[name] = null;
+      if (o.gecos == null && o.comment == null && !sys) await askUserInfo(ctx, user);
+      return 0;
+    }
+    for (;;) {
+      const pw = await askNewPassword(ctx, 'passwd', name, true);
+      if (pw != null) { setPassword(ctx, name, pw); ctx.out('passwd: password updated successfully\n'); break; }
+      const again = await ctx.readLine('Try again? [y/N] ');
+      if (!again || !/^y/i.test(again)) { ctx.err("fatal: `/usr/bin/passwd " + name + "' returned error code 10. Exiting.\n"); return 1; }
+    }
+    if (o.gecos == null && o.comment == null) await askUserInfo(ctx, user);
+    return 0;
+  }
+
+  async function askUserInfo(ctx, user) {
+    ctx.out('Changing the user information for ' + user.name + '\nEnter the new value, or press ENTER for the default\n');
+    const fields = [];
+    for (const f of ['Full Name', 'Room Number', 'Work Phone', 'Home Phone', 'Other']) {
+      const v = await ctx.readLine('\t' + f + ' []: ');
+      fields.push(v == null ? '' : v);
+    }
+    const ok = await ctx.readLine('Is the information correct? [Y/n] ');
+    if (ok == null || /^(|y|yes)$/i.test(ok.trim())) user.gecos = fields.join(',');
+  }
+
+  /* ---- getent ---- */
+
+  function passwdLine(u) { return [u.name, 'x', u.uid, u.gid, u.gecos, u.home, u.shell].join(':'); }
+  function groupLine(gr) { return [gr.name, 'x', gr.gid, gr.members.join(',')].join(':'); }
+
+  /** Entries of /etc/services or /etc/protocols as {name, num, proto, aliases}. */
+  function parseDb(text, kind) {
+    const out = [];
+    for (const raw of text.split('\n')) {
+      const line = raw.replace(/#.*/, '').trim();
+      if (!line) continue;
+      const f = line.split(/\s+/);
+      if (kind === 'services') { const [port, proto] = f[1].split('/'); out.push({ name: f[0], port: parseInt(port, 10), proto, aliases: f.slice(2) }); }
+      else out.push({ name: f[0], num: parseInt(f[1], 10), aliases: f.slice(2) });
+    }
+    return out;
+  }
+
+  function getentMain(ctx) {
+    const hint = "Try `getent --help' or `getent --usage' for more information.\n";
+    const args = ctx.args.slice();
+    if (args[0] === '--help' || args[0] === '-?') { ctx.out('Usage: getent [OPTION...] database [key ...]\nGet entries from administrative database.\n\n  -s, --service=CONFIG       Service configuration to be used\n  -i, --no-idn               Disable IDN encoding\n  -?, --help                 Give this help list\n      --usage                Give a short usage message\n  -V, --version              Print program version\n'); return 0; }
+    for (const a of args) if (a.startsWith('--') && !['--service', '--no-idn', '--help', '--usage', '--version'].some((o) => a.startsWith(o))) { ctx.err("getent: unrecognized option '" + a + "'\n" + hint); return 64; }
+    const pos = args.filter((a) => !a.startsWith('-'));
+    if (!pos.length) { ctx.err('getent: wrong number of arguments\n' + hint); return 1; }
+    const db = pos[0]; const keys = pos.slice(1); const m = ctx.machine;
+    const pad = (s, n) => U.padEnd(s, n);
+    const lookups = {
+      passwd: { all: () => m.users.map(passwdLine), find: (k) => { const u = m.userByName(k) || (/^\d+$/.test(k) ? m.userByUid(parseInt(k, 10)) : null); return u ? [passwdLine(u)] : []; } },
+      group: { all: () => m.groups.map(groupLine), find: (k) => { const x = m.groupByName(k) || (/^\d+$/.test(k) ? m.groupByGid(parseInt(k, 10)) : null); return x ? [groupLine(x)] : []; } },
+      shadow: { all: () => (ctx.isRoot ? ctx.fs.read('/etc/shadow').split('\n').filter(Boolean) : []), find: (k) => (ctx.isRoot ? ctx.fs.read('/etc/shadow').split('\n').filter((l) => l.startsWith(k + ':')) : []) },
+      hosts: {
+        all: () => ctx.fs.read('/etc/hosts').split('\n').filter((l) => l && l[0] !== '#' && /^[0-9]/.test(l)).map((l) => { const f = l.split(/\s+/); return pad(f[0], 15) + ' ' + f.slice(1).join(' '); }),
+        find: (k) => {
+          const file = ctx.fs.read('/etc/hosts').split('\n').map((l) => l.replace(/#.*/, '').trim().split(/\s+/)).filter((f) => f.length > 1 && (f[0] === k || f.slice(1).includes(k)));
+          if (file.length) return [pad(file[0][0], 15) + ' ' + file[0].slice(1).join(' ')];
+          if (U.isIPv4(k)) { const n = K.net.reverse(m, k); return n ? [pad(k, 15) + ' ' + n] : []; }
+          const r = K.net.resolve(m, k);
+          return r ? [pad(r.ip, 15) + ' ' + (r.name || k)] : [];
+        },
+      },
+      services: {
+        all: () => parseDb(ctx.fs.read('/etc/services'), 'services').map(svcLine),
+        find: (k) => { const [a, b] = k.split('/'); return parseDb(ctx.fs.read('/etc/services'), 'services').filter((s) => (b ? (s.name === a || String(s.port) === a) && s.proto === b : s.name === k || s.aliases.includes(k) || String(s.port) === k)).slice(0, 1).map(svcLine); },
+      },
+      protocols: {
+        all: () => parseDb(ctx.fs.read('/etc/protocols'), 'protocols').map(protoLine),
+        find: (k) => parseDb(ctx.fs.read('/etc/protocols'), 'protocols').filter((p) => p.name === k || String(p.num) === k || p.aliases.includes(k)).map(protoLine),
+      },
+    };
+    function svcLine(s) { return pad(s.name, 21) + ' ' + s.port + '/' + s.proto + (s.aliases.length ? ' ' + s.aliases.join(' ') : ''); }
+    function protoLine(p) { return pad(p.name, 21) + ' ' + p.num + (p.aliases.length ? ' ' + p.aliases.join(' ') : ''); }
+    const impl = lookups[db];
+    if (!impl) { ctx.err('Unknown database: ' + db + '\n' + hint); return 1; }
+    if (!keys.length) { const all = impl.all(); ctx.out(all.length ? all.join('\n') + '\n' : ''); return 0; }
+    let status = 0;
+    for (const k of keys) { const found = impl.find(k); if (!found.length) status = 2; else ctx.out(found.join('\n') + '\n'); }
+    return status;
+  }
+
+  const reg = (def) => K.cmd.register(def);
+  reg({ name: 'useradd', pkg: 'passwd', path: '/usr/sbin/useradd', section: 8, summary: 'create a new user or update default new user information', synopsis: 'useradd [options] LOGIN',
+    man: 'DESCRIPTION\n       useradd creates a new user account using the values given on the command line plus the defaults of the system. Needs root.\n\nOPTIONS\n       -m, --create-home   create the home directory from /etc/skel\n       -s, --shell SHELL   login shell\n       -G, --groups GROUPS supplementary groups\n       -g, --gid GROUP     primary group\n       -u, --uid UID       numeric user ID\n       -c, --comment TEXT  GECOS field\n       -d, --home-dir DIR  home directory\n\nEXAMPLES\n       sudo useradd -m -s /bin/bash -G sudo analyst',
+    run: async (ctx) => useraddMain(ctx) });
+  reg({ name: 'usermod', pkg: 'passwd', path: '/usr/sbin/usermod', section: 8, summary: 'modify a user account', synopsis: 'usermod [options] LOGIN',
+    man: 'DESCRIPTION\n       usermod modifies the system account files to reflect the changes that are specified on the command line. Needs root.\n\nOPTIONS\n       -a -G GROUPS   append the user to supplementary groups\n       -G GROUPS      set the supplementary groups\n       -s SHELL       new login shell\n       -L, -U         lock or unlock the password\n       -l NEW_LOGIN   rename the account\n\nEXAMPLES\n       sudo usermod -aG wireshark kali',
+    run: async (ctx) => usermodMain(ctx) });
+  reg({ name: 'userdel', pkg: 'passwd', path: '/usr/sbin/userdel', section: 8, summary: 'delete a user account and related files', synopsis: 'userdel [options] LOGIN',
+    man: 'DESCRIPTION\n       userdel modifies the system account files, deleting all entries that refer to the user name LOGIN. Needs root.\n\nOPTIONS\n       -r, --remove   remove the home directory and mail spool\n       -f, --force    force removal\n\nEXAMPLES\n       sudo userdel -r analyst',
+    run: async (ctx) => userdelMain(ctx) });
+  reg({ name: 'groupadd', pkg: 'passwd', path: '/usr/sbin/groupadd', section: 8, summary: 'create a new group', synopsis: 'groupadd [options] GROUP',
+    man: 'DESCRIPTION\n       groupadd creates a new group account. Needs root.\n\nOPTIONS\n       -g, --gid GID   numeric group ID\n       -r, --system    create a system group\n       -f, --force     succeed if the group already exists\n\nEXAMPLES\n       sudo groupadd pentest',
+    run: async (ctx) => groupaddMain(ctx) });
+  reg({ name: 'groupdel', pkg: 'passwd', path: '/usr/sbin/groupdel', section: 8, summary: 'delete a group', synopsis: 'groupdel [options] GROUP',
+    man: 'DESCRIPTION\n       groupdel modifies the system account files, deleting all entries that refer to GROUP. Needs root.\n\nEXAMPLES\n       sudo groupdel pentest',
+    run: async (ctx) => groupdelMain(ctx) });
+  reg({ name: 'passwd', pkg: 'passwd', section: 1, mode: 0o4755, summary: 'change user password', synopsis: 'passwd [options] [LOGIN]',
+    man: 'DESCRIPTION\n       The passwd command changes passwords for user accounts. A normal user can only change the password of their own account and must give the current one; root can change any account.\n\nOPTIONS\n       -l, --lock     lock the password (root)\n       -u, --unlock   unlock the password (root)\n       -S, --status   report password status\n\nEXAMPLES\n       passwd\n       sudo passwd analyst',
+    run: passwdMain });
+  reg({ name: 'chsh', pkg: 'passwd', section: 1, mode: 0o4755, summary: 'change login shell', synopsis: 'chsh [options] [LOGIN]',
+    man: 'DESCRIPTION\n       chsh changes the user login shell, which must be listed in /etc/shells unless run by root.\n\nOPTIONS\n       -s, --shell SHELL   specify the login shell\n       -l, --list-shells   print the list of shells\n\nEXAMPLES\n       chsh -s /bin/bash',
+    run: chshMain });
+  reg({ name: 'adduser', aliases: ['addgroup'], pkg: 'adduser', path: '/usr/sbin/adduser', section: 8, summary: 'add a user or group to the system', synopsis: 'adduser [options] user',
+    man: 'DESCRIPTION\n       adduser and addgroup add users and groups to the system according to command line options and configuration information. The interactive flow asks for a password and the GECOS fields.\n\nOPTIONS\n       --disabled-password   do not set a password\n       --gecos TEXT          GECOS field, no questions asked\n       --ingroup GROUP       primary group\n       --system              create a system user\n       adduser USER GROUP    add an existing user to a group\n\nEXAMPLES\n       sudo adduser analyst\n       sudo adduser analyst sudo',
+    run: adduserMain });
+  reg({ name: 'getent', pkg: 'libc-bin', path: '/usr/bin/getent', section: 1, summary: 'get entries from Name Service Switch libraries', synopsis: 'getent [option]... database key...',
+    man: 'DESCRIPTION\n       The getent command displays entries from databases supported by the Name Service Switch libraries.\n\nDATABASES\n       passwd, group, shadow, hosts, services, protocols\n\nEXAMPLES\n       getent passwd kali\n       getent hosts web01.halcyon.lab\n       getent services ssh',
+    run: async (ctx) => getentMain(ctx) });
+
 })(typeof globalThis !== 'undefined' ? globalThis : this);
