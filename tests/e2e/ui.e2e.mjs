@@ -44,6 +44,8 @@ async function ready(page) {
   if (withLessons) await page.evaluate(installLessons);
 }
 const closeDialogs = (page) => page.evaluate(() => { for (const d of document.querySelectorAll('dialog[open]')) d.close(); });
+/** A dialog is removed from the page once its (asynchronous) close event has been handled. */
+const dialogGone = (page) => page.waitForFunction(() => !document.querySelector('dialog'));
 const termFocused = (page) => page.evaluate(() => document.activeElement === K.app.term.ta);
 async function open(browser, o = {}) {
   const context = o.context || await browser.newContext({ viewport: o.viewport || { width: 1280, height: 800 }, hasTouch: !!o.touch, isMobile: !!o.touch });
@@ -129,6 +131,16 @@ function installFixtures() {
         });
       },
     },
+    {
+      // traffic through the simulated network, as ping and a port scanner would cause
+      name: 'fx-probe',
+      run(ctx) {
+        for (const ip of ctx.args) ctx.println(ip + ' ' + ctx.net.ping(ctx.machine, ip, 1).status + ' ' + ctx.net.tcp(ctx.machine, ip, 80).state);
+        return 0;
+      },
+    },
+    { name: 'fx-nap', async run(ctx) { await ctx.sleep(30000); ctx.println('napped'); return 0; } },
+    { name: 'fx-power', run(ctx) { ctx.println('going down'); K.events.emit('power', { action: ctx.args[0] || 'reboot' }); return 0; } },
     { name: 'fxa-one', run() { return 0; } },
     { name: 'fxb-alpha', run() { return 0; } },
     { name: 'fxb-alpine', run() { return 0; } },
@@ -176,7 +188,7 @@ group(WELCOME, async ({ page }) => {
   await page.keyboard.type('blocked');
   assert.doesNotMatch(await text(page), /blocked/, 'the terminal does not take keys while the dialog is open');
   await dlg.getByRole('button', { name: 'Start' }).click();
-  await dlg.waitFor({ state: 'detached' });
+  await dialogGone(page);
   assert.equal(await termFocused(page), true, 'closing the welcome puts the keyboard in the terminal');
   await page.reload();
   await ready(page);
@@ -643,6 +655,161 @@ group('lessons: steps, hint, solution, question, quiz and completion', async ({ 
   assert.equal(await page.locator('.k-lesson-row.is-done').count(), 1);
   assert.match(await page.locator('.k-lesson-row.is-done').innerText(), /First commands[^]*Completed/);
   await run(page, 'cd');
+});
+
+/* ---- the rest of the app ---- */
+const tabLabels = (page) => page.locator('.k-termtab').allInnerTexts().then((a) => a.map((t) => t.replace(/\s+/g, ' ').trim()));
+const settings = async (page) => { await page.getByRole('button', { name: 'Settings' }).click(); return page.locator('dialog[open]'); };
+
+group('terminal tabs: up to four shells on the same machine', async ({ page }) => {
+  await run(page, 'export FX_TAB=one');
+  assert.deepEqual(await tabLabels(page), ['1 kali@kali: ~']);
+  assert.equal(await page.locator('.k-termtab-x').count(), 0, 'a single tab cannot be closed');
+  const add = page.getByRole('button', { name: 'New terminal tab' });
+  await add.click();
+  await waitText(page, /^┌──\(kali㉿kali\)-\[~\]\n└─\$ $/);
+  assert.equal(await termFocused(page), true, 'the new tab has the keyboard');
+  assert.equal(await page.locator('.k-term-stack .kt').count(), 2, 'each tab has its own terminal widget');
+  await run(page, 'echo "tab=[$FX_TAB]"; cd /tmp; echo from-two > /tmp/fx-shared.txt');
+  assert.match(await text(page), /tab=\[\]\n/, 'the second tab is a new shell');
+  assert.deepEqual(await tabLabels(page), ['1 kali@kali: ~', '2 kali@kali: /tmp']);
+
+  await page.getByRole('tab', { name: /1 kali@kali: ~/ }).click();
+  assert.equal(await termFocused(page), true);
+  await run(page, 'read line < /tmp/fx-shared.txt; echo "tab=[$FX_TAB] file=[$line]"');
+  assert.match(await text(page), /tab=\[one\] file=\[from-two\]\n/, 'tabs keep their own shell state and share the filesystem');
+  assert.doesNotMatch(await text(page), /fx-shared\.txt; cd/, 'each tab has its own screen');
+
+  await add.click(); await add.click();
+  assert.equal(await page.locator('.k-termtab').count(), 4);
+  assert.equal(await add.isDisabled(), true, 'four tabs at most');
+  await page.getByRole('button', { name: 'Close terminal 3' }).click();
+  assert.equal(await page.locator('.k-termtab').count(), 3);
+  assert.equal(await termFocused(page), true);
+  await waitMode(page, 'read');
+  await page.keyboard.type('exit');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => K.app.tabs.length === 2);      // exit closes the tab it was typed in
+  await page.getByRole('button', { name: 'Close terminal 2' }).click();
+  assert.deepEqual(await tabLabels(page), ['1 kali@kali: ~']);
+  assert.equal(await page.locator('.k-term-stack .kt').count(), 1);
+  assert.equal(await page.evaluate(() => K.kali.procs.filter((p) => /zsh$/.test(p.cmd)).length), 1, 'closed tabs leave no shell process behind');
+  await run(page, 'echo "back in [$FX_TAB]"');
+  assert.match(await text(page), /back in \[one\]\n/);
+});
+
+group('lab panel: engagement, scope, address and discovered hosts', async ({ page }) => {
+  const lab = page.locator('#k-panel-lab');
+  if (await lab.isHidden()) await page.getByRole('button', { name: 'Lab panel' }).click();
+  let words = await lab.innerText();
+  assert.match(words, /ENGAGEMENT HF-LAB-2026-11/i);
+  assert.match(words, /Halcyon Freight internal network assessment/);
+  assert.match(words, /In scope\s+10\.10\.10\.0\/24\s+\*\.halcyon\.lab/);
+  assert.match(words, /Address\s+10\.10\.10\.5\/24 on eth0/);
+  assert.match(words, /Gateway\s+10\.10\.10\.1\s+DNS\s+10\.10\.10\.53/);
+  assert.match(words, /Discovered hosts\s+0\s+Nothing yet/);
+  assert.equal(await termFocused(page), true, 'opening the panel does not take the keyboard');
+
+  // web01 answers; .99 does not exist; dc01 drops pings and has no web server; 8.8.8.8 is not a lab host
+  await run(page, 'fx-probe 10.10.10.10 10.10.10.99 10.10.10.50 8.8.8.8');
+  await page.locator('.k-node:not(.is-self)').first().waitFor();
+  words = await lab.locator('.k-hosts').innerText();
+  assert.match(words, /Discovered hosts\s+1\b/);
+  assert.match(words, /10\.10\.10\.5\s*kali \(you\)\s+10\.10\.10\.10\s*web01\.halcyon\.lab\s+80 http/);
+  assert.doesNotMatch(words, /8\.8\.8\.8|10\.10\.10\.99|10\.10\.10\.50/);
+  await run(page, 'fx-probe 10.10.10.1');
+  await page.waitForFunction(() => document.querySelectorAll('.k-node:not(.is-self)').length === 2);
+  assert.match(await lab.locator('.k-hosts').innerText(), /10\.10\.10\.1\s*gw\.halcyon\.lab\s+80 http\s+10\.10\.10\.10/, 'hosts are listed in address order');
+});
+
+group('settings: time speed, font size, restart and the power event', async ({ page }) => {
+  let dlg = await settings(page);
+  await dlg.getByRole('radio', { name: 'Instant' }).check();
+  assert.equal(await page.evaluate(() => K.settings.timeScale), 0);
+  await dlg.getByRole('radio', { name: 'Fast' }).check();
+  assert.equal(await page.evaluate(() => K.settings.timeScale), 0.2);
+  assert.match(await dlg.innerText(), /five times shorter/);
+  await dlg.getByRole('radio', { name: 'Instant' }).check();
+  const before = await page.evaluate(() => ({ fs: getComputedStyle(K.app.term.el).getPropertyValue('--kt-fs'), cols: K.app.term.cols }));
+  await dlg.getByRole('button', { name: 'Larger text' }).click();
+  await dlg.getByRole('button', { name: 'Larger text' }).click();
+  await page.waitForFunction((c) => K.app.term.cols < c, before.cols);
+  assert.equal(await page.evaluate(() => getComputedStyle(K.app.term.el).getPropertyValue('--kt-fs')), parseInt(before.fs, 10) + 2 + 'px');
+  assert.match(await dlg.innerText(), new RegExp((parseInt(before.fs, 10) + 2) + ' px'));
+  await dlg.getByRole('button', { name: 'Smaller text' }).click();
+  await dlg.getByRole('button', { name: 'Close' }).click();
+  await dialogGone(page);
+  assert.equal(await termFocused(page), true, 'closing settings returns the keyboard to the terminal');
+
+  const t0 = Date.now();
+  await run(page, 'fx-nap');                                    // sleeps 30 simulated seconds
+  assert.match(await text(page), /napped\n/);
+  assert.ok(Date.now() - t0 < 2000, 'instant time speed does not wait');
+
+  // restart keeps the home directory and resets the rest of the machine
+  await run(page, 'echo kept > ~/fx-keep.txt; echo lost > /tmp/fx-lost.txt; export FX_OLD=1');
+  dlg = await settings(page);
+  await dlg.getByRole('button', { name: 'Restart simulator' }).click();
+  await page.waitForFunction(() => K.app.booted && K.app.term && K.app.term.mode === 'read' && !K.app.term.text().includes('fx-keep'));
+  await page.evaluate(installFixtures);
+  assert.match(await page.locator('.k-toast').innerText(), /restarted/);
+  assert.equal(await termFocused(page), true);
+  await run(page, 'read kept < ~/fx-keep.txt; [ -e /tmp/fx-lost.txt ] || lost=gone; echo "kept=$kept lost=$lost old=[$FX_OLD]"');
+  assert.match(await text(page), /kept=kept lost=gone old=\[\]\n/);
+
+  // reboot, poweroff and reset all arrive as a 'power' event
+  await run(page, 'echo again > ~/fx-again.txt');
+  await page.keyboard.type('fx-power poweroff');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => K.app.booted && K.app.term && K.app.term.mode === 'read' && !K.app.term.text().includes('going down'));
+  await page.evaluate(installFixtures);
+  await run(page, 'read again < ~/fx-again.txt; echo "again=$again"');
+  assert.match(await text(page), /again=again\n/);
+  assert.equal(await page.locator('.k-term-stack .kt').count(), 1);
+});
+
+group('persistence: state survives a reload', async ({ page }) => {
+  await panel(page).getByRole('button', { name: /Second lesson/ }).first().click();
+  await run(page, 'echo remember-me');
+  await page.getByRole('button', { name: 'Lesson panel' }).click();        // collapse the lesson panel
+  assert.equal(await panel(page).isHidden(), true);
+  await page.getByRole('button', { name: 'Lesson panel' }).click();
+  const saved = await page.evaluate(() => ({ fs: K.app.settings.fontSize, hosts: document.querySelectorAll('.k-node:not(.is-self)').length }));
+  assert.equal(saved.hosts, 2);
+
+  await page.reload();
+  await ready(page);
+  assert.equal(await page.locator('dialog[open]').count(), 0);
+  assert.equal(await page.locator('.k-doc h2').innerText(), 'Second lesson', 'the open lesson is restored');
+  assert.deepEqual(await page.evaluate(() => [K.lessons.progress.isDone('fx-first'), K.lessons.progress.of('fx-first').quiz[1], K.settings.timeScale, K.app.settings.fontSize]),
+    [true, true, 0, saved.fs], 'lesson progress and settings are restored');
+  assert.match(await page.locator('.k-top-progress').innerText(), /1 of 3 lessons/);
+  assert.equal(await page.locator('.k-node:not(.is-self)').count(), 2, 'the lab map is restored');
+  await run(page, 'read kept < ~/fx-keep.txt; echo "kept=$kept"');
+  assert.match(await text(page), /kept=kept\n/, 'the home directory is restored');
+  await page.keyboard.press('ArrowUp'); await page.keyboard.press('ArrowUp');
+  assert.equal(await typed(page), 'echo remember-me', 'shell history is restored with the home directory');
+  await page.keyboard.press('Control+u');
+});
+
+group('settings: erase saved progress', async ({ page }) => {
+  const dlg = await settings(page);
+  await dlg.getByRole('button', { name: 'Erase saved progress' }).click();
+  assert.match(await dlg.innerText(), /Erase lesson progress, the files in your simulated home directory and the lab map/);
+  await dlg.getByRole('button', { name: 'Cancel' }).click();
+  assert.equal(await page.evaluate(() => K.lessons.progress.isDone('fx-first')), true, 'cancel keeps everything');
+  await dlg.getByRole('button', { name: 'Erase saved progress' }).click();
+  await dlg.getByRole('button', { name: 'Erase', exact: true }).click();
+  await page.waitForFunction(() => K.app.booted && K.app.term && K.app.term.mode === 'read' && !K.lessons.progress.isDone('fx-first'));
+  await page.evaluate(installFixtures);
+  assert.match(await panel(page).innerText(), /Lessons\s+0 of 3 complete/);
+  assert.equal(await page.locator('.k-node:not(.is-self)').count(), 0);
+  await run(page, '[ -e ~/fx-keep.txt ] || echo home-is-fresh');
+  assert.match(await text(page), /home-is-fresh\n/);
+  await page.reload();
+  await ready(page);
+  assert.equal(await page.locator('dialog[open]').count(), 0, 'erasing does not bring the welcome back');
+  assert.deepEqual(await page.evaluate(() => [K.lessons.progress.summary().done, K.settings.timeScale]), [0, 0], 'progress is gone, preferences stay');
 });
 
 /* ------------------------------------------------------------------- runner */
