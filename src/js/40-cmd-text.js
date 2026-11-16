@@ -809,5 +809,547 @@
     },
   });
 
+  /* ============================================================ shared helpers */
+  /** `alias` map for K.getopt from [short, long] pairs, so both spellings share one slot. */
+  const aliasOf = (pairs) => Object.fromEntries(pairs.map(([s, l]) => [l, s]));
+  const sumBytes = (s) => U.byteLen(s);
+  const isRegular = (st) => st.isFile;
+
+  /** Parse a numeric option such as `-n 5`; reports the GNU message and returns null when malformed. */
+  function numberOption(ctx, value, what, status) {
+    const n = parseCount(value);
+    if (n == null) { ctx.err(ctx.name + ': ' + value + ': ' + what + '\n'); return null; }
+    return n;
+  }
+
+  /* ===================================================================== wc */
+  const wcWords = (text) => (text.match(/[^ \t\n\r\f\v\u0085\u00a0\u2000-\u200a\u2028\u2029\u3000]+/g) || []).length;
+  function wcMaxLine(text) {
+    let max = 0;
+    for (const line of text.split('\n')) {
+      let w = 0;
+      for (const ch of line) w = ch === '\t' ? w + 8 - (w % 8) : ch === '\r' || ch === '\f' ? w : w + 1;
+      if (w > max) max = w;
+    }
+    return max;
+  }
+  function wcCounts(text) {
+    let lines = 0;
+    for (let i = text.indexOf('\n'); i >= 0; i = text.indexOf('\n', i + 1)) lines++;
+    return { lines, words: wcWords(text), chars: Array.from(text).length, bytes: U.byteLen(text), maxlen: wcMaxLine(text) };
+  }
+
+  define({
+    name: 'wc', pkg: 'coreutils', summary: 'print newline, word, and byte counts for each file',
+    usage: ['[OPTION]... [FILE]...', '[OPTION]... --files0-from=F'],
+    desc: 'Print newline, word, and byte counts for each FILE, and a total line if more than one FILE is specified. A word is a non-zero-length sequence of printable characters delimited by white space.\nWith no FILE, or when FILE is -, read standard input.',
+    opts: [
+      ['-c, --bytes', 'print the byte counts'], ['-m, --chars', 'print the character counts'], ['-l, --lines', 'print the newline counts'],
+      ['    --files0-from=F', 'read input from the files specified by NUL-terminated names in file F;\nIf F is - then read names from standard input'],
+      ['-L, --max-line-length', 'print the maximum display width'], ['-w, --words', 'print the word counts'],
+      ['    --total=WHEN', 'when to print a line with total counts;\nWHEN can be: auto, always, only, never'],
+    ],
+    notes: 'The counts are always printed in this order: newline, word, character, byte, maximum line length.',
+    examples: [['wc -l /etc/passwd', 'Count the accounts defined on this system.'], ['grep -c . notes.txt && wc -w notes.txt', 'Compare non-empty lines with the word count.']],
+    version: coreutils('Paul Rubin, David MacKenzie, Michael Meskes, and Bruno Haible'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'cmlLw', long: ['bytes', 'chars', 'lines', 'max-line-length', 'words', 'total=', 'files0-from='],
+        alias: aliasOf([['c', 'bytes'], ['m', 'chars'], ['l', 'lines'], ['L', 'max-line-length'], ['w', 'words']]) });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      const total = o.total || 'auto';
+      if (!['auto', 'always', 'only', 'never'].includes(total)) {
+        return usageError(ctx, "invalid argument " + q(total) + " for '--total'\nValid arguments are:\n  - " + q('auto') + '\n  - ' + q('always') + '\n  - ' + q('only') + '\n  - ' + q('never'));
+      }
+      let files = g.rest;
+      if (o['files0-from'] != null) {
+        if (files.length) return usageError(ctx, 'extra operand ' + q(files[0]) + '\nfile operands cannot be combined with --files0-from');
+        try { files = (await readOperand(ctx, o['files0-from'])).split('\0').filter((x, i, a) => x !== '' || i < a.length - 1); }
+        catch (e) { if (!isFsError(e)) throw e; ctx.err(ctx.name + ': cannot open ' + q(o['files0-from']) + ' for reading: ' + e.message + '\n'); return 1; }
+      }
+      let cols = ['lines', 'words', 'chars', 'bytes', 'maxlen'].filter((c) => ({ lines: o.l, words: o.w, chars: o.m, bytes: o.c, maxlen: o.L })[c]);
+      if (!cols.length) cols = ['lines', 'words', 'bytes'];
+      const operands = files.length ? files : ['-'];
+
+      // GNU sizes the number columns from the file sizes; non-regular input forces width 7
+      let width = 1; let regular = 0;
+      for (const f of operands) {
+        if (f === '-') { width = 7; break; }
+        let st;
+        try { st = ctx.fs.stat(f); } catch (e) { if (!isFsError(e)) throw e; continue; }
+        if (!isRegular(st)) { width = 7; break; }
+        regular += st.size;
+      }
+      if (width === 1) width = String(regular).length;
+      if (cols.length === 1 && operands.length === 1 && total !== 'always' && total !== 'only') width = 1;
+
+      const line = (c, label) => cols.map((k) => String(c[k]).padStart(width)).join(' ') + (label != null ? ' ' + label : '') + '\n';
+      const sum = { lines: 0, words: 0, chars: 0, bytes: 0, maxlen: 0 };
+      let status = 0; let ok = 0;
+      for (const f of operands) {
+        let text;
+        try {
+          if (f !== '-' && ctx.fs.stat(f).isDir) {
+            ctx.err(ctx.name + ': ' + f + ': Is a directory\n');
+            text = '';
+            if (total !== 'only') ctx.out(line(wcCounts(text), f));
+            status = 1; ok++; continue;
+          }
+          text = await readOperand(ctx, f);
+        } catch (e) { if (!isFsError(e)) throw e; ctx.err(ctx.name + ': ' + f + ': ' + e.message + '\n'); status = 1; continue; }
+        const c = wcCounts(text); ok++;
+        for (const k of ['lines', 'words', 'chars', 'bytes']) sum[k] += c[k];
+        sum.maxlen = Math.max(sum.maxlen, c.maxlen);
+        if (total !== 'only') ctx.out(line(c, f === '-' && !files.length ? null : f));
+      }
+      if (total === 'always' || total === 'only' || (total === 'auto' && operands.length > 1)) ctx.out(line(sum, total === 'only' ? null : 'total'));
+      return status;
+    },
+  });
+
+  /* ==================================================================== uniq */
+  define({
+    name: 'uniq', pkg: 'coreutils', summary: 'report or omit repeated lines',
+    usage: ['[OPTION]... [INPUT [OUTPUT]]'],
+    desc: 'Filter adjacent matching lines from INPUT (or standard input), writing to OUTPUT (or standard output).\nWith no options, matching lines are merged to the first occurrence. Only adjacent lines are compared, so sort the input first.',
+    opts: [
+      ['-c, --count', 'prefix lines by the number of occurrences'], ['-d, --repeated', 'only print duplicate lines, one for each group'],
+      ['-D', 'print all duplicate lines'], ['-f, --skip-fields=N', 'avoid comparing the first N fields'],
+      ['-i, --ignore-case', 'ignore differences in case when comparing'], ['-s, --skip-chars=N', 'avoid comparing the first N characters'],
+      ['-u, --unique', 'only print unique lines'], ['-w, --check-chars=N', 'compare no more than N characters in lines'],
+      ['-z, --zero-terminated', 'line delimiter is NUL, not newline'],
+    ],
+    notes: 'A field is a run of blanks (usually spaces and/or TABs), then non-blank characters. Fields are skipped before chars.',
+    examples: [["sort access.log | uniq -c | sort -rn | head", 'Rank the most repeated lines.'], ['sort names.txt | uniq -d', 'Show only the names that occur more than once.']],
+    version: coreutils('Richard M. Stallman and David MacKenzie'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'cdDf:is:uw:z', long: ['count', 'repeated', 'all-repeated=?', 'group=?', 'skip-fields=', 'ignore-case', 'skip-chars=', 'unique', 'check-chars=', 'zero-terminated'],
+        alias: aliasOf([['c', 'count'], ['d', 'repeated'], ['D', 'all-repeated'], ['f', 'skip-fields'], ['i', 'ignore-case'], ['s', 'skip-chars'], ['u', 'unique'], ['w', 'check-chars'], ['z', 'zero-terminated']]) });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      const num = (v, what) => { if (v == null) return 0; const n = parseCount(v); if (n == null) { ctx.err('uniq: ' + v + ': invalid number of ' + what + '\n'); return null; } return n; };
+      const skipFields = num(o.f, 'fields to skip'); if (skipFields == null) return 1;
+      const skipChars = num(o.s, 'bytes to skip'); if (skipChars == null) return 1;
+      const checkChars = o.w == null ? Infinity : num(o.w, 'bytes to compare'); if (checkChars == null) return 1;
+      if (g.rest.length > 2) return usageError(ctx, 'extra operand ' + q(g.rest[2]));
+      if (o.c && o.D) return usageError(ctx, 'printing all duplicated lines and repeat counts is meaningless');
+      let text;
+      try { text = await readOperand(ctx, g.rest[0] || '-'); }
+      catch (e) { if (!isFsError(e)) throw e; ctx.err('uniq: ' + g.rest[0] + ': ' + e.message + '\n'); return 1; }
+      const eol = o.z ? '\0' : '\n';
+      let lines = text.split(eol); if (lines[lines.length - 1] === '') lines.pop();
+      const key = (l) => {
+        let s = l;
+        for (let i = 0; i < skipFields; i++) s = s.replace(/^[ \t]*[^ \t]*/, '');
+        s = Array.from(s).slice(skipChars, skipChars + checkChars).join('');
+        return o.i ? s.toLowerCase() : s;
+      };
+      const groups = [];
+      for (const l of lines) {
+        const k = key(l); const last = groups[groups.length - 1];
+        if (last && last.key === k) last.n++; else groups.push({ key: k, line: l, n: 1, all: [] });
+        groups[groups.length - 1].all.push(l);
+      }
+      let res = '';
+      const method = (opt, valid, what, dflt) => {
+        const v = opt === true ? dflt : opt;
+        if (!valid.includes(v)) { usageError(ctx, 'invalid argument ' + q(v) + ' for ' + q(what) + '\nValid arguments are:' + valid.map((x) => '\n  - ' + q(x)).join('')); return null; }
+        return v;
+      };
+      const groupMethod = o.group != null ? method(o.group, ['separate', 'prepend', 'append', 'both'].sort((a, b) => 'prepend append separate both'.indexOf(a) - 'prepend append separate both'.indexOf(b)), '--group', 'separate') : null;
+      const repeatMethod = o.D != null && o.D !== true ? method(o.D, ['none', 'prepend', 'separate'], '--all-repeated', 'none') : o.D ? 'none' : null;
+      if ((o.group != null && groupMethod == null) || (o.D != null && o.D !== true && repeatMethod == null)) return 1;
+      if (groupMethod && (o.c || o.d || o.D || o.u)) return usageError(ctx, '--group is mutually exclusive with -c/-d/-D/-u');
+      let shown = 0;
+      for (const gr of groups) {
+        if (groupMethod) {
+          if (groupMethod === 'prepend' || (groupMethod === 'both' && !shown) || ((groupMethod === 'separate' || groupMethod === 'both') && shown)) res += eol;
+          for (const l of gr.all) res += l + eol;
+          if (groupMethod === 'append' || (groupMethod === 'both' && gr === groups[groups.length - 1])) res += eol;
+          shown++; continue;
+        }
+        if (o.d && gr.n < 2) continue;
+        if (o.u && gr.n > 1) continue;
+        if (repeatMethod) {
+          if (gr.n < 2) continue;
+          if (repeatMethod === 'prepend' || (repeatMethod === 'separate' && shown)) res += eol;
+          for (const l of gr.all) res += l + eol;
+          shown++; continue;
+        }
+        res += (o.c ? String(gr.n).padStart(7) + ' ' : '') + gr.line + eol;
+      }
+      if (g.rest[1] && g.rest[1] !== '-') {
+        try { ctx.fs.write(g.rest[1], res); } catch (e) { if (!isFsError(e)) throw e; ctx.err('uniq: ' + g.rest[1] + ': ' + e.message + '\n'); return 1; }
+      } else ctx.out(res);
+      return 0;
+    },
+  });
+
+  /* ===================================================================== cut */
+  /** Parse a cut list ("1,3-5,7-") into sorted, merged [from, to] ranges (1-based, to may be Infinity). */
+  function cutRanges(list, isField) {
+    const bad = (what) => ({ err: 'invalid ' + (isField ? 'field' : 'byte or character') + ' ' + what });
+    const ranges = [];
+    for (const part of list.split(/[,\s]/)) {
+      if (part === '-') return { err: 'invalid range with no endpoint: -' };
+      const m = /^(\d*)(-?)(\d*)$/.exec(part);
+      if (!m) {
+        if ((part.match(/-/g) || []).length > 1 && /^[\d-]+$/.test(part)) return bad('range');
+        const at = /^\d*-?/.exec(part)[0];
+        return { err: 'invalid ' + (isField ? 'field' : 'byte/character position') + ' value ' + q(/^\d+-?$/.test(at) || !/^\d/.test(part) ? part.slice(/^\d+-/.test(part) ? at.length : 0) : part) };
+      }
+      const from = m[1] ? parseInt(m[1], 10) : 1; const to = m[2] ? (m[3] ? parseInt(m[3], 10) : Infinity) : from;
+      if (part === '' || (m[1] && from === 0) || (!m[2] && to === 0)) return { err: (isField ? 'fields' : 'byte/character positions') + ' are numbered from 1' };
+      if (from > to) return { err: 'invalid decreasing range' };
+      ranges.push([from, to]);
+    }
+    ranges.sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    for (const r of ranges) { const l = merged[merged.length - 1]; if (l && r[0] <= l[1] + 1) l[1] = Math.max(l[1], r[1]); else merged.push(r.slice()); }
+    return { ranges: merged };
+  }
+  const inRanges = (ranges, n) => ranges.some((r) => n >= r[0] && n <= r[1]);
+
+  define({
+    name: 'cut', pkg: 'coreutils', summary: 'remove sections from each line of files',
+    usage: ['OPTION... [FILE]...'],
+    desc: 'Print selected parts of lines from each FILE to standard output.\nWith no FILE, or when FILE is -, read standard input.\nEach LIST is made up of one range, or many ranges separated by commas. Selected input is written in the same order that it is read, and is written exactly once. Each range is one of: N, N-M, N- (from N to the end of the line) or -M (from the first character to M).',
+    opts: [
+      ['-b, --bytes=LIST', 'select only these bytes'], ['-c, --characters=LIST', 'select only these characters'],
+      ['-d, --delimiter=DELIM', 'use DELIM instead of TAB for field delimiter'], ['-f, --fields=LIST', 'select only these fields; also print any line that contains no delimiter character, unless the -s option is specified'],
+      ['-n', '(ignored)'], ['    --complement', 'complement the set of selected bytes, characters or fields'],
+      ['-s, --only-delimited', 'do not print lines not containing delimiters'], ['    --output-delimiter=STRING', 'use STRING as the output delimiter; the default is to use the input delimiter'],
+      ['-z, --zero-terminated', 'line delimiter is NUL, not newline'],
+    ],
+    examples: [["cut -d: -f1,7 /etc/passwd", 'List each account name with its login shell.'], ['echo "10.10.10.5 eth0" | cut -d" " -f1', 'Keep the first space-separated field.']],
+    version: coreutils('David M. Ihnat, David MacKenzie, and Jim Meyering'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'b:c:d:f:nsz', long: ['bytes=', 'characters=', 'delimiter=', 'fields=', 'complement', 'only-delimited', 'output-delimiter=', 'zero-terminated'],
+        alias: aliasOf([['b', 'bytes'], ['c', 'characters'], ['d', 'delimiter'], ['f', 'fields'], ['s', 'only-delimited'], ['z', 'zero-terminated']]) });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      const modes = ['b', 'c', 'f'].filter((m) => o[m] != null);
+      if (!modes.length) return usageError(ctx, 'you must specify a list of bytes, characters, or fields');
+      if (modes.length > 1) return usageError(ctx, 'only one list may be specified');
+      if (o.c != null) { o.b = o.c; modes[0] = 'b'; }   // GNU cut is not multibyte aware: -c is -b
+      const mode = modes[0];
+      if (o.d != null && mode !== 'f') return usageError(ctx, 'an input delimiter may be specified only when operating on fields');
+      if (o.s && mode !== 'f') return usageError(ctx, 'suppressing non-delimited lines makes sense\n\tonly when operating on fields');
+      if (o.d != null && Array.from(o.d).length > 1) return usageError(ctx, 'the delimiter must be a single character');
+      const parsed = cutRanges(o[mode], mode === 'f');
+      if (parsed.err) return usageError(ctx, parsed.err);
+      const delim = o.d == null ? '\t' : o.d === '' ? '\0' : o.d;
+      const outDelim = o['output-delimiter'] != null ? o['output-delimiter'] : delim;
+      const eol = o.z ? '\0' : '\n';
+      const keep = (n) => inRanges(parsed.ranges, n) !== !!o.complement;
+      const { inputs, failed } = await readInputs(ctx, g.rest);
+      const sink = new Sink(ctx);
+      for (const inp of inputs) {
+        const lines = inp.text.split(eol); if (lines[lines.length - 1] === '') lines.pop();
+        for (const line of lines) {
+          if (mode === 'f') {
+            if (!line.includes(delim)) { if (!o.s) sink.write(line + eol); continue; }
+            sink.write(line.split(delim).filter((_, i) => keep(i + 1)).join(outDelim) + eol);
+          } else {
+            const bytes = U.toBytes(line); const sel = []; let prev = false; let res = [];
+            bytes.forEach((b, i) => {
+              const k = keep(i + 1);
+              if (k && !prev && sel.length && o['output-delimiter'] != null) res.push(...U.toBytes(outDelim));
+              if (k) { res.push(b); sel.push(i); }
+              prev = k;
+            });
+            sink.write(U.fromBytes(res) + eol);
+          }
+        }
+      }
+      sink.flush();
+      return failed ? 1 : 0;
+    },
+  });
+
+  /* ==================================================================== sort */
+  const SORT_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  const SORT_ORDER_LETTERS = 'bdfgiMhnRrV';
+  const SORT_SIZE_SUFFIX = 'KMGTPEZYRQ';
+  const isBlank = (c) => c === ' ' || c === '\t';
+
+  /** Exact decimal value of the leading number in `s` (as `sort -n` reads it). */
+  function leadingNumber(s) {
+    const m = /^[ \t]*(-?)(\d*)(?:\.(\d*))?/.exec(s);
+    const int = m[2].replace(/^0+/, ''); const frac = (m[3] || '').replace(/0+$/, '');
+    return { neg: m[1] === '-' && (int !== '' || frac !== ''), int, frac, len: m[0].length };
+  }
+  function compareMagnitude(a, b) {
+    if (a.int.length !== b.int.length) return a.int.length < b.int.length ? -1 : 1;
+    if (a.int !== b.int) return a.int < b.int ? -1 : 1;
+    const w = Math.max(a.frac.length, b.frac.length);
+    return byteCompare(a.frac.padEnd(w, '0'), b.frac.padEnd(w, '0'));
+  }
+  function compareNumbers(a, b) {
+    if (a.neg !== b.neg) return a.neg ? -1 : 1;
+    return a.neg ? compareMagnitude(b, a) : compareMagnitude(a, b);
+  }
+  /** strtold-style leading float for sort -g; null when the text is not numeric. */
+  function generalNumber(s) {
+    const m = /^[ \t]*([+-]?(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|inf(?:inity)?|nan))/i.exec(s);
+    if (!m) return null;
+    const t = m[1].toLowerCase().replace(/^\+/, '');
+    if (/^-?nan/.test(t)) return NaN;
+    if (/^-?0x/.test(t)) return (t[0] === '-' ? -1 : 1) * parseInt(t.replace('-', ''), 16);
+    return /^-?inf/.test(t) ? (t[0] === '-' ? -Infinity : Infinity) : parseFloat(t);
+  }
+  function humanNumber(s) {
+    const n = leadingNumber(s);
+    const suffix = SORT_SIZE_SUFFIX.indexOf(s.charAt(n.len).toUpperCase()) + 1;
+    return { n, suffix: s.charAt(n.len) === '' ? 0 : suffix };
+  }
+  /** Debian-style version comparison (what sort -V does). */
+  function versionCompare(a, b) {
+    const weight = (c) => (c === undefined ? 0 : c === '~' ? -1 : /\d/.test(c) ? 0 : /[A-Za-z]/.test(c) ? c.charCodeAt(0) : c.charCodeAt(0) + 256);
+    let i = 0; let j = 0;
+    while (i < a.length || j < b.length) {
+      while ((i < a.length && !/\d/.test(a[i])) || (j < b.length && !/\d/.test(b[j]))) {
+        const d = weight(a[i]) - weight(b[j]);
+        if (d) return d < 0 ? -1 : 1;
+        i++; j++;
+      }
+      while (a[i] === '0') i++;
+      while (b[j] === '0') j++;
+      let d = 0;
+      while (/\d/.test(a[i] || '') && /\d/.test(b[j] || '')) { if (!d) d = a.charCodeAt(i) - b.charCodeAt(j); i++; j++; }
+      if (/\d/.test(a[i] || '')) return 1;
+      if (/\d/.test(b[j] || '')) return -1;
+      if (d) return d < 0 ? -1 : 1;
+    }
+    return 0;
+  }
+
+  /** Parse "F[.C][opts][,F[.C][opts]]" for sort -k. Returns { key } or { err }. */
+  function parseSortKey(spec) {
+    const bad = (why) => ({ err: why + ': invalid field specification ' + q(spec) });
+    let rest = spec;
+    const number = (what) => {
+      const m = /^\d+/.exec(rest);
+      if (!m) return { err: 'invalid number ' + what + ': invalid count at start of ' + q(rest) };
+      rest = rest.slice(m[0].length);
+      return { n: m[0].length > 15 ? Infinity : parseInt(m[0], 10) };
+    };
+    const flags = () => { const m = /^[bdfghiMnRrV]*/.exec(rest)[0]; rest = rest.slice(m.length); return m; };
+    const key = { sword: 0, schar: 0, eword: Infinity, echar: 0, hasEnd: false };
+    let r = number('at field start'); if (r.err) return r;
+    if (r.n === 0) return bad('field number is zero');
+    key.sword = r.n - 1;
+    if (rest[0] === '.') {
+      rest = rest.slice(1); r = number("after '.'"); if (r.err) return r;
+      if (r.n === 0) return bad('character offset is zero');
+      key.schar = r.n - 1;
+    }
+    let f = flags();
+    let endFlags = '';
+    if (rest[0] === ',') {
+      rest = rest.slice(1); r = number("after ','"); if (r.err) return r;
+      if (r.n === 0) return bad('field number is zero');
+      key.eword = r.n - 1; key.hasEnd = true;
+      if (rest[0] === '.') { rest = rest.slice(1); r = number("after '.'"); if (r.err) return r; key.echar = r.n; }
+      endFlags = flags();
+    }
+    if (rest) return bad('stray character in field spec');
+    key.flags = f + endFlags;
+    key.skipStart = f.includes('b') || (!!endFlags && false);
+    key.skipEnd = endFlags.includes('b');
+    return { key };
+  }
+
+  /** The text of line `line` that key `k` selects (a port of GNU begfield/limfield). */
+  function keyText(line, k, tab) {
+    const len = line.length; let ptr = 0;
+    const skipBlanks = () => { while (ptr < len && isBlank(line[ptr])) ptr++; };
+    let n = k.sword;
+    if (tab != null) { while (ptr < len && n--) { while (ptr < len && line[ptr] !== tab) ptr++; if (ptr < len) ptr++; } }
+    else { while (ptr < len && n--) { skipBlanks(); while (ptr < len && !isBlank(line[ptr])) ptr++; } }
+    if (k.skipStart) skipBlanks();
+    const beg = Math.min(len, ptr + k.schar);
+    if (!k.hasEnd) return line.slice(beg);
+    ptr = 0; n = k.eword + (k.echar === 0 ? 1 : 0);
+    if (tab != null) { while (ptr < len && n--) { while (ptr < len && line[ptr] !== tab) ptr++; if (ptr < len && (n || k.echar)) ptr++; } }
+    else { while (ptr < len && n--) { skipBlanks(); while (ptr < len && !isBlank(line[ptr])) ptr++; } }
+    if (k.echar !== 0) { if (k.skipEnd) skipBlanks(); ptr = Math.min(len, ptr + k.echar); }
+    return line.slice(beg, Math.max(beg, ptr));
+  }
+
+  /** Comparison function for one key's text, as chosen by its ordering flags. */
+  function keyComparer(flags, coll) {
+    const has = (c) => flags.includes(c);
+    const sign = has('r') ? -1 : 1;
+    let cmp;
+    if (has('n')) { const v = (s) => leadingNumber(s); cmp = (a, b) => compareNumbers(v(a), v(b)); }
+    else if (has('g')) {
+      cmp = (a, b) => {
+        const x = generalNumber(a); const y = generalNumber(b);
+        if (x == null || y == null || Number.isNaN(x) || Number.isNaN(y)) {
+          const xl = x == null || Number.isNaN(x); const yl = y == null || Number.isNaN(y);
+          return xl && yl ? 0 : xl ? -1 : 1;
+        }
+        return x < y ? -1 : x > y ? 1 : 0;
+      };
+    } else if (has('h')) {
+      cmp = (a, b) => {
+        const x = humanNumber(a); const y = humanNumber(b);
+        if (x.n.neg !== y.n.neg) return x.n.neg ? -1 : 1;
+        const flip = x.n.neg ? -1 : 1;
+        if (x.suffix !== y.suffix) return x.suffix < y.suffix ? -flip : flip;
+        return compareNumbers(x.n, y.n);
+      };
+    } else if (has('M')) {
+      const month = (s) => { const t = s.replace(/^[ \t]+/, '').slice(0, 3).toUpperCase(); return SORT_MONTHS.indexOf(t) + 1; };
+      cmp = (a, b) => month(a) - month(b);
+    } else if (has('V')) cmp = versionCompare;
+    else {
+      const fold = has('f'); const dict = has('d'); const ign = has('i');
+      const prep = (s) => {
+        if (dict) s = s.replace(/[^\p{L}\p{N} \t]/gu, '');
+        if (ign) s = s.replace(/[^\x20-\x7e -￿]/g, '');
+        return fold ? s.toUpperCase() : s;
+      };
+      cmp = fold || dict || ign ? (a, b) => coll(prep(a), prep(b)) : coll;
+    }
+    return (a, b) => sign * cmp(a, b);
+  }
+
+  /** k-way merge of lists that are already sorted; earlier lists win ties. */
+  function mergeSorted(lists, cmp) {
+    const heads = lists.map(() => 0); const merged = [];
+    for (;;) {
+      let best = -1;
+      for (let i = 0; i < lists.length; i++) {
+        if (heads[i] < lists[i].length && (best < 0 || cmp(lists[i][heads[i]], lists[best][heads[best]]) < 0)) best = i;
+      }
+      if (best < 0) return merged;
+      merged.push(lists[best][heads[best]++]);
+    }
+  }
+
+  define({
+    name: 'sort', pkg: 'coreutils', summary: 'sort lines of text files',
+    usage: ['[OPTION]... [FILE]...', '[OPTION]... --files0-from=F'],
+    desc: 'Write sorted concatenation of all FILE(s) to standard output.\nWith no FILE, or when FILE is -, read standard input.\nA KEYDEF is F[.C][OPTS][,F[.C][OPTS]] for start and stop position, where F is a field number and C a character position in the field; both are origin 1. If no stop position is given, the end of the line is used. OPTS is one or more single-letter ordering options [bdfgiMhnRrV], which override global ordering options for that key.',
+    opts: [
+      'Ordering options:',
+      ['-b, --ignore-leading-blanks', 'ignore leading blanks'], ['-d, --dictionary-order', 'consider only blanks and alphanumeric characters'],
+      ['-f, --ignore-case', 'fold lower case to upper case characters'], ['-g, --general-numeric-sort', 'compare according to general numerical value'],
+      ['-i, --ignore-nonprinting', 'consider only printable characters'], ['-M, --month-sort', "compare (unknown) < 'JAN' < ... < 'DEC'"],
+      ['-h, --human-numeric-sort', 'compare human readable numbers (e.g., 2K 1G)'], ['-n, --numeric-sort', 'compare according to string numerical value'],
+      ['-r, --reverse', 'reverse the result of comparisons'], ['-V, --version-sort', 'natural sort of (version) numbers within text'],
+      'Other options:',
+      ['-c, --check, --check=diagnose-first', 'check for sorted input; do not sort'], ['-C, --check=quiet', 'like -c, but do not report first bad line'],
+      ['-k, --key=KEYDEF', 'sort via a key; KEYDEF gives location and type'], ['-m, --merge', 'merge already sorted files; do not sort'],
+      ['-o, --output=FILE', 'write result to FILE instead of standard output'], ['-s, --stable', 'stabilize sort by disabling last-resort comparison'],
+      ['-S, --buffer-size=SIZE', 'use SIZE for main memory buffer'], ['-t, --field-separator=SEP', 'use SEP instead of non-blank to blank transition'],
+      ['-u, --unique', 'with -c, check for strict ordering; without -c, output only the first of an equal run'], ['-z, --zero-terminated', 'line delimiter is NUL, not newline'],
+    ],
+    examples: [['sort -t: -k3 -n /etc/passwd', 'Order accounts by numeric user id (third field).'], ['sort -u hosts.txt', 'Remove duplicate lines while sorting.'], ['du -sh * | sort -h', 'List sizes from smallest to largest.']],
+    exit: '0 if OK, 1 if the -c check found disorder, 2 on trouble.',
+    version: coreutils('Mike Haertel and Paul Eggert'),
+    usageStatus: 2,
+    async run(ctx, d) {
+      const modeNames = { n: 'numeric-sort', g: 'general-numeric-sort', h: 'human-numeric-sort', M: 'month-sort', V: 'version-sort', R: 'random-sort' };
+      const g = parseArgs(ctx, d, {
+        short: 'bdfgiMhnrVcCk:mo:sS:t:uzR',
+        long: ['ignore-leading-blanks', 'dictionary-order', 'ignore-case', 'general-numeric-sort', 'ignore-nonprinting', 'month-sort', 'human-numeric-sort', 'numeric-sort', 'reverse',
+          'version-sort', 'check=?', 'key=', 'merge', 'output=', 'stable', 'buffer-size=', 'field-separator=', 'unique', 'zero-terminated', 'sort=', 'parallel=', 'temporary-directory=', 'batch-size=', 'compress-program=', 'debug'],
+        alias: aliasOf([['b', 'ignore-leading-blanks'], ['d', 'dictionary-order'], ['f', 'ignore-case'], ['g', 'general-numeric-sort'], ['i', 'ignore-nonprinting'], ['M', 'month-sort'],
+          ['h', 'human-numeric-sort'], ['n', 'numeric-sort'], ['r', 'reverse'], ['V', 'version-sort'], ['c', 'check'], ['k', 'key'], ['m', 'merge'], ['o', 'output'], ['s', 'stable'],
+          ['S', 'buffer-size'], ['t', 'field-separator'], ['u', 'unique'], ['z', 'zero-terminated']]),
+      });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      const fail = (msg) => { ctx.err('sort: ' + msg + '\n'); return 2; };
+      // global ordering flags, in the order GNU lists them in its "incompatible" message
+      let global = '';
+      for (const c of SORT_ORDER_LETTERS) if (o[c]) global += c;
+      if (o.sort) {
+        const word = Object.keys(modeNames).find((c) => modeNames[c].startsWith(o.sort) || (c === 'n' && 'numeric'.startsWith(o.sort)));
+        if (!word) return usageError(ctx, "invalid argument " + q(o.sort) + " for '--sort'\nValid arguments are:\n  - " + q('general-numeric') + '\n  - ' + q('human-numeric') + '\n  - ' + q('month') + '\n  - ' + q('numeric') + '\n  - ' + q('random') + '\n  - ' + q('version'), 2);
+        if (!global.includes(word)) global += word;
+      }
+      const incompatible = (flags) => {
+        const kinds = [...flags].filter((c) => 'ngMhVR'.includes(c)); const text = [...flags].filter((c) => 'di'.includes(c));
+        if (kinds.length > 1 || (kinds.length && text.length && !(kinds[0] === 'g' && false))) {
+          const pick = [...flags].filter((c) => 'dgiMhnRV'.includes(c)).sort((a, b) => 'bdfgiMhnRrV'.indexOf(a) - 'bdfgiMhnRrV'.indexOf(b));
+          return pick.length > 1 ? pick.join('') : null;
+        }
+        return null;
+      };
+      let bad = incompatible(global);
+      if (bad) return fail("options '-" + bad + "' are incompatible");
+
+      const tab = o.t == null ? null : o.t === '\\0' ? '\0' : o.t;
+      if (tab != null && Array.from(tab).length !== 1) return fail('multi-character tab ' + q(tab));
+      if (tab === '') return fail('empty tab');
+      const coll = collation(ctx.env);
+      const keys = [];
+      for (const spec of g.all.k || []) {
+        const r = parseSortKey(spec);
+        if (r.err) return fail(r.err);
+        const k = r.key;
+        bad = incompatible(k.flags); if (bad) return fail("options '-" + bad + "' are incompatible");
+        if (!k.flags) { k.flags = global; k.skipStart = global.includes('b'); k.skipEnd = global.includes('b'); }
+        k.cmp = keyComparer(k.flags, coll);
+        keys.push(k);
+      }
+      let wholeCmp = null;
+      if (!keys.length) {
+        const f = global.replace(/b/g, '');
+        wholeCmp = keyComparer(f, coll);
+        if (global.includes('b')) { keys.push({ sword: 0, schar: 0, eword: Infinity, echar: 0, hasEnd: false, skipStart: true, skipEnd: true, cmp: keyComparer(f, coll) }); wholeCmp = null; }
+      }
+      const reverse = global.includes('r');
+      const lastResort = (a, b) => (reverse ? -1 : 1) * coll(a, b);
+      const stable = !!o.s; const unique = !!o.u;
+      const compare = (a, b, resort) => {
+        let diff = 0;
+        if (keys.length) {
+          for (let i = 0; i < keys.length && !diff; i++) diff = keys[i].cmp(a.keys[i], b.keys[i]);
+        } else if (wholeCmp) diff = wholeCmp(a.line, b.line);
+        if (diff || unique || stable || !resort) return diff;
+        return lastResort(a.line, b.line);
+      };
+      const item = (line) => ({ line, keys: keys.map((k) => keyText(line, k, tab)) });
+
+      const { inputs, failed } = await readInputs(ctx, g.rest, (name, e) => 'cannot read: ' + name + ': ' + e.message);
+      const eol = o.z ? '\0' : '\n';
+      if (failed) return 2;
+      const perFile = inputs.map((inp) => {
+        const parts = inp.text.split(eol);
+        if (parts[parts.length - 1] === '') parts.pop();
+        return parts.map(item);
+      });
+      const lines = [].concat(...perFile);
+
+      if (o.c != null || o.C) {
+        const quiet = o.C || o.c === 'quiet' || o.c === 'silent';
+        if (!quiet && o.c !== true && !['diagnose-first', 'quiet', 'silent'].includes(o.c)) return usageError(ctx, "invalid argument " + q(o.c) + " for '--check'", 2);
+        const file = g.rest[0] || '-';
+        if (lines.length && g.rest.length > 1) return usageError(ctx, 'extra operand ' + q(g.rest[1]) + '\nfile operands cannot be combined with -c or -C', 2);
+        for (let i = 1; i < lines.length; i++) {
+          const c = compare(lines[i - 1], lines[i], true);
+          if (c > 0 || (unique && c === 0)) {
+            if (!quiet) ctx.err('sort: ' + file + ':' + (i + 1) + ': disorder: ' + lines[i].line + '\n');
+            return 1;
+          }
+        }
+        return 0;
+      }
+      if (lines.length > 20000) await breathe(ctx);
+      let result = o.m ? mergeSorted(perFile, (a, b) => compare(a, b, true)) : lines.sort((a, b) => compare(a, b, true));
+      if (unique) result = result.filter((x, i) => i === 0 || compare(result[i - 1], x, false) !== 0);
+      const text = result.map((x) => x.line + eol).join('');
+      if (o.o != null) {
+        try { ctx.fs.write(o.o, text); } catch (e) { if (!isFsError(e)) throw e; return fail('open failed: ' + o.o + ': ' + e.message); }
+      } else ctx.out(text);
+      return 0;
+    },
+  });
+
   /* @@INSERT@@ */
 })(typeof globalThis !== 'undefined' ? globalThis : this);
