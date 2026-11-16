@@ -1351,5 +1351,375 @@
     },
   });
 
+  /* ===================================================================== tr
+   * tr works on bytes, like the real one: multibyte characters are never
+   * matched by ranges or classes.
+   */
+  const trRange = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+  const TR_CLASSES = {
+    alpha: trRange(65, 90).concat(trRange(97, 122)), digit: trRange(48, 57), alnum: trRange(48, 57).concat(trRange(65, 90), trRange(97, 122)),
+    upper: trRange(65, 90), lower: trRange(97, 122), space: [9, 10, 11, 12, 13, 32], blank: [9, 32], punct: trRange(33, 47).concat(trRange(58, 64), trRange(91, 96), trRange(123, 126)),
+    print: trRange(32, 126), graph: trRange(33, 126), cntrl: trRange(0, 31).concat([127]), xdigit: trRange(48, 57).concat(trRange(65, 70), trRange(97, 102)),
+  };
+  TR_CLASSES.alnum.sort((a, b) => a - b); TR_CLASSES.alpha.sort((a, b) => a - b);
+  const TR_ESCAPES = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '\\': 92 };
+
+  /** Parse a tr operand into items: {c} a byte, {cls, bytes} a class, {rep, n} a [c*n] construct. Throws RegexError. */
+  function parseTrSet(spec, warn) {
+    const s = U.toBytes(spec); const items = []; let i = 0;
+    const ch = (b) => String.fromCharCode(b);
+    const readByte = () => {
+      if (s[i] !== 92) return s[i++];
+      if (i + 1 >= s.length) { warn('warning: an unescaped backslash at end of string is not portable'); i++; return 92; }
+      const e = ch(s[i + 1]);
+      if (/[0-7]/.test(e)) { let j = i + 1; let v = 0; while (j < i + 4 && s[j] >= 48 && s[j] <= 55) v = v * 8 + s[j++] - 48; i = j; return v & 255; }
+      i += 2;
+      return e in TR_ESCAPES ? TR_ESCAPES[e] : s[i - 1];
+    };
+    while (i < s.length) {
+      if (s[i] === 91 && i + 1 < s.length) {   // [
+        const kind = ch(s[i + 1]);
+        if (kind === ':' || kind === '=') {
+          const end = s.findIndex((b, k) => k > i + 2 && b === s[i + 1] && s[k + 1] === 93);
+          if (end > 0) {
+            const body = U.fromBytes(s.slice(i + 2, end));
+            if (kind === ':') {
+              if (!TR_CLASSES[body]) throw new RegexError('invalid character class ' + q(body));
+              items.push({ cls: body, bytes: TR_CLASSES[body] });
+            } else {
+              if (end - i - 2 !== 1) throw new RegexError('invalid equivalence class: [=' + body + '=]');
+              items.push({ c: s[i + 2] });
+            }
+            i = end + 2; continue;
+          }
+        } else {
+          const save = i; i++;
+          const b = readByte();
+          if (s[i] === 42) {
+            let j = i + 1; let digits = '';
+            while (j < s.length && s[j] !== 93) digits += ch(s[j++]);
+            if (j < s.length && /^\d*$/.test(digits)) {
+              const n = digits === '' ? 0 : parseInt(digits, digits[0] === '0' ? 8 : 10);
+              items.push({ rep: b, n }); i = j + 1; continue;
+            }
+          }
+          i = save;
+        }
+      }
+      const from = readByte();
+      if (s[i] === 45 && i + 1 < s.length) {
+        i++;
+        const to = readByte();
+        if (to < from) throw new RegexError('range-endpoints of ' + "'" + ch(from) + '-' + ch(to) + "'" + ' are in reverse collating sequence order');
+        for (let b = from; b <= to; b++) items.push({ c: b });
+      } else items.push({ c: from });
+    }
+    return items;
+  }
+  const trLength = (items) => items.reduce((n, it) => n + (it.c != null ? 1 : it.cls ? it.bytes.length : it.n), 0);
+
+  define({
+    name: 'tr', pkg: 'coreutils', summary: 'translate or delete characters',
+    usage: ['[OPTION]... STRING1 [STRING2]'],
+    desc: 'Translate, squeeze, and/or delete characters from standard input, writing to standard output.',
+    opts: [
+      ['-c, -C, --complement', 'use the complement of STRING1'], ['-d, --delete', 'delete characters in STRING1, do not translate'],
+      ['-s, --squeeze-repeats', 'replace each sequence of a repeated character that is listed in the last specified STRING, with a single occurrence of that character'],
+      ['-t, --truncate-set1', 'first truncate STRING1 to length of STRING2'],
+    ],
+    notes: 'SETs are specified as strings of characters. Most represent themselves. Interpreted sequences are:\n\n  \\NNN            character with octal value NNN (1 to 3 octal digits)\n  \\\\              backslash\n  \\a \\b \\f \\n \\r \\t \\v   audible BEL, backspace, form feed, new line, return, horizontal tab, vertical tab\n  CHAR1-CHAR2     all characters from CHAR1 to CHAR2 in ascending order\n  [CHAR*]         in STRING2, copies of CHAR until length of STRING1\n  [CHAR*REPEAT]   REPEAT copies of CHAR, REPEAT octal if starting with 0\n  [:alnum:] [:alpha:] [:blank:] [:cntrl:] [:digit:] [:graph:] [:lower:] [:print:] [:punct:] [:space:] [:upper:] [:xdigit:]\n  [=CHAR=]        all characters which are equivalent to CHAR',
+    examples: [["echo 'Kali Linux' | tr a-z A-Z", 'Convert to upper case.'], ["tr -d '\\r' < dos.txt > unix.txt", 'Strip carriage returns from a text file.'], ["tr -cs 'A-Za-z' '\\n' < notes.txt", 'Put each word of a file on its own line.']],
+    version: coreutils('Jim Meyering'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'cCdst', long: ['complement', 'delete', 'squeeze-repeats', 'truncate-set1'], alias: { complement: 'c', C: 'c', delete: 'd', 'squeeze-repeats': 's', 'truncate-set1': 't' } });
+      if (typeof g === 'number') return g;
+      const o = g.opts; const ops = g.rest;
+      const two = o.d && o.s;
+      if (!ops.length) return usageError(ctx, 'missing operand');
+      if (ops.length > 2 || (o.d && !o.s && ops.length > 1)) {
+        return usageError(ctx, 'extra operand ' + q(ops[ops.length > 2 ? 2 : 1]) + (o.d && !o.s && ops.length === 2 ? '\nOnly one string may be given when deleting without squeezing repeats.' : ''));
+      }
+      if (ops.length < 2 && (two || (!o.d && !o.s))) {
+        return usageError(ctx, 'missing operand after ' + q(ops[0]) + '\nTwo strings must be given when ' + (two ? 'both deleting and squeezing repeats.' : 'translating.'));
+      }
+      const warn = (m) => ctx.err('tr: ' + m + '\n');
+      const fail = (m) => { ctx.err('tr: ' + m + '\n'); return 1; };
+      let items1; let items2 = null;
+      try {
+        items1 = parseTrSet(ops[0], warn);
+        if (items1.some((it) => it.rep != null)) return fail('the [c*] repeat construct may not appear in string1');
+        if (ops.length > 1) items2 = parseTrSet(ops[1], warn);
+      } catch (e) { if (e instanceof RegexError) return fail(e.message); throw e; }
+      const expand = (items, fillTo) => {
+        const known = items.reduce((n, it) => n + (it.rep != null && it.n === 0 ? 0 : trLength([it])), 0);
+        const out = [];
+        for (const it of items) {
+          if (it.c != null) out.push(it.c);
+          else if (it.cls) out.push.apply(out, it.bytes);
+          else for (let k = it.n || Math.max(0, fillTo - known); k > 0; k--) out.push(it.rep);
+        }
+        return out;
+      };
+      let set1 = expand(items1, 0);
+      const inSet1 = new Set(set1);
+      if (o.c) set1 = trRange(0, 255).filter((b) => !inSet1.has(b));
+      const translating = items2 && !o.d;
+      let set2 = [];
+      if (items2) {
+        if (translating) {
+          const classes = items2.filter((it) => it.cls);
+          if (classes.some((it) => it.cls !== 'upper' && it.cls !== 'lower')) {
+            return fail("when translating, the only character classes that may appear in\nstring2 are 'upper' and 'lower'");
+          }
+          let at = 0; let at1 = 0; const starts1 = new Map();
+          for (const it of items1) { if (it.cls) starts1.set(at1, it.cls); at1 += trLength([it]); }
+          for (const it of items2) {
+            if (it.cls && !(!o.c && starts1.get(at) && starts1.get(at) !== it.cls && (starts1.get(at) === 'upper' || starts1.get(at) === 'lower'))) return fail('misaligned [:upper:] and/or [:lower:] construct');
+            at += trLength([it]);
+          }
+        }
+        set2 = expand(items2, set1.length);
+        if (translating && !set2.length && !o.t && set1.length) return fail('when not truncating set1, string2 must be non-empty');
+      }
+      const map = trRange(0, 255);
+      if (translating) {
+        const n = o.t ? Math.min(set1.length, set2.length) : set1.length;
+        for (let i = 0; i < n; i++) map[set1[i]] = i < set2.length ? set2[i] : set2[set2.length - 1];
+      }
+      const deleteSet = o.d ? new Set(set1) : null;
+      const squeezeSource = o.s ? (items2 ? set2 : set1) : null;
+      const squeeze = squeezeSource ? new Set(squeezeSource) : null;
+      const input = U.toBytes(await stdinText(ctx));
+      const out = []; let prev = -1;
+      for (const b of input) {
+        if (deleteSet && deleteSet.has(b)) continue;
+        const m = translating ? map[b] : b;
+        if (squeeze && m === prev && squeeze.has(m)) continue;
+        out.push(m); prev = m;
+      }
+      ctx.out(U.fromBytes(out));
+      return 0;
+    },
+  });
+
+  /* ===================================================================== tee */
+  define({
+    name: 'tee', pkg: 'coreutils', summary: 'read from standard input and write to standard output and files',
+    usage: ['[OPTION]... [FILE]...'],
+    desc: 'Copy standard input to each FILE, and also to standard output.',
+    opts: [['-a, --append', 'append to the given FILEs, do not overwrite'], ['-i, --ignore-interrupts', 'ignore interrupt signals'], ['-p', 'operate in a more appropriate MODE with pipes.'], ['    --output-error[=MODE]', 'set behavior on write error.  See MODE below']],
+    notes: 'MODE determines behavior with write errors on the outputs: warn, warn-nopipe, exit, exit-nopipe.',
+    examples: [['ls -l | tee listing.txt', 'Show the listing and keep a copy in listing.txt.'], ['echo "10.10.10.10 web01" | sudo tee -a /etc/hosts', 'Append a line to a root-owned file.']],
+    version: coreutils('Mike Parker, Richard M. Stallman, and David MacKenzie'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'aip', long: ['append', 'ignore-interrupts', 'output-error=?'], alias: { append: 'a', 'ignore-interrupts': 'i' } });
+      if (typeof g === 'number') return g;
+      let status = 0; const files = [];
+      for (const f of g.rest) {
+        try {
+          if (!g.opts.a) ctx.fs.write(f, ''); else if (!ctx.fs.exists(f)) ctx.fs.write(f, '');
+          files.push(f);
+        } catch (e) { if (!isFsError(e)) throw e; ctx.err('tee: ' + f + ': ' + e.message + '\n'); status = 1; }
+      }
+      const emit = (s) => {
+        ctx.out(s);
+        for (const f of files.slice()) {
+          try { ctx.fs.append(f, s); } catch (e) { if (!isFsError(e)) throw e; ctx.err('tee: ' + f + ': ' + e.message + '\n'); status = 1; files.splice(files.indexOf(f), 1); }
+        }
+      };
+      if (ctx.stdin != null) emit(ctx.stdin);
+      else for (;;) { const line = await ctx.readLine(''); if (line == null) break; emit(line + '\n'); }
+      return status;
+    },
+  });
+
+  /* ===================================================================== seq */
+  const SEQ_NUMBER = /^[ \t]*[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|0[xX][0-9a-fA-F]+)[ \t]*$/;
+  function seqDecimals(text) {
+    const m = /^[+-]?\d*(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text.trim());
+    if (!m || /^[+-]?0[xX]/.test(text.trim())) return 0;
+    return Math.max(0, (m[1] || '').length - (m[2] ? parseInt(m[2], 10) : 0));
+  }
+  define({
+    name: 'seq', pkg: 'coreutils', summary: 'print a sequence of numbers',
+    usage: ['[OPTION]... LAST', '[OPTION]... FIRST LAST', '[OPTION]... FIRST INCREMENT LAST'],
+    desc: 'Print numbers from FIRST to LAST, in steps of INCREMENT.',
+    opts: [['-f, --format=FORMAT', 'use printf style floating-point FORMAT'], ['-s, --separator=STRING', 'use STRING to separate numbers (default: \\n)'], ['-w, --equal-width', 'equalize width by padding with leading zeroes']],
+    notes: 'If FIRST or INCREMENT is omitted, it defaults to 1. That is, an omitted INCREMENT defaults to 1 even when LAST is smaller than FIRST.\nThe sequence of numbers ends when the sum of the current number and INCREMENT would become greater than LAST.\nFORMAT must be suitable for printing one argument of type \'double\'; it defaults to %.PRECf if FIRST, INCREMENT, and LAST are all fixed point decimal numbers with maximum precision PREC, and to %g otherwise.',
+    examples: [['seq 1 5', 'Print 1 to 5, one per line.'], ["seq -f '10.10.10.%g' 1 5", 'Print five lab addresses.'], ['seq -w 8 11', 'Print 08, 09, 10, 11.']],
+    version: coreutils('Ulrich Drepper'),
+    async run(ctx, d) {
+      // a leading '-' followed by a digit is a negative number operand, not an option
+      const args = ctx.args.map((a) => a);
+      const g = parseArgs(ctx, d, { short: 'f:s:wt', long: ['format=', 'separator=', 'equal-width'], alias: { format: 'f', separator: 's', 'equal-width': 'w' }, negativeNumbers: true }, args);
+      if (typeof g === 'number') return g;
+      const o = g.opts; const ops = g.rest;
+      if (!ops.length) return usageError(ctx, 'missing operand');
+      if (ops.length > 3) return usageError(ctx, 'extra operand ' + q(ops[3]));
+      for (const t of ops) {
+        if (/^[+-]?nan$/i.test(t.trim())) return usageError(ctx, 'invalid ' + q('not-a-number') + ' argument: ' + q(t));
+        if (!SEQ_NUMBER.test(t) && !/^[+-]?inf(inity)?$/i.test(t.trim())) return usageError(ctx, 'invalid floating point argument: ' + q(t));
+      }
+      const num = (t) => (/^[+-]?inf/i.test(t.trim()) ? (t.trim()[0] === '-' ? -Infinity : Infinity) : /^[+-]?0[xX]/.test(t.trim()) ? (t.trim()[0] === '-' ? -1 : 1) * parseInt(t.trim().replace(/^[+-]/, ''), 16) : parseFloat(t));
+      const first = ops.length > 1 ? num(ops[0]) : 1; const incr = ops.length > 2 ? num(ops[1]) : 1; const last = num(ops[ops.length - 1]);
+      if (incr === 0) return usageError(ctx, 'invalid Zero increment value: ' + q(ops[1]));
+      if (o.f != null && o.w) return usageError(ctx, 'format string may not be specified when printing equal width strings');
+      const sep = o.s == null ? '\n' : o.s;
+      const prec = Math.max(ops.length > 1 ? seqDecimals(ops[0]) : 0, ops.length > 2 ? seqDecimals(ops[1]) : 0);
+      let format = o.f;
+      let before = ''; let after = ''; let conv = null;
+      if (format != null) {
+        let at = -1;
+        for (let i = 0; i < format.length; i++) {
+          if (format[i] !== '%') continue;
+          if (format[i + 1] === '%') { i++; continue; }
+          const m = /^%([-+ 0#']*)(\d+)?(?:\.(\d+))?([a-zA-Z])/.exec(format.slice(i));
+          if (!m) return ctx.fail('format ' + q(format) + ' ends in %', 1);
+          if (!'aAeEfFgG'.includes(m[4])) return ctx.fail('format ' + q(format) + ' has unknown %' + m[4] + ' directive', 1);
+          if (at >= 0) return ctx.fail('format ' + q(format) + ' has too many % directives', 1);
+          at = i; conv = m;
+        }
+        if (at < 0) return ctx.fail('format ' + q(format) + ' has no % directive', 1);
+        before = format.slice(0, at).replace(/%%/g, '%'); after = format.slice(at + conv[0].length).replace(/%%/g, '%');
+      }
+      const fixed = (x) => x.toFixed(prec);
+      let width = 0;
+      if (o.w) width = Math.max(fixed(first).length, fixed(first + Math.floor((last - first) / incr) * incr).length);
+      const render = (x) => {
+        if (conv) return before + cFormat(conv[1], conv[2] ? +conv[2] : 0, conv[3] != null ? +conv[3] : null, conv[4], x) + after;
+        let s = fixed(x);
+        if (width && s.length < width) { const neg = s[0] === '-'; s = (neg ? '-' : '') + s.slice(neg ? 1 : 0).padStart(width - (neg ? 1 : 0), '0'); }
+        return s;
+      };
+      const sink = new Sink(ctx); const eps = Math.abs(incr) * 1e-9;
+      let i = 0;
+      for (let x = first; incr > 0 ? x <= last + eps : x >= last - eps; x = first + ++i * incr) {
+        sink.write((i ? sep : '') + render(x));
+        if (i % 50000 === 49999) { sink.flush(); await breathe(ctx); }
+      }
+      if (i) sink.write('\n');
+      sink.flush();
+      return 0;
+    },
+  });
+
+  /* ===================================================================== yes */
+  define({
+    name: 'yes', pkg: 'coreutils', summary: 'output a string repeatedly until killed',
+    usage: ['[STRING]...', 'OPTION'],
+    desc: "Repeatedly output a line with all specified STRING(s), or 'y'.",
+    examples: [['yes | head -3', 'Print three lines of "y".'], ['yes no | sudo apt upgrade', 'Answer every prompt with "no".']],
+    version: coreutils('David MacKenzie'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: '', long: [] });
+      if (typeof g === 'number') return g;
+      const line = (g.rest.length ? g.rest.join(' ') : 'y') + '\n';
+      const burst = line.repeat(Math.max(1, Math.floor(4096 / line.length)));
+      // Pipelines are buffered, so output that is not a terminal is cut off at 64 KiB
+      // (a reader such as head would stop the real yes with SIGPIPE).
+      if (!ctx.isTTY) { ctx.out(burst.repeat(Math.ceil(65536 / burst.length))); return 0; }
+      for (;;) { ctx.out(burst); await breathe(ctx); }
+    },
+  });
+
+  /* ================================================================== xargs */
+  const shellQuote = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : s.includes("'") ? '"' + s.replace(/["\\$`]/g, '\\$&') + '"' : "'" + s + "'");
+
+  /** Split xargs input into items the default way: blanks and newlines separate, quotes and backslashes protect. */
+  function xargsItems(text, eofStr, blanksSeparate) {
+    const items = []; let cur = null; let quote = null;
+    const push = (eol) => { if (cur !== null) { items.push({ text: cur, eol }); cur = null; } else if (eol && items.length) items[items.length - 1].eol = true; };
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quote) {
+        if (c === '\n') return { err: 'unmatched ' + (quote === "'" ? 'single' : 'double') + ' quote; by default quotes are special to xargs unless you use the -0 option' };
+        if (c === quote) quote = null; else cur += c;
+      } else if (c === '\\') { cur = (cur === null ? '' : cur) + (text[++i] === undefined ? '' : text[i]); }
+      else if (c === '"' || c === "'") { quote = c; if (cur === null) cur = ''; }
+      else if (c === '\n') push(!(i > 0 && (text[i - 1] === ' ' || text[i - 1] === '\t')) || cur !== null);
+      else if (c === ' ' || c === '\t') { if (blanksSeparate) push(false); else if (cur !== null) cur += c; }
+      else cur = (cur === null ? '' : cur) + c;
+    }
+    if (quote) return { err: 'unmatched ' + (quote === "'" ? 'single' : 'double') + ' quote; by default quotes are special to xargs unless you use the -0 option' };
+    push(true);
+    if (eofStr != null) { const at = items.findIndex((it) => it.text === eofStr); if (at >= 0) items.length = at; }
+    return { items };
+  }
+
+  define({
+    name: 'xargs', path: '/usr/bin/xargs', pkg: 'findutils', summary: 'build and execute command lines from standard input',
+    usage: ['[OPTION]... COMMAND [INITIAL-ARGS]...'],
+    desc: 'Run COMMAND with arguments INITIAL-ARGS and more arguments read from input.',
+    opts: [
+      ['-0, --null', 'items are separated by a null, not whitespace; disables quote and backslash processing and logical EOF processing'],
+      ['-a, --arg-file=FILE', 'read arguments from FILE, not standard input'], ['-d, --delimiter=CHARACTER', 'items in input stream are separated by CHARACTER, not by whitespace; disables quote and backslash processing and logical EOF processing'],
+      ['-E EOF-STR', 'set logical EOF string; if END occurs as a line of input, the rest of the input is ignored'],
+      ['-I R', 'same as --replace=R'], ['-i, --replace[=R]', 'replace R in INITIAL-ARGS with names read from standard input; if R is unspecified, assume {}'],
+      ['-L, --max-lines=MAX-LINES', 'use at most MAX-LINES non-blank input lines per command line'], ['-n, --max-args=MAX-ARGS', 'use at most MAX-ARGS arguments per command line'],
+      ['-P, --max-procs=MAX-PROCS', 'run at most MAX-PROCS processes at a time'], ['-r, --no-run-if-empty', 'if there are no arguments, then do not run COMMAND; if this option is not given, COMMAND will be run at least once'],
+      ['-s, --max-chars=MAX-CHARS', 'limit length of command line to MAX-CHARS'], ['-t, --verbose', 'print commands before executing them'], ['-x, --exit', 'exit if the size (see -s) is exceeded'],
+    ],
+    examples: [['find . -name "*.txt" | xargs grep -l password', 'Search every text file found.'], ["printf '10.10.10.10\\n10.10.10.20\\n' | xargs -n1 ping -c1", 'Run one ping per address.'], ['cat hosts.txt | xargs -I{} echo scanning {}', 'Substitute each line into the command.']],
+    version: (name) => name + ' (GNU findutils) 4.10.0\nCopyright (C) 2024 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Eric B. Decker, James Youngman, and Kevin Dalley.\nBuilt using GNU gnulib version 20240201\nFeatures enabled: D_TYPE O_NOFOLLOW(enabled) LEAF_OPTIMISATION FTS() CBO(level=2)\n',
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, {
+        short: '0a:d:E:e::I:i::L:l::n:P:prs:tx', long: ['null', 'arg-file=', 'delimiter=', 'eof=?', 'replace=?', 'max-lines=?', 'max-args=', 'max-procs=', 'interactive', 'no-run-if-empty', 'max-chars=', 'verbose', 'exit', 'open-tty', 'show-limits', 'process-slot-var='],
+        alias: { null: '0', 'arg-file': 'a', delimiter: 'd', eof: 'E', replace: 'i', 'max-lines': 'L', 'max-args': 'n', 'max-procs': 'P', interactive: 'p', 'no-run-if-empty': 'r', 'max-chars': 's', verbose: 't', exit: 'x' },
+        stopAtNonOption: true,
+      });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      const bad = (opt, v, min) => {
+        if (!/^\d+$/.test(v)) { ctx.err('xargs: invalid number "' + v + '" for -' + opt + " option\nTry 'xargs --help' for more information.\n"); return true; }
+        if (+v < min) { ctx.err('xargs: value ' + v + ' for -' + opt + " option should be >= 1\nTry 'xargs --help' for more information.\n"); return true; }
+        return false;
+      };
+      for (const [opt, key, min] of [['n', 'n', 1], ['L', 'L', 1], ['s', 's', 1], ['P', 'P', 0]]) if (o[key] != null && bad(opt, o[key], min)) return 1;
+      const replaceStr = o.i != null ? (o.i === true ? '{}' : o.i) : o.I != null ? o.I : null;
+      if (replaceStr != null && o.n != null) ctx.err('xargs: warning: options --max-args and --replace/-I/-i are mutually exclusive, ignoring previous --max-args value\n');
+      const lines = o.L != null ? +o.L : o.l != null ? (o.l === true ? 1 : +o.l) : null;
+      const maxArgs = replaceStr == null && o.n != null ? +o.n : null;
+      let input;
+      try { input = o.a != null ? ctx.fs.read(o.a) : await stdinText(ctx); }
+      catch (e) { if (!isFsError(e)) throw e; ctx.err('xargs: Cannot open input file ' + q(o.a) + ': ' + e.message + '\n'); return 1; }
+      const cmd = g.rest.length ? g.rest : ['echo'];
+
+      let items;
+      const delim = o['0'] ? '\0' : o.d != null ? o.d.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\0/g, '\0').replace(/\\\\/g, '\\') : null;
+      if (delim != null) {
+        if (delim.length !== 1) { ctx.err('xargs: invalid delimiter ' + q(o.d) + "\nTry 'xargs --help' for more information.\n"); return 1; }
+        const parts = input.split(delim); if (parts[parts.length - 1] === '') parts.pop();
+        items = parts.map((t) => ({ text: t, eol: true }));
+      } else {
+        const r = xargsItems(input, o.E != null ? o.E : null, replaceStr == null);
+        if (r.err) { ctx.err('xargs: ' + r.err + '\n'); return 1; }
+        items = r.items;
+      }
+
+      const chunks = []; let cur = []; let seen = 0;
+      for (const it of items) {
+        cur.push(it.text);
+        if (it.eol) seen++;
+        if ((replaceStr != null) || (maxArgs != null && cur.length >= maxArgs) || (lines != null && it.eol && seen >= lines)) { chunks.push(cur); cur = []; seen = 0; }
+      }
+      if (cur.length) chunks.push(cur);
+      if (!chunks.length && !o.r && replaceStr == null) chunks.push([]);
+
+      let status = 0;
+      for (const chunk of chunks) {
+        const argv = replaceStr != null ? cmd.map((a) => a.split(replaceStr).join(chunk[0])) : cmd.concat(chunk);
+        if (o.t) ctx.err(argv.map(shellQuote).join(' ') + '\n');
+        const r = await ctx.run(argv, { stdin: '' });
+        if (r.code === 127 && /command not found/.test(r.err)) { ctx.err('xargs: ' + argv[0] + ': No such file or directory\n'); return 127; }
+        ctx.out(r.out); ctx.err(r.err);
+        if (r.code === 255) { ctx.err('xargs: ' + argv[0] + ': exited with status 255; aborting\n'); return 124; }
+        if (r.code === 127 || r.code === 126) return r.code;
+        if (r.code !== 0) status = 123;
+        ctx.checkAbort();
+      }
+      return status;
+    },
+  });
+
   /* @@INSERT@@ */
 })(typeof globalThis !== 'undefined' ? globalThis : this);

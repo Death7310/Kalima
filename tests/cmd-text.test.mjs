@@ -18,13 +18,13 @@ const out = async (line) => (await run(line)).out;
 let tableDir = 0;
 function table(name, setup, locale, rows) {
   test(name, async () => {
-    const dir = '/tmp/tbl' + (tableDir++);
-    sim.machine.vfs.seedDir(dir);
-    sim.machine.vfs.chmod(dir, 0o777);
-    await run('cd ' + dir + '; LC_ALL=' + locale + '; export LC_ALL');
-    for (const m of setup.matchAll(/mkdir (\w+)/g)) sim.machine.vfs.seedDir(dir + '/' + m[1]);   // mkdir belongs to another pack
-    await run(setup.replace(/mkdir \w+;?/g, ''));
     for (const [line, stdout, stderr, status] of rows) {
+      const dir = '/tmp/tbl' + (tableDir++);     // every row starts from the same fresh files
+      sim.machine.vfs.seedDir(dir);
+      sim.machine.vfs.chmod(dir, 0o777);
+      for (const m of setup.matchAll(/mkdir (\w+)/g)) sim.machine.vfs.seedDir(dir + '/' + m[1]);   // mkdir belongs to another pack
+      await run('cd ' + dir + '; LC_ALL=' + locale + '; export LC_ALL');
+      await run(setup.replace(/mkdir \w+;?/g, ''));
       const r = await run(line);
       assert.deepEqual([r.out, r.err.replace(/[‘’]/g, "'"), r.code], [stdout, stderr.replace(/[‘’]/g, "'"), status], line);
     }
@@ -284,4 +284,190 @@ test('--help and --version', async () => {
   }
   assert.equal((await run('wc --bogus')).code, 1);
   assert.equal((await run('sort --bogus')).code, 2);
+});
+
+table("tr matches GNU", "printf 'Hello  World aab\\n' > in; printf 'a\\tb\\r\\nc d\\n' > dos; printf 'x\\ny\\n' > xy", 'C.UTF-8', [
+  ["tr < in", "", "tr: missing operand\nTry 'tr --help' for more information.\n", 1],
+  ["tr a < in", "", "tr: missing operand after ‘a’\nTwo strings must be given when translating.\nTry 'tr --help' for more information.\n", 1],
+  ["tr a b c < in", "", "tr: extra operand ‘c’\nTry 'tr --help' for more information.\n", 1],
+  ["tr -d a b < in", "", "tr: extra operand ‘b’\nOnly one string may be given when deleting without squeezing repeats.\nTry 'tr --help' for more information.\n", 1],
+  ["tr -s < in", "", "tr: missing operand\nTry 'tr --help' for more information.\n", 1],
+  ["tr -ds a < in", "", "tr: missing operand after ‘a’\nTwo strings must be given when both deleting and squeezing repeats.\nTry 'tr --help' for more information.\n", 1],
+  ["tr a '' < in", "", "tr: when not truncating set1, string2 must be non-empty\n", 1],
+  ["tr -t a '' < in", "Hello  World aab\n", "", 0],
+  ["tr z-a x < in", "", "tr: range-endpoints of 'z-a' are in reverse collating sequence order\n", 1],
+  ["tr '[:foo:]' x < in", "", "tr: invalid character class ‘foo’\n", 1],
+  ["tr a '[:alpha:]' < in", "", "tr: when translating, the only character classes that may appear in\nstring2 are 'upper' and 'lower'\n", 1],
+  ["tr '[:upper:]' '[:lower:]' < in", "hello  world aab\n", "", 0],
+  ["tr '[:lower:]' '[:upper:]' < in", "HELLO  WORLD AAB\n", "", 0],
+  ["tr 'a-z' 'A-Z' < in", "HELLO  WORLD AAB\n", "", 0],
+  ["tr '[a*]' b < in", "", "tr: the [c*] repeat construct may not appear in string1\n", 1],
+  ["tr a '[b*2]c' < in", "Hello  World bbb\n", "", 0],
+  ["tr -c a < in", "", "tr: missing operand after ‘a’\nTwo strings must be given when translating.\nTry 'tr --help' for more information.\n", 1],
+  ["tr -cd '[:alnum:]' < in", "HelloWorldaab", "", 0],
+  ["tr 'a-c' 'A-B' < in", "Hello  World AAB\n", "", 0],
+  ["tr -t 'a-c' 'A-B' < in", "Hello  World AAB\n", "", 0],
+  ["tr aa xy < in", "Hello  World yyb\n", "", 0],
+  ["tr ab 'x\\' < in", "Hello  World xx\\\n", "tr: warning: an unescaped backslash at end of string is not portable\n", 0],
+  ["tr -x a < in", "", "tr: invalid option -- 'x'\nTry 'tr --help' for more information.\n", 1],
+  ["tr '[=a=]' x < in", "Hello  World xxb\n", "", 0],
+  ["tr -s ' ' < in", "Hello World aab\n", "", 0],
+  ["tr -cs 'a-z' '\\n' < in", "\nello\norld\naab\n", "", 0],
+  ["tr -ds 'a' 'b' < in", "Hello  World b\n", "", 0],
+  ["tr ab 'x[:upper:]' < in", "", "tr: misaligned [:upper:] and/or [:lower:] construct\n", 1],
+  ["tr '\\101-\\103' x < in", "Hello  World aab\n", "", 0],
+  ["tr 'a-' x < in", "Hello  World xxb\n", "", 0],
+  ["tr -d '\\r' < dos", "a\tb\nc d\n", "", 0],
+  ["tr '\\t' ' ' < dos", "a b\r\nc d\n", "", 0],
+  ["tr -d '\\n' < xy", "xy", "", 0],
+  ["tr -d '[:space:]' < dos", "abcd", "", 0],
+  ["tr 'a-y' 'b-z' < in", "Hfmmp  Wpsme bbc\n", "", 0],
+  ["tr -s 'a-z' < in", "Helo  World ab\n", "", 0],
+  ["tr -s 'lo' 'LO' < in", "HeLO  WOrLd aab\n", "", 0],
+  ["tr -c '[:alpha:]' '_' < in", "Hello__World_aab_", "", 0],
+  ["tr -C 'a-z' '[X*]' < in", "XelloXXXorldXaabX", "", 0],
+  ["tr 'abc' '[X*]' < in", "Hello  World XXX\n", "", 0],
+  ["tr a-c '[A*2]' < in", "Hello  World AAA\n", "", 0],
+  ["tr -d 'a-z' < in", "H  W \n", "", 0],
+  ["tr -dc 'a-z' < in", "elloorldaab", "", 0],
+  ["tr '[:alpha:]' '[X*]' < in", "XXXXX  XXXXX XXX\n", "", 0],
+  ["echo 'é à' | tr 'a-zé' 'A-Z_'", "__ _�\n", "", 0],
+  ["echo hello | tr -- '-a' x", "hello\n", "", 0],
+  ["tr '\\n' ',' < xy", "x,y,", "", 0],
+  ["tr -d '\\000' < xy", "x\ny\n", "", 0],
+  ["tr '[:punct:]' '.' < dos", "a\tb\r\nc d\n", "", 0],
+  ["tr '\\\\' '/' < in", "Hello  World aab\n", "", 0],
+  ["tr -s '\\n' < xy", "x\ny\n", "", 0],
+  ["tr '[a-c]' '[A-C]' < in", "Hello  World AAB\n", "", 0],
+  ["tr -d -- '-' < in", "Hello  World aab\n", "", 0],
+  ["tr 'a-c-e' x < in", "Hxllo  World xxx\n", "", 0],
+  ["tr '[:digit:]-' x < in", "Hello  World aab\n", "", 0],
+  ["tr '[]' x < in", "Hello  World aab\n", "", 0],
+  ["tr '[' x < in", "Hello  World aab\n", "", 0],
+  ["tr 'a[' '\\n' < in", "Hello  World \n\nb\n", "", 0],
+  ["tr '[x' y < in", "Hello  World aab\n", "", 0],
+  ["tr '[x*' y < in", "Hello  World aab\n", "", 0],
+  ["tr '[x*]' y < in", "", "tr: the [c*] repeat construct may not appear in string1\n", 1],
+]);
+
+table("xargs matches GNU", "printf 'a b\\n\"c d\" e\\n' > xin; printf 'one two\\nthree\\n' > l", 'C.UTF-8', [
+  ["xargs -n1 echo < xin", "a\nb\nc d\ne\n", "", 0],
+  ["xargs echo < /dev/null", "\n", "", 0],
+  ["xargs -r echo hi < /dev/null", "", "", 0],
+  ["xargs -I{} echo [{}] < xin", "[a b]\n[c d e]\n", "", 0],
+  ["xargs -I{} echo [{}] < /dev/null", "", "", 0],
+  ["xargs -L1 echo < xin", "a b\nc d e\n", "", 0],
+  ["xargs -n2 -t echo < xin", "a b\nc d e\n", "echo a b\necho 'c d' e\n", 0],
+  ["xargs -d, echo < xin", "a b\n\"c d\" e\n\n", "", 0],
+  ["printf 'a\\0b c\\0' | xargs -0 -n1 echo", "a\nb c\n", "", 0],
+  ["echo \"it's\" | xargs echo", "", "xargs: unmatched single quote; by default quotes are special to xargs unless you use the -0 option\n", 1],
+  ["echo 'a\"b' | xargs echo", "", "xargs: unmatched double quote; by default quotes are special to xargs unless you use the -0 option\n", 1],
+  ["xargs nonexistentcmd < xin; echo $?", "127\n", "xargs: nonexistentcmd: No such file or directory\n", 0],
+  ["xargs -n0 echo < xin", "", "xargs: value 0 for -n option should be >= 1\nTry 'xargs --help' for more information.\n", 1],
+  ["xargs -L0 echo < xin", "", "xargs: value 0 for -L option should be >= 1\nTry 'xargs --help' for more information.\n", 1],
+  ["xargs -n x echo < xin", "", "xargs: invalid number \"x\" for -n option\nTry 'xargs --help' for more information.\n", 1],
+  ["xargs -E c echo < xin", "a b c d e\n", "", 0],
+  ["xargs sh -c 'exit 1' < xin; echo $?", "123\n", "", 0],
+  ["printf '1\\n2\\n3\\n' | xargs -n2 echo", "1 2\n3\n", "", 0],
+  ["printf 'a  b\\n' | xargs -I X echo 'X-X'", "a  b-a  b\n", "", 0],
+  ["printf ' a\\n b \\n' | xargs -I X echo '<X>'", "<a>\n<b >\n", "", 0],
+  ["printf 'a b\\nc\\n\\nd\\n' | xargs -L2 echo", "a b c\nd\n", "", 0],
+  ["printf 'a \\nb\\nc\\n' | xargs -L1 echo", "a b\nc\n", "", 0],
+  ["printf 'a\\\\ b\\n' | xargs echo", "a b\n", "", 0],
+  ["xargs -a xin -n1 echo", "a\nb\nc d\ne\n", "", 0],
+  ["xargs -a nonex echo", "", "xargs: Cannot open input file ‘nonex’: No such file or directory\n", 1],
+  ["xargs -i echo '{}x' < xin", "a bx\nc d ex\n", "", 0],
+  ["echo a b c | xargs -n 2 -I{} echo {}", "a b c\n", "xargs: warning: options --max-args and --replace/-I/-i are mutually exclusive, ignoring previous --max-args value\n", 0],
+  ["xargs -n1 echo < /dev/null", "\n", "", 0],
+  ["xargs -L1 echo < /dev/null", "\n", "", 0],
+  ["printf 'a\\nSTOP\\nb\\n' | xargs -E STOP echo", "a\n", "", 0],
+  ["printf 'x y z\\n' | xargs -n1 -t echo", "x\ny\nz\n", "echo x\necho y\necho z\n", 0],
+  ["printf 'a b\\n' | xargs -t echo \"it's\"", "it's a b\n", "echo \"it's\" a b\n", 0],
+  ["printf 'a\\n' | xargs", "a\n", "", 0],
+  ["xargs --bogus", "", "xargs: unrecognized option '--bogus'\nTry 'xargs --help' for more information.\n", 1],
+  ["printf 'a\\nb\\n' | xargs -n1 -I@ echo @ @", "a a\nb b\n", "xargs: warning: options --max-args and --replace/-I/-i are mutually exclusive, ignoring previous --max-args value\n", 0],
+  ["printf 'b\\na\\n' | xargs -L1 echo x", "x b\nx a\n", "", 0],
+  ["printf 'a\\n' | xargs -d '\\n' echo", "a\n", "", 0],
+  ["printf 'a,b,c' | xargs -d, -n1 echo", "a\nb\nc\n", "", 0],
+]);
+
+table("seq and tee match GNU", "printf 'x\\ny\\n' > xy; printf 'old\\n' > old", 'C.UTF-8', [
+  ["seq", "", "seq: missing operand\nTry 'seq --help' for more information.\n", 1],
+  ["seq a", "", "seq: invalid floating point argument: ‘a’\nTry 'seq --help' for more information.\n", 1],
+  ["seq 1 2 3 4", "", "seq: extra operand ‘4’\nTry 'seq --help' for more information.\n", 1],
+  ["seq 0 1 3", "0\n1\n2\n3\n", "", 0],
+  ["seq 1 0 3", "", "seq: invalid Zero increment value: ‘0’\nTry 'seq --help' for more information.\n", 1],
+  ["seq 3 -1 1", "3\n2\n1\n", "", 0],
+  ["seq 1.5", "1\n", "", 0],
+  ["seq 0.5 0.25 2", "0.50\n0.75\n1.00\n1.25\n1.50\n1.75\n2.00\n", "", 0],
+  ["seq -w 8 10", "08\n09\n10\n", "", 0],
+  ["seq -s, 3", "1,2,3\n", "", 0],
+  ["seq -f %03g 3", "001\n002\n003\n", "", 0],
+  ["seq -f %d 3", "", "seq: format ‘%d’ has unknown %d directive\n", 1],
+  ["seq -f '%.2f' 1 3", "1.00\n2.00\n3.00\n", "", 0],
+  ["seq -f 'x%gy' 2", "x1y\nx2y\n", "", 0],
+  ["seq -w -f %g 3", "", "seq: format string may not be specified when printing equal width strings\nTry 'seq --help' for more information.\n", 1],
+  ["seq -f 'a' 3", "", "seq: format ‘a’ has no % directive\n", 1],
+  ["seq -f '%g%g' 3", "", "seq: format ‘%g%g’ has too many % directives\n", 1],
+  ["seq -f '%%%g' 2", "%1\n%2\n", "", 0],
+  ["seq 1e2 e 1", "", "seq: invalid floating point argument: ‘e’\nTry 'seq --help' for more information.\n", 1],
+  ["seq 10 -3 0", "10\n7\n4\n1\n", "", 0],
+  ["seq 5 1", "", "", 0],
+  ["seq -w 1 0.5 3", "1.0\n1.5\n2.0\n2.5\n3.0\n", "", 0],
+  ["seq -s 'ab' 3", "1ab2ab3\n", "", 0],
+  ["seq -w 08 10", "08\n09\n10\n", "", 0],
+  ["seq -s: -w 99 101", "099:100:101\n", "", 0],
+  ["seq 3.0", "1\n2\n3\n", "", 0],
+  ["seq 1e1", "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n", "", 0],
+  ["seq 2 1e0 4", "2\n3\n4\n", "", 0],
+  ["seq --equal-width 3 5", "3\n4\n5\n", "", 0],
+  ["seq -- -3 -1", "-3\n-2\n-1\n", "", 0],
+  ["seq -2", "", "", 0],
+  ["seq nan", "", "seq: invalid ‘not-a-number’ argument: ‘nan’\nTry 'seq --help' for more information.\n", 1],
+  ["seq 0.1 0.1 0.5", "0.1\n0.2\n0.3\n0.4\n0.5\n", "", 0],
+  ["seq 1 -1", "", "", 0],
+  ["seq 1 +2 5", "1\n3\n5\n", "", 0],
+  ["seq -w -5 -1", "-5\n-4\n-3\n-2\n-1\n", "", 0],
+  ["seq -w -1 1", "-1\n00\n01\n", "", 0],
+  ["seq -f '%5.1f' 1 3", "  1.0\n  2.0\n  3.0\n", "", 0],
+  ["seq -f '%e' 2", "1.000000e+00\n2.000000e+00\n", "", 0],
+  ["seq -f '%x' 2", "", "seq: format ‘%x’ has unknown %x directive\n", 1],
+  ["seq 0", "", "", 0],
+  ["seq 1 1", "1\n", "", 0],
+  ["seq -3 -1", "-3\n-2\n-1\n", "", 0],
+  ["seq 1 2", "1\n2\n", "", 0],
+  ["seq -s ' ' 5", "1 2 3 4 5\n", "", 0],
+  ["seq --separator=- 3", "1-2-3\n", "", 0],
+  ["seq --format=%g 2", "1\n2\n", "", 0],
+  ["seq 10 5 30", "10\n15\n20\n25\n30\n", "", 0],
+  ["tee", "", "", 0],
+  ["tee f < xy; grep '' f", "x\ny\nx\ny\n", "", 0],
+  ["tee -a old < xy; grep '' old", "x\ny\nold\nx\ny\n", "", 0],
+  ["tee a b < xy; grep '' a b", "x\ny\na:x\na:y\nb:x\nb:y\n", "", 0],
+  ["tee /nonexistent/f < xy; echo $?", "x\ny\n1\n", "tee: /nonexistent/f: No such file or directory\n", 0],
+  ["tee -a f < xy; tee -a f < xy; grep '' f", "x\ny\nx\ny\nx\ny\nx\ny\n", "", 0],
+  ["tee --bogus < xy", "", "tee: unrecognized option '--bogus'\nTry 'tee --help' for more information.\n", 1],
+  ["tee -z < xy", "", "tee: invalid option -- 'z'\nTry 'tee --help' for more information.\n", 1],
+]);
+
+
+test('yes: bounded when captured, interruptible on the terminal', async () => {
+  const lines = (await out('yes')).split('\n');
+  assert.equal(lines[0], 'y');
+  assert.ok(lines.length > 1000 && lines.length < 100000, 'bounded');
+  assert.equal(await out('yes no thanks | grep -c "no thanks"'), String((await out('yes no thanks')).split('\n').length - 1) + '\n');
+  assert.match((await run('yes --version')).out, /^yes \(GNU coreutils\)/);
+  const { K, shell, term } = sim;
+  K.clock.useReal(); K.settings.timeScale = 1;
+  const p = shell.runLine('yes');
+  setTimeout(() => term.raiseInterrupt(), 30);
+  assert.equal(await p, 130);
+  term.take();
+  K.clock.useVirtual();
+});
+
+test('xargs runs commands through the shell and tee passes data on', async () => {
+  assert.equal(await out("printf 'a\\nb\\n' | xargs -n1 echo item"), 'item a\nitem b\n');
+  assert.equal(await out("printf 'a\\nb\\n' | tee /tmp/tee1.txt | grep -c ."), '2\n');
+  assert.equal(await out('grep -c . /tmp/tee1.txt'), '2\n');
 });
