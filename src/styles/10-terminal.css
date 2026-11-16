@@ -1,0 +1,126 @@
+/* Kalima — terminal widget (K.ui.Terminal), pager and editors.
+ * The palette follows Kali's default terminal profile so coloured tool output
+ * looks the way it does on the real desktop.
+ */
+.kt {
+  --kt-fs: 14px;
+  --kt-lh: 18px;
+  --kt-bg: #101217;
+  --kt-fg: #e8eaf0;
+  --kt-pad: 10px;
+  --kt-c0: #1f2229; --kt-c1: #e0494f; --kt-c2: #5ebdab; --kt-c3: #fea44c;
+  --kt-c4: #4a8cf7; --kt-c5: #b06bcf; --kt-c6: #49aee6; --kt-c7: #e6e6e6;
+  --kt-c8: #6f7a8c; --kt-c9: #ff5d62; --kt-c10: #47d4b9; --kt-c11: #ffb454;
+  --kt-c12: #5c9bff; --kt-c13: #c583e6; --kt-c14: #3fc1ff; --kt-c15: #ffffff;
+
+  position: relative;
+  display: grid; grid-template-rows: minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr);
+  width: 100%; height: 100%; min-width: 0; min-height: 0;
+  background: var(--kt-bg); color: var(--kt-fg);
+  font-family: var(--k-mono); font-size: var(--kt-fs); line-height: var(--kt-lh);
+  font-variant-ligatures: none; font-kerning: none; tab-size: 8;
+}
+.kt:focus-visible { outline: none; }
+
+.kt-view, .kt-over { grid-area: 1 / 1; min-width: 0; min-height: 0; }
+.kt-view {
+  position: relative; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
+  padding: 8px var(--kt-pad); cursor: text;
+  scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #3a4150 transparent;
+}
+.kt-line, .kt-below, .kt-ed-line { white-space: break-spaces; word-break: break-all; min-height: var(--kt-lh); }
+.kt-below:empty { display: none; }
+
+/* The real input field sits on the cursor so IME windows and the soft keyboard open in the right place. */
+.kt-input {
+  position: absolute; left: 0; top: 0; z-index: 1;
+  width: 2ch; height: var(--kt-lh); margin: 0; padding: 0; border: 0; outline: 0; resize: none; overflow: hidden;
+  background: transparent; color: transparent; caret-color: transparent;
+  font-family: inherit; font-size: max(16px, var(--kt-fs)); line-height: var(--kt-lh);
+  white-space: pre; pointer-events: none; opacity: 0.01;
+}
+.kt-input::selection { background: transparent; }
+.kt-probe { position: absolute; left: 0; top: 0; visibility: hidden; white-space: pre; pointer-events: none; }
+
+.kt-cursor { outline: 1px solid var(--kt-fg); outline-offset: -1px; }
+.kt-focus .kt-cursor { background: var(--kt-fg); color: var(--kt-bg); outline: none; }
+.kt-suggest { color: #8b93a3; }
+.kt-focus .kt-cursor.kt-suggest { background: var(--kt-fg); color: #4b5261; }
+
+/* ---- SGR ---- */
+.kt-f0 { color: var(--kt-c0); } .kt-f1 { color: var(--kt-c1); } .kt-f2 { color: var(--kt-c2); } .kt-f3 { color: var(--kt-c3); }
+.kt-f4 { color: var(--kt-c4); } .kt-f5 { color: var(--kt-c5); } .kt-f6 { color: var(--kt-c6); } .kt-f7 { color: var(--kt-c7); }
+.kt-f8 { color: var(--kt-c8); } .kt-f9 { color: var(--kt-c9); } .kt-f10 { color: var(--kt-c10); } .kt-f11 { color: var(--kt-c11); }
+.kt-f12 { color: var(--kt-c12); } .kt-f13 { color: var(--kt-c13); } .kt-f14 { color: var(--kt-c14); } .kt-f15 { color: var(--kt-c15); }
+.kt-b0 { background-color: var(--kt-c0); } .kt-b1 { background-color: var(--kt-c1); } .kt-b2 { background-color: var(--kt-c2); } .kt-b3 { background-color: var(--kt-c3); }
+.kt-b4 { background-color: var(--kt-c4); } .kt-b5 { background-color: var(--kt-c5); } .kt-b6 { background-color: var(--kt-c6); } .kt-b7 { background-color: var(--kt-c7); }
+.kt-b8 { background-color: var(--kt-c8); } .kt-b9 { background-color: var(--kt-c9); } .kt-b10 { background-color: var(--kt-c10); } .kt-b11 { background-color: var(--kt-c11); }
+.kt-b12 { background-color: var(--kt-c12); } .kt-b13 { background-color: var(--kt-c13); } .kt-b14 { background-color: var(--kt-c14); } .kt-b15 { background-color: var(--kt-c15); }
+.kt-fbg { color: var(--kt-bg); }
+.kt-bfg { background-color: var(--kt-fg); }
+.kt-bold { font-weight: 700; }
+.kt-dim { opacity: 0.62; }
+.kt-italic { font-style: italic; }
+.kt-ul { text-decoration: underline; }
+.kt-strike { text-decoration: line-through; }
+.kt-ul.kt-strike { text-decoration: underline line-through; }
+.kt-inv, .kt-mark, .kt-sel { background: var(--kt-fg); color: var(--kt-bg); }
+.kt-dir { color: var(--kt-c12); font-weight: 700; }
+.kt-dir.kt-sel { color: var(--kt-bg); }
+
+/* ---- touch key bar ---- */
+.kt-keys {
+  grid-area: 2 / 1; display: flex; gap: 6px; overflow-x: auto; overscroll-behavior: contain;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: var(--k-surface); border-top: 1px solid var(--k-line);
+  scrollbar-width: none; touch-action: pan-x;
+}
+.kt-keys::-webkit-scrollbar { display: none; }
+.kt-key {
+  flex: 0 0 auto; min-width: 42px; height: 38px; padding: 0 10px;
+  border: 1px solid var(--k-line-strong); border-radius: 6px;
+  background: var(--k-raised); color: var(--k-text);
+  font: 600 13px/1 var(--k-mono); touch-action: manipulation; user-select: none; -webkit-user-select: none;
+}
+.kt-key:active { background: var(--k-hover); }
+.kt-key[aria-pressed="true"] { background: var(--k-accent-strong); border-color: var(--k-accent-strong); color: #fff; }
+
+/* ---- full-screen programs ---- */
+.kt-over { z-index: 2; display: flex; flex-direction: column; background: var(--kt-bg); }
+.kt-pager, .kt-ed { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; padding-top: 8px; }
+.kt-pager-body, .kt-ed-body {
+  position: relative; flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
+  padding: 0 var(--kt-pad); scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #3a4150 transparent;
+}
+.kt-row { height: var(--kt-lh); white-space: pre; overflow: hidden; }
+.kt-pager-status, .kt-vim-status, .kt-nano-status { flex: none; height: var(--kt-lh); padding: 0 var(--kt-pad); white-space: pre; overflow: hidden; }
+.kt-pager-status { margin-bottom: 6px; }
+.kt-ed-body { cursor: text; }
+
+.kt-nano-title {
+  flex: none; display: grid; grid-template-columns: 1fr auto 1fr; gap: 1ch; margin-top: -8px; padding: 0 var(--kt-pad);
+  background: var(--kt-fg); color: var(--kt-bg); white-space: pre; overflow: hidden;
+}
+.kt-nano-title > :last-child { text-align: right; }
+.kt-nano .kt-ed-body { margin-top: var(--kt-lh); }
+.kt-nano-status { text-align: center; padding: 0; }
+.kt-nano-ask { padding: 0 var(--kt-pad); background: var(--kt-fg); color: var(--kt-bg); text-align: left; }
+.kt-nano-ask .kt-cursor, .kt-focus .kt-nano-ask .kt-cursor { background: var(--kt-bg); color: var(--kt-fg); outline: none; }
+.kt-nano-legend { flex: none; display: grid; column-gap: 1ch; padding: 0 var(--kt-pad) 6px; }
+.kt-nano-legend span { height: var(--kt-lh); white-space: pre; overflow: hidden; }
+.kt-nano-legend b { background: var(--kt-fg); color: var(--kt-bg); font-weight: 400; }
+
+.kt-vim-fill { color: var(--kt-c4); white-space: pre; user-select: none; -webkit-user-select: none; }
+.kt-vim-nr { color: var(--kt-c3); user-select: none; -webkit-user-select: none; }
+.kt-vim-status { display: flex; margin-bottom: 6px; }
+.kt-vim-msg { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.kt-vim-pend { flex: none; width: 11ch; }
+.kt-vim-ruler { flex: none; width: 18ch; }
+.kt-vim-err { background: var(--kt-c1); color: #fff; }
+.kt-vim-warn { color: var(--kt-c9); }
+
+@media (max-width: 480px) {
+  .kt { --kt-pad: 6px; }
+  .kt-vim-pend { width: 4ch; }
+  .kt-vim-ruler { width: 13ch; }
+}
