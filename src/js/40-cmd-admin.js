@@ -1417,4 +1417,451 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     man: 'DESCRIPTION\n       The getent command displays entries from databases supported by the Name Service Switch libraries.\n\nDATABASES\n       passwd, group, shadow, hosts, services, protocols\n\nEXAMPLES\n       getent passwd kali\n       getent hosts web01.halcyon.lab\n       getent services ssh',
     run: async (ctx) => getentMain(ctx) });
 
+  /* ============================================== system information */
+
+  const kv = (rows, width) => rows.map(([k, v]) => U.padEnd(k + ':', width) + v).join('\n') + '\n';
+  const unknownOption = (ctx, prog, err, tail) => { ctx.err(prog + ': ' + err + '\n' + tail); return 1; };
+  const COREUTILS_VERSION = '9.7';
+  const coreutilsVersion = (name, author) => name + ' (GNU coreutils) ' + COREUTILS_VERSION + '\nCopyright (C) 2025 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by ' + author + '.\n';
+  const coreutilsFooter = (name) => '\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/' + name + '>\nor available locally via: info \'(coreutils) ' + name + ' invocation\'\n';
+  const tryHelp = (name) => "Try '" + name + " --help' for more information.\n";
+
+  function cpuInfo(ctx) {
+    const text = ctx.fs.read('/proc/cpuinfo');
+    const blocks = text.split('\n\n').filter(Boolean);
+    const field = (k) => { const m = new RegExp('^' + k + '\\s*:\\s*(.*)$', 'm').exec(blocks[0]); return m ? m[1] : ''; };
+    return { n: blocks.length, model: field('model name'), family: field('cpu family'), modelNo: field('model'), stepping: field('stepping'), bogo: field('bogomips'), flags: field('flags'), vendor: field('vendor_id'), cores: parseInt(field('cpu cores'), 10) || blocks.length, addr: field('address sizes') };
+  }
+
+  const VULNS = [['Gather data sampling', 'Unknown: Dependent on hypervisor status'], ['Indirect target selection', 'Not affected'], ['Itlb multihit', 'KVM: Mitigation: VMX unsupported'], ['L1tf', 'Mitigation; PTE Inversion'],
+    ['Mds', 'Mitigation; Clear CPU buffers; SMT Host state unknown'], ['Meltdown', 'Mitigation; PTI'], ['Mmio stale data', 'Mitigation; Clear CPU buffers; SMT Host state unknown'], ['Reg file data sampling', 'Not affected'],
+    ['Retbleed', 'Mitigation; IBRS'], ['Spec rstack overflow', 'Not affected'], ['Spec store bypass', 'Mitigation; Speculative Store Bypass disabled via prctl'],
+    ['Spectre v1', 'Mitigation; usercopy/swapgs barriers and __user pointer sanitization'], ['Spectre v2', 'Mitigation; IBRS; IBPB conditional; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI SW loop, KVM SW loop'],
+    ['Srbds', 'Unknown: Dependent on hypervisor status'], ['Tsa', 'Not affected'], ['Tsx async abort', 'Not affected']];
+
+  reg({ name: 'lscpu', pkg: 'util-linux', section: 1, summary: 'display information about the CPU architecture', synopsis: 'lscpu [options]',
+    man: 'DESCRIPTION\n       lscpu gathers CPU architecture information from sysfs, /proc/cpuinfo and any applicable architecture-specific libraries and prints it in a human-readable format.\n\nOPTIONS\n       -V, --version   display version\n       -h, --help      display help\n\nEXAMPLES\n       lscpu | grep -i "model name"',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'hV', long: ['help', 'version'] });
+      if (g.err) return unknownOption(ctx, 'lscpu', g.err, "Try 'lscpu --help' for more information.\n");
+      if (g.opts.h) { ctx.out('\nUsage:\n lscpu [options]\n\nDisplay information about the CPU architecture.\n\nOptions:\n -a, --all               print both online and offline CPUs (default for -e)\n -b, --online            print online CPUs only (default for -p)\n -h, --help              display this help\n -V, --version           display version\n\nFor more details see lscpu(1).\n'); return 0; }
+      if (g.opts.V) { ctx.out('lscpu from util-linux 2.41.2\n'); return 0; }
+      const c = cpuInfo(ctx);
+      const online = c.n === 1 ? '0' : '0-' + (c.n - 1);
+      const rows = [['Architecture', 'x86_64'], ['CPU op-mode(s)', '32-bit, 64-bit'], ['Address sizes', c.addr], ['Byte Order', 'Little Endian'], ['CPU(s)', String(c.n)], ['On-line CPU(s) list', online],
+        ['Vendor ID', c.vendor], ['Model name', c.model], ['CPU family', c.family], ['Model', c.modelNo], ['Thread(s) per core', String(Math.max(1, c.n / c.cores))], ['Core(s) per socket', String(c.cores)], ['Socket(s)', '1'],
+        ['Stepping', c.stepping], ['BogoMIPS', c.bogo], ['Flags', c.flags], ['Hypervisor vendor', 'KVM'], ['Virtualization type', 'full'], ['L1d cache', 32 * c.n + ' KiB (' + c.n + ' instances)'],
+        ['L1i cache', 32 * c.n + ' KiB (' + c.n + ' instances)'], ['L2 cache', 256 * c.n + ' KiB (' + c.n + ' instances)'], ['L3 cache', '12 MiB (1 instance)'], ['NUMA node(s)', '1'], ['NUMA node0 CPU(s)', online]]
+        .concat(VULNS.map(([k, v]) => ['Vulnerability ' + k, v]));
+      ctx.out(kv(rows, 41));
+      return 0;
+    } });
+
+  const MODULES = [['vsock_loopback', 12288, '0'], ['vmw_vsock_virtio_transport_common', 57344, '1 vsock_loopback'], ['vmw_vsock_vmci_transport', 40960, '1'], ['vsock', 61440, '5 vmw_vsock_virtio_transport_common,vsock_loopback,vmw_vsock_vmci_transport'],
+    ['intel_rapl_msr', 20480, '0'], ['intel_rapl_common', 53248, '1 intel_rapl_msr'], ['crct10dif_pclmul', 12288, '1'], ['ghash_clmulni_intel', 16384, '0'], ['sha512_ssse3', 53248, '0'], ['aesni_intel', 122880, '0'], ['crypto_simd', 16384, '1 aesni_intel'],
+    ['cryptd', 28672, '2 crypto_simd,ghash_clmulni_intel'], ['snd_intel8x0', 53248, '0'], ['snd_ac97_codec', 196608, '1 snd_intel8x0'], ['ac97_bus', 12288, '1 snd_ac97_codec'], ['snd_pcm', 188416, '2 snd_intel8x0,snd_ac97_codec'],
+    ['vmwgfx', 421888, '2'], ['drm_ttm_helper', 16384, '1 vmwgfx'], ['ttm', 106496, '2 vmwgfx,drm_ttm_helper'], ['e1000', 180224, '0'], ['evdev', 28672, '12'], ['ac', 16384, '0'], ['button', 24576, '0'], ['joydev', 28672, '0'],
+    ['loop', 40960, '0'], ['fuse', 200704, '3'], ['drm', 806912, '5 drm_kms_helper,vmwgfx,drm_ttm_helper,ttm'], ['ext4', 1163264, '1'], ['mbcache', 16384, '1 ext4'], ['jbd2', 217088, '1 ext4'], ['crc32c_generic', 12288, '0'],
+    ['sd_mod', 77824, '3'], ['sg', 45056, '0'], ['sr_mod', 28672, '0'], ['cdrom', 81920, '1 sr_mod'], ['ata_generic', 12288, '0'], ['ata_piix', 45056, '0'], ['libata', 438272, '2 ata_piix,ata_generic'], ['scsi_mod', 327680, '4 sd_mod,libata,sg,sr_mod']];
+
+  reg({ name: 'lsmod', pkg: 'kmod', path: '/usr/sbin/lsmod', section: 8, summary: 'Show the status of modules in the Linux Kernel', synopsis: 'lsmod',
+    man: 'DESCRIPTION\n       lsmod is a trivial program which nicely formats the contents of the /proc/modules, showing what kernel modules are currently loaded.\n\nEXAMPLES\n       lsmod | grep -i snd',
+    run(ctx) {
+      if (ctx.args.length) { ctx.err('Usage: lsmod\n'); return 1; }
+      ctx.out('Module                  Size  Used by\n' + MODULES.map(([n, size, used]) => U.padEnd(n, 19) + ' ' + U.padStart(size, 8) + '  ' + used).join('\n') + '\n');
+      return 0;
+    } });
+
+  const USB_DEVICES = [{ bus: 2, dev: 1, id: '1d6b:0003', name: 'Linux Foundation 3.0 root hub' }, { bus: 1, dev: 2, id: '0627:0001', name: 'Adomax Technology Co., Ltd QEMU USB Tablet' }, { bus: 1, dev: 1, id: '1d6b:0002', name: 'Linux Foundation 2.0 root hub' }];
+  reg({ name: 'lsusb', pkg: 'usbutils', section: 8, summary: 'list USB devices', synopsis: 'lsusb [options]',
+    man: 'DESCRIPTION\n       lsusb is a utility for displaying information about USB buses in the system and the devices connected to them.\n\nOPTIONS\n       -t, --tree   dump the physical USB device hierarchy as a tree\n       -s [[bus]:][devnum]   show only devices with the given bus and device number\n       -V, --version   show version\n\nEXAMPLES\n       lsusb\n       lsusb -t',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'vtVhs:d:D:', long: ['verbose', 'tree', 'version', 'help'], alias: { tree: 't', version: 'V', help: 'h', verbose: 'v' } });
+      if (g.err) { ctx.err('lsusb: ' + g.err + '\nUsage: lsusb [options]...\n'); return 1; }
+      if (g.opts.V) { ctx.out('lsusb (usbutils) 018\n'); return 0; }
+      if (g.opts.h) { ctx.out('Usage: lsusb [options]...\nList USB devices\n  -v, --verbose\n      Increase verbosity (show descriptors)\n  -s [[bus]:][devnum]\n      Show only devices with specified device and/or\n      bus numbers (in decimal)\n  -d vendor:[product]\n      Show only devices with the specified vendor and\n      product ID numbers (in hexadecimal)\n  -t, --tree\n      Dump the physical USB device hierarchy as a tree\n  -V, --version\n      Show version of program\n  -h, --help\n      Show usage and help\n'); return 0; }
+      if (g.opts.t) { ctx.out('/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/4p, 480M\n    |__ Port 001: Dev 002, If 0, Class=Human Interface Device, Driver=usbhid, 480M\n/:  Bus 002.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/4p, 5000M\n'); return 0; }
+      let list = USB_DEVICES;
+      if (typeof g.opts.s === 'string') { const [b, d] = g.opts.s.includes(':') ? g.opts.s.split(':') : ['', g.opts.s]; list = list.filter((x) => (!b || x.bus === +b) && (!d || x.dev === +d)); }
+      if (typeof g.opts.d === 'string') list = list.filter((x) => x.id.startsWith(g.opts.d.replace(/:$/, '')));
+      if (!list.length && (g.opts.s || g.opts.d)) return 1;
+      ctx.out(list.map((x) => 'Bus ' + U.padStart(x.bus, 3, '0') + ' Device ' + U.padStart(x.dev, 3, '0') + ': ID ' + x.id + ' ' + x.name).join('\n') + '\n');
+      return 0;
+    } });
+
+  const PCI_DEVICES = [['00:00.0', 'Host bridge', '0600', 'Intel Corporation 82G33/G31/P35/P31 Express DRAM Controller', '8086:29c0', '', ''], ['00:01.0', 'VGA compatible controller', '0300', 'Red Hat, Inc. Virtio 1.0 GPU', '1af4:1050', '01', 'virtio-pci'],
+    ['00:02.0', 'Ethernet controller', '0200', 'Red Hat, Inc. Virtio 1.0 network device', '1af4:1041', '01', 'virtio-pci'], ['00:03.0', 'USB controller', '0c03', 'Red Hat, Inc. QEMU XHCI Host Controller', '1b36:000d', '01', 'xhci_hcd'],
+    ['00:04.0', 'SCSI storage controller', '0100', 'Red Hat, Inc. Virtio 1.0 block device', '1af4:1042', '01', 'virtio-pci'], ['00:1f.0', 'ISA bridge', '0601', 'Intel Corporation 82801IB (ICH9) LPC Interface Controller', '8086:2918', '02', 'lpc_ich'],
+    ['00:1f.2', 'SATA controller', '0106', 'Intel Corporation 82801IR/IO/IH (ICH9R/DO/DH) 6 port SATA Controller [AHCI mode]', '8086:2922', '02', 'ahci'], ['00:1f.3', 'SMBus', '0c05', 'Intel Corporation 82801I (ICH9 Family) SMBus Controller', '8086:2930', '02', 'i801_smbus']];
+  reg({ name: 'lspci', pkg: 'pciutils', path: '/usr/bin/lspci', section: 8, summary: 'list all PCI devices', synopsis: 'lspci [options]',
+    man: 'DESCRIPTION\n       lspci is a utility for displaying information about PCI buses in the system and devices connected to them.\n\nOPTIONS\n       -n    show numeric IDs\n       -nn   show both names and numeric IDs\n       -k    show kernel drivers handling each device\n       -v    be verbose\n\nEXAMPLES\n       lspci -k',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'nkvmtxDs:d:', long: ['version', 'help'] });
+      if (g.err) { ctx.err('lspci: ' + g.err + '\nUsage: lspci [<switches>]\n\nBasic display modes:\n-mm\t\tProduce machine-readable output (single -m for an obsolete format)\n-t\t\tShow bus tree\n\nDisplay options:\n-v\t\tBe verbose (-vv or -vvv for higher verbosity)\n-k\t\tShow kernel drivers handling each device\n-x\t\tShow hex-dump of the standard part of the config space\n-n\t\tShow numeric ID\'s\n-nn\t\tShow both textual and numeric ID\'s (names & numbers)\n'); return 1; }
+      if (g.opts.version) { ctx.out('lspci version 3.13.0\n'); return 0; }
+      let list = PCI_DEVICES;
+      if (typeof g.opts.s === 'string') list = list.filter((d) => d[0].endsWith(g.opts.s.replace(/^0*:?/, '')) || d[0] === g.opts.s);
+      const out = [];
+      for (const [slot, cls, clsId, name, id, rev, drv] of list) {
+        const revs = rev && rev !== '' ? ' (rev ' + rev + ')' : '';
+        if (g.count.n === 1) out.push(slot + ' ' + clsId + ': ' + id + revs);
+        else if (g.count.n >= 2) out.push(slot + ' ' + cls + ' [' + clsId + ']: ' + name + ' [' + id + ']' + revs);
+        else out.push(slot + ' ' + cls + ': ' + name + revs);
+        if (g.opts.k && drv) out.push('\tKernel driver in use: ' + drv);
+      }
+      ctx.out(out.join('\n') + '\n');
+      return 0;
+    } });
+
+  function memInfo(ctx) {
+    const kb = {};
+    for (const line of ctx.fs.read('/proc/meminfo').split('\n')) { const m = /^(\w+):\s+(\d+)/.exec(line); if (m) kb[m[1]] = parseInt(m[2], 10); }
+    return kb;
+  }
+  const VMSTAT_USAGE = '\nUsage:\n vmstat [options] [delay [count]]\n\nOptions:\n -a, --active           active/inactive memory\n -f, --forks            number of forks since boot\n -m, --slabs            slabinfo\n -n, --one-header       do not redisplay header\n -s, --stats            event counter statistics\n -d, --disk             disk statistics\n -D, --disk-sum         summarize disk statistics\n -p, --partition <dev>  partition specific statistics\n -S, --unit <char>      define display unit\n -w, --wide             wide output\n -t, --timestamp        show timestamp\n\n -h, --help     display this help and exit\n -V, --version  output version information and exit\n\nFor more details see vmstat(8).\n';
+  reg({ name: 'vmstat', pkg: 'procps', section: 8, summary: 'Report virtual memory statistics', synopsis: 'vmstat [options] [delay [count]]',
+    man: 'DESCRIPTION\n       vmstat reports information about processes, memory, paging, block IO, traps, disks and cpu activity. The first report shows averages since the last reboot.\n\nOPTIONS\n       -a   display active and inactive memory\n       -s   display a table of event counters and memory statistics\n       -S unit   k, K, m or M\n       delay count   repeat the report every delay seconds, count times\n\nEXAMPLES\n       vmstat\n       vmstat 2 5',
+    async run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'afmnsdDp:S:wthV', long: ['active', 'forks', 'slabs', 'one-header', 'stats', 'disk', 'disk-sum', 'partition=', 'unit=', 'wide', 'timestamp', 'help', 'version'], alias: { active: 'a', stats: 's', unit: 'S', help: 'h', version: 'V', 'one-header': 'n' } });
+      if (g.err) { ctx.err('vmstat: ' + g.err + '\n' + VMSTAT_USAGE); return 1; }
+      if (g.opts.h) { ctx.out(VMSTAT_USAGE); return 0; }
+      if (g.opts.V) { ctx.out('vmstat from procps-ng 4.0.4\n'); return 0; }
+      const mi = memInfo(ctx);
+      if (g.opts.s) {
+        const used = mi.MemTotal - mi.MemFree;
+        ctx.out([[mi.MemTotal, 'K total memory'], [used, 'K used memory'], [mi.Active, 'K active memory'], [mi.Inactive, 'K inactive memory'], [mi.MemFree, 'K free memory'], [mi.Buffers, 'K buffer memory'], [mi.Cached, 'K swap cache'], [mi.SwapTotal, 'K total swap'], [mi.SwapTotal - mi.SwapFree, 'K used swap'], [mi.SwapFree, 'K free swap']]
+          .map(([n, l]) => U.padStart(n, 14) + ' ' + l).join('\n') + '\n');
+        return 0;
+      }
+      const delay = g.rest[0] != null ? parseInt(g.rest[0], 10) : 0;
+      let count = g.rest[1] != null ? parseInt(g.rest[1], 10) : delay > 0 ? Infinity : 1;
+      if ((g.rest[0] != null && !(delay >= 0)) || (g.rest[1] != null && !(count > 0))) { ctx.err('vmstat: ' + (g.rest[0] != null && !(delay >= 0) ? 'delay' : 'count') + ' must be positive integer\n'); return 1; }
+      const a = !!g.opts.a;
+      const header = 'procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu-------\n r  b   swpd   free  ' + (a ? 'inact active' : ' buff  cache') + '   si   so    bi    bo   in   cs us sy id wa st gu\n';
+      const ends = [2, 5, 12, 19, 26, 33, 38, 43, 49, 55, 60, 65, 68, 71, 74, 77, 80, 83];
+      const row = (first, i) => {
+        const h = U.hash32('vm' + ctx.machine.hostname + i);
+        const cpu = first ? [5 + (h % 3), 1, 94 - (h % 3), 0, 0, 0] : [1 + (h % 6), h % 3, 97 - (h % 6) - (h % 3), 0, 0, 0];
+        const cols = [first ? 0 : h % 2, 0, mi.SwapTotal - mi.SwapFree, mi.MemFree - (i % 4) * 12, a ? mi.Inactive : mi.Buffers, a ? mi.Active : mi.Cached, 0, 0, first ? 826 : (h % 40), first ? 64 : 20 + (h % 300), first ? 680 : 300 + (h % 900), first ? 1 : 200 + (h % 4000)].concat(cpu);
+        let line = '';
+        cols.forEach((v, k) => { line += U.padStart(v, ends[k] - line.length); });
+        return line + '\n';
+      };
+      ctx.out(header);
+      for (let i = 0; i < count; i++) {
+        ctx.out(row(i === 0, i));
+        if (i + 1 < count) await ctx.sleep(delay * 1000);
+      }
+      return 0;
+    } });
+
+  const ZONES = { 'Etc/UTC': ['UTC', 0], UTC: ['UTC', 0], 'Europe/London': ['GMT', 0], 'Europe/Berlin': ['CET', 60], 'Europe/Paris': ['CET', 60], 'Europe/Madrid': ['CET', 60], 'Europe/Amsterdam': ['CET', 60], 'America/New_York': ['EST', -300], 'America/Chicago': ['CST', -360],
+    'America/Denver': ['MST', -420], 'America/Los_Angeles': ['PST', -480], 'Asia/Tokyo': ['JST', 540], 'Asia/Kolkata': ['IST', 330], 'Asia/Singapore': ['+08', 480], 'Asia/Dubai': ['+04', 240], 'Australia/Sydney': ['AEDT', 660] };
+  const offsetStr = (min) => (min < 0 ? '-' : '+') + U.pad2(Math.floor(Math.abs(min) / 60)) + U.pad2(Math.abs(min) % 60);
+  const zoneOf = (ctx) => { const tz = ctx.fs.read('/etc/timezone').trim(); return { name: tz, info: ZONES[tz] || ['UTC', 0] }; };
+  const stamp = (ms, abbr) => { const d = new Date(ms); return U.DAYS[d.getUTCDay()] + ' ' + U.isoDate(ms) + (abbr ? ' ' + abbr : ''); };
+  const polkitDenied = (ctx, what) => { ctx.err(what + ': Interactive authentication required.\n'); return 1; };
+
+  reg({ name: 'timedatectl', pkg: 'systemd-timesyncd', section: 1, summary: 'Control the system time and date', synopsis: 'timedatectl [OPTIONS...] COMMAND ...',
+    man: 'DESCRIPTION\n       timedatectl may be used to query and change the system clock and its settings, and enable or disable time synchronization services.\n\nCOMMANDS\n       status           show current time settings\n       show             show properties in key=value form\n       set-timezone ZONE   set the system time zone (root)\n       set-ntp BOOL     enable or disable NTP synchronization (root)\n       list-timezones   list known time zones\n\nEXAMPLES\n       timedatectl\n       sudo timedatectl set-timezone Europe/Berlin',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'hH:M:', long: ['help', 'version', 'no-pager', 'no-ask-password', 'value', 'property=', 'all'], alias: { help: 'h' } });
+      if (g.err) { ctx.err('timedatectl: ' + g.err + '\n'); return 1; }
+      if (g.opts.version) { ctx.out('systemd 257 (257.9-1)\n+PAM +AUDIT +SELINUX +APPARMOR +IMA +IPE +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK +XKBCOMMON +UTMP +SYSVINIT +LIBARCHIVE\n'); return 0; }
+      const cmd = g.rest[0] || 'status'; const m = ctx.machine; const adm = adminState(m);
+      const { name: tz, info } = zoneOf(ctx); const now = K.clock.now();
+      const ntp = adm.ntp !== false;
+      switch (cmd) {
+        case 'status': {
+          const local = now + info[1] * 60000;
+          ctx.out(U.padStart('Local time:', 26) + ' ' + stamp(local, info[0]) + '\n' + U.padStart('Universal time:', 26) + ' ' + stamp(now, 'UTC') + '\n' + U.padStart('RTC time:', 26) + ' ' + stamp(now) + '\n' +
+            U.padStart('Time zone:', 26) + ' ' + tz + ' (' + info[0] + ', ' + offsetStr(info[1]) + ')\n' + U.padStart('System clock synchronized:', 26) + ' ' + (ntp ? 'yes' : 'no') + '\n' + U.padStart('NTP service:', 26) + ' ' + (ntp ? 'active' : 'inactive') + '\n' + U.padStart('RTC in local TZ:', 26) + ' no\n');
+          return 0;
+        }
+        case 'show':
+          ctx.out('Timezone=' + tz + '\nLocalRTC=no\nCanNTP=yes\nNTP=' + (ntp ? 'yes' : 'no') + '\nNTPSynchronized=' + (ntp ? 'yes' : 'no') + '\nTimeUSec=' + stamp(now + info[1] * 60000, info[0]) + '\nRTCTimeUSec=' + stamp(now, 'UTC') + '\n');
+          return 0;
+        case 'list-timezones': ctx.out(Object.keys(ZONES).filter((z) => z.includes('/') && z !== 'Etc/UTC').sort().join('\n') + '\n'); return 0;
+        case 'set-timezone': case 'set-ntp': case 'set-time': case 'set-local-rtc': {
+          if (!g.rest[1]) { ctx.err('Argument required.\n'); return 1; }
+          if (!ctx.isRoot) return polkitDenied(ctx, 'Failed to ' + (cmd === 'set-timezone' ? 'set time zone' : cmd === 'set-ntp' ? 'set ntp' : cmd === 'set-time' ? 'set time' : 'set local RTC'));
+          if (cmd === 'set-timezone') {
+            if (!ZONES[g.rest[1]]) { ctx.err("Failed to set time zone: Invalid time zone '" + g.rest[1] + "'\n"); return 1; }
+            m.vfs.write('/etc/timezone', g.rest[1] + '\n');
+            log(m, { facility: 'daemon', ident: 'systemd-timedated', pid: ctx.pid, msg: 'Changed time zone to \'' + g.rest[1] + '\' (' + ZONES[g.rest[1]][0] + ').' });
+          } else if (cmd === 'set-ntp') {
+            if (!/^(true|false|yes|no|1|0|on|off)$/i.test(g.rest[1])) { ctx.err('Failed to parse bool: ' + g.rest[1] + '\n'); return 1; }
+            adm.ntp = /^(true|yes|1|on)$/i.test(g.rest[1]);
+          } else if (cmd === 'set-time') { ctx.err('Failed to set time: Automatic time synchronization is enabled\n'); return 1; }
+          return 0;
+        }
+        default: ctx.err('Unknown command verb \'' + cmd + '\'.\n'); return 1;
+      }
+    } });
+
+  const machineId = (m, seed) => [0, 1, 2, 3].map((i) => U.padStart(U.hash32(seed + m.hostname + i).toString(16), 8, '0')).join('');
+  reg({ name: 'hostnamectl', pkg: 'systemd', section: 1, summary: 'Control the system hostname', synopsis: 'hostnamectl [OPTIONS...] COMMAND ...',
+    man: 'DESCRIPTION\n       hostnamectl may be used to query and change the system hostname and related settings.\n\nCOMMANDS\n       status                 show current hostname settings\n       hostname [NAME]        show or set the system hostname\n       set-hostname NAME      set the system hostname (root)\n\nEXAMPLES\n       hostnamectl\n       sudo hostnamectl set-hostname lab-kali',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'hH:', long: ['help', 'version', 'static', 'transient', 'pretty', 'no-ask-password', 'no-pager', 'json=?'], alias: { help: 'h' } });
+      if (g.err) { ctx.err('hostnamectl: ' + g.err + '\n'); return 1; }
+      if (g.opts.version) { ctx.out('systemd 257 (257.9-1)\n'); return 0; }
+      const cmd = g.rest[0] || 'status'; const m = ctx.machine;
+      if (cmd === 'hostname' && !g.rest[1]) { ctx.out(m.hostname + '\n'); return 0; }
+      if (cmd === 'status') {
+        const rows = [['Static hostname', m.hostname], ['Icon name', 'computer-vm'], ['Chassis', 'vm \u{1F5B4}'], ['Machine ID', machineId(m, 'mid')], ['Boot ID', machineId(m, 'bid' + K.getBootTime())], ['Virtualization', 'kvm'],
+          ['Operating System', m.os.pretty || 'Kali GNU/Linux Rolling'], ['Kernel', 'Linux ' + m.os.kernel], ['Architecture', 'x86-64'], ['Hardware Vendor', 'QEMU'], ['Hardware Model', 'Standard PC _Q35 + ICH9, 2009_'], ['Firmware Version', '1.16.3-debian-1.16.3-2']];
+        ctx.out(rows.map(([k, v]) => U.padStart(k + ':', 17) + ' ' + v).join('\n') + '\n');
+        return 0;
+      }
+      if (cmd === 'set-hostname' || cmd === 'hostname') {
+        const name = g.rest[1];
+        if (!name) { ctx.err('Argument required.\n'); return 1; }
+        if (!ctx.isRoot) return polkitDenied(ctx, 'Could not set static hostname');
+        if (!/^[A-Za-z0-9]([A-Za-z0-9-]{0,62})$/.test(name)) { ctx.err("Could not set static hostname: Invalid static hostname '" + name + "'\n"); return 1; }
+        const old = m.hostname;
+        m.hostname = name;
+        try { m.vfs.write('/etc/hosts', m.vfs.read('/etc/hosts').split(old).join(name)); } catch (e) { /* hosts file removed */ }
+        log(m, { facility: 'daemon', ident: 'systemd-hostnamed', pid: ctx.pid, msg: 'Hostname set to <' + name + '> (static)' });
+        return 0;
+      }
+      ctx.err("Unknown command verb '" + cmd + "'.\n");
+      return 1;
+    } });
+
+  const LC_VARS = ['LC_CTYPE', 'LC_NUMERIC', 'LC_TIME', 'LC_COLLATE', 'LC_MONETARY', 'LC_MESSAGES', 'LC_PAPER', 'LC_NAME', 'LC_ADDRESS', 'LC_TELEPHONE', 'LC_MEASUREMENT', 'LC_IDENTIFICATION'];
+  reg({ name: 'locale', pkg: 'libc-bin', section: 1, summary: 'get locale-specific information', synopsis: 'locale [option]',
+    man: 'DESCRIPTION\n       The locale command displays information about the current locale, or all locales, on standard output.\n\nOPTIONS\n       -a, --all-locales   write names of available locales\n       -m, --charmaps      write names of available charmaps\n\nEXAMPLES\n       locale\n       locale -a',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'amckV?', long: ['all-locales', 'charmaps', 'category-name', 'keyword-name', 'version', 'help', 'verbose'], alias: { 'all-locales': 'a', charmaps: 'm', version: 'V' } });
+      if (g.err) { ctx.err('locale: ' + g.err + '\nTry `locale --help\' or `locale --usage\' for more information.\n'); return 64; }
+      if (g.opts.V) { ctx.out('locale (Debian GLIBC 2.41-12) 2.41\n'); return 0; }
+      if (g.opts.a) { ctx.out('C\nC.utf8\nen_US.utf8\nPOSIX\n'); return 0; }
+      if (g.opts.m) { ctx.out('ANSI_X3.4-1968\nUTF-8\n'); return 0; }
+      const env = ctx.env; const lang = env.LANG || 'en_US.UTF-8'; const all = env.LC_ALL || '';
+      const lines = ['LANG=' + (env.LANG || ''), 'LANGUAGE=' + (env.LANGUAGE || '')];
+      for (const v of LC_VARS) lines.push(env[v] && !all ? v + '=' + env[v] : v + '="' + (all || env[v] || lang) + '"');
+      lines.push('LC_ALL=' + all);
+      ctx.out(lines.join('\n') + '\n');
+      return 0;
+    } });
+
+  const LASTLOG_USAGE = 'Usage: lastlog [options]\n\nOptions:\n  -b, --before DAYS             print only lastlog records older than DAYS\n  -C, --clear                   clear lastlog record of an user (usable only with -u)\n  -h, --help                    display this help message and exit\n  -R, --root CHROOT_DIR         directory to chroot into\n  -S, --set                     set lastlog record to current time (usable only with -u)\n  -t, --time DAYS               print only lastlog records more recent than DAYS\n  -u, --user LOGIN              print lastlog record of the specified LOGIN\n\n';
+  reg({ name: 'lastlog', pkg: 'login', path: '/usr/bin/lastlog', section: 8, summary: 'reports the most recent login of all users or of a given user', synopsis: 'lastlog [options]',
+    man: 'DESCRIPTION\n       lastlog formats and prints the contents of the last login log /var/log/lastlog. The login-name, port, and last login time will be printed.\n\nOPTIONS\n       -u, --user LOGIN   print the record of the specified user\n       -t, --time DAYS    only records more recent than DAYS\n       -b, --before DAYS  only records older than DAYS\n\nEXAMPLES\n       lastlog\n       lastlog -u kali',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'b:Chn:R:St:u:', long: ['before=', 'clear', 'help', 'root=', 'set', 'time=', 'user='], alias: { before: 'b', clear: 'C', help: 'h', set: 'S', time: 't', user: 'u' } });
+      if (g.err) { ctx.err('lastlog: ' + g.err + '\n' + LASTLOG_USAGE); return 1; }
+      if (g.opts.h) { ctx.out(LASTLOG_USAGE); return 0; }
+      const m = ctx.machine; const bootAt = K.getBootTime() + 20000;
+      let users = m.users;
+      if (g.opts.u != null) {
+        users = m.users.filter((u) => u.name === g.opts.u || String(u.uid) === g.opts.u);
+        if (!users.length) { ctx.err('lastlog: Unknown user: ' + g.opts.u + '\n'); return 1; }
+      }
+      const lastLoginOf = (u) => (u.uid >= LOGIN_UID_MIN && u.uid < 60000 && u.name === ctx.user.name ? bootAt : null);
+      const day = 86400000; const now = K.clock.now();
+      const rows = users.filter((u) => {
+        const t = lastLoginOf(u);
+        if (g.opts.t != null && !(t != null && now - t <= g.opts.t * day)) return false;
+        if (g.opts.b != null && !(t == null || now - t > g.opts.b * day)) return false;
+        return true;
+      }).map((u) => {
+        const t = lastLoginOf(u);
+        const when = t == null ? '**Never logged in**' : U.DAYS[new Date(t).getUTCDay()] + ' ' + U.MONTHS[new Date(t).getUTCMonth()] + ' ' + U.padStart(new Date(t).getUTCDate(), 2, '0') + ' ' + U.isoDate(t).slice(11) + ' +0000 ' + new Date(t).getUTCFullYear();
+        // lastlog really pads the "never" rows one column short of the header
+        return t == null ? U.padEnd(u.name, 68) + when : U.padEnd(u.name, 16) + ' ' + U.padEnd('pts/0', 8) + ' ' + U.padEnd('', 42) + ' ' + when;
+      });
+      ctx.out('Username         Port     From                                       Latest\n' + (rows.length ? rows.join('\n') + '\n' : ''));
+      return 0;
+    } });
+
+  reg({ name: 'logname', pkg: 'coreutils', section: 1, summary: "print user's login name", synopsis: 'logname [OPTION]',
+    man: "DESCRIPTION\n       Print the name of the current user.\n\nOPTIONS\n       --help     display this help and exit\n       --version  output version information and exit\n\nEXAMPLES\n       logname",
+    run(ctx) {
+      const g = K.getopt(ctx.args, { long: ['help', 'version'] });
+      if (g.err) { ctx.err('logname: ' + g.err + '\n' + tryHelp('logname')); return 1; }
+      if (g.opts.help) { ctx.out("Usage: logname [OPTION]\nPrint the user's login name.\n\n      --help        display this help and exit\n      --version     output version information and exit\n" + coreutilsFooter('logname')); return 0; }
+      if (g.opts.version) { ctx.out(coreutilsVersion('logname', 'FIXME: unknown')); return 0; }
+      if (g.rest.length) { ctx.err("logname: extra operand '" + g.rest[0] + "'\n" + tryHelp('logname')); return 1; }
+      ctx.out((ctx.env.LOGNAME || ctx.user.name) + '\n');
+      return 0;
+    } });
+
+  /** Run another command for nice/nohup; null when it does not exist. */
+  async function runChild(ctx, argv) {
+    const sh = ctx.shell; const prog = argv[0];
+    const known = sh && typeof sh.which === 'function' ? sh.which(prog) || (K.builtins && K.builtins[prog]) : true;
+    if (!known && !(prog.includes('/') && ctx.fs.exists(prog))) return null;
+    return ctx.run(argv, { stdin: ctx.stdin == null ? '' : ctx.stdin });
+  }
+
+  reg({ name: 'nice', pkg: 'coreutils', section: 1, summary: 'run a program with modified scheduling priority', synopsis: 'nice [OPTION] [COMMAND [ARG]...]',
+    man: 'DESCRIPTION\n       Run COMMAND with an adjusted niceness, which affects process scheduling. With no COMMAND, print the current niceness. Niceness values range from -20 (most favorable to the process) to 19 (least favorable).\n\nOPTIONS\n       -n, --adjustment=N   add integer N to the niceness (default 10)\n\nEXAMPLES\n       nice -n 10 nmap -sV 10.10.10.10',
+    async run(ctx) {
+      const st = ctx.machine.state;
+      const args = ctx.args.slice(); let adj = 10; let help = null;
+      while (args.length && args[0][0] === '-' && args[0] !== '-') {
+        const a = args.shift();
+        if (a === '--') break;
+        if (a === '--help') help = 'help'; else if (a === '--version') help = 'version';
+        else if (a === '-n' || a === '--adjustment') { if (!args.length) { ctx.err("nice: option requires an argument -- 'n'\n" + tryHelp('nice')); return 125; } adj = args.shift(); }
+        else if (a.startsWith('--adjustment=')) adj = a.slice(13);
+        else if (a.startsWith('-n')) adj = a.slice(2);
+        else if (/^-\d+$/.test(a)) adj = a.slice(1);
+        else if (a.startsWith('--')) { ctx.err("nice: unrecognized option '" + a + "'\n" + tryHelp('nice')); return 125; }
+        else { ctx.err("nice: invalid option -- '" + a[1] + "'\n" + tryHelp('nice')); return 125; }
+      }
+      if (help === 'help') { ctx.out("Usage: nice [OPTION] [COMMAND [ARG]...]\nRun COMMAND with an adjusted niceness, which affects process scheduling.\nWith no COMMAND, print the current niceness.  Niceness values range from\n-20 (most favorable to the process) to 19 (least favorable to the process).\n\nMandatory arguments to long options are mandatory for short options too.\n  -n, --adjustment=N   add integer N to the niceness (default 10)\n      --help        display this help and exit\n      --version     output version information and exit\n\nNOTE: your shell may have its own version of nice, which usually supersedes\nthe version described here.  Please refer to your shell's documentation\nfor details about the options it supports.\n\nExit status:\n  125  if the nice command itself fails\n  126  if COMMAND is found but cannot be invoked\n  127  if COMMAND cannot be found\n  -    the exit status of COMMAND otherwise\n" + coreutilsFooter('nice')); return 0; }
+      if (help === 'version') { ctx.out(coreutilsVersion('nice', 'David MacKenzie')); return 0; }
+      if (!/^[+-]?\d+$/.test(String(adj))) { ctx.err("nice: invalid adjustment '" + adj + "'\n"); return 125; }
+      const cur = st.niceness || 0;
+      if (!args.length) { ctx.out(cur + '\n'); return 0; }
+      const next = Math.max(-20, Math.min(19, cur + parseInt(adj, 10)));
+      if (next < cur && !ctx.isRoot) ctx.err('nice: cannot set niceness: Permission denied\n');
+      st.niceness = next < cur && !ctx.isRoot ? cur : next;
+      let res;
+      try { res = await runChild(ctx, args); } finally { st.niceness = cur; }
+      if (!res) { ctx.err('nice: \u2018' + args[0] + '\u2019: No such file or directory\n'); return 127; }
+      ctx.out(res.out); ctx.err(res.err);
+      return res.code;
+    } });
+
+  reg({ name: 'nohup', pkg: 'coreutils', section: 1, summary: 'run a command immune to hangups, with output to a non-tty', synopsis: 'nohup COMMAND [ARG]...',
+    man: "DESCRIPTION\n       Run COMMAND, ignoring hangup signals. If standard input is a terminal, redirect it from an unreadable file. If standard output is a terminal, append output to 'nohup.out' if possible, '$HOME/nohup.out' otherwise.\n\nEXAMPLES\n       nohup ping -c 100 10.10.10.1 &",
+    async run(ctx) {
+      const args = ctx.args.slice();
+      if (args[0] === '--help') { ctx.out("Usage: nohup COMMAND [ARG]...\n  or:  nohup OPTION\nRun COMMAND, ignoring hangup signals.\n\n      --help        display this help and exit\n      --version     output version information and exit\n\nIf standard input is a terminal, redirect it from an unreadable file.\nIf standard output is a terminal, append output to 'nohup.out' if possible,\n'$HOME/nohup.out' otherwise.\nIf standard error is a terminal, redirect it to standard output.\nTo save output to FILE, use 'nohup COMMAND > FILE'.\n\nNOTE: your shell may have its own version of nohup, which usually supersedes\nthe version described here.  Please refer to your shell's documentation\nfor details about the options it supports.\n\nExit status:\n  125  if the nohup command itself fails\n  126  if COMMAND is found but cannot be invoked\n  127  if COMMAND cannot be found\n  -    the exit status of COMMAND otherwise\n" + coreutilsFooter('nohup')); return 0; }
+      if (args[0] === '--version') { ctx.out(coreutilsVersion('nohup', 'Jim Meyering')); return 0; }
+      if (args[0] === '--') args.shift();
+      else if (args[0] && args[0][0] === '-' && args[0] !== '-') { ctx.err("nohup: invalid option -- '" + args[0].replace(/^-+/, '')[0] + "'\n" + tryHelp('nohup')); return 125; }
+      if (!args.length) { ctx.err('nohup: missing operand\n' + tryHelp('nohup')); return 125; }
+      const inTty = ctx.stdin == null;
+      let target = null;
+      if (ctx.isTTY) {
+        for (const p of ['nohup.out', (ctx.env.HOME || ctx.user.home) + '/nohup.out']) {
+          try { if (!ctx.fs.exists(p)) ctx.fs.write(p, '', { mode: 0o600 }); ctx.fs.append(p, ''); target = p; break; } catch (e) { if (!(e instanceof K.FsError)) throw e; }
+        }
+        if (!target) { ctx.err("nohup: failed to open 'nohup.out': Permission denied\n"); return 125; }
+        ctx.err('nohup: ' + (inTty ? 'ignoring input and appending output to ' : 'appending output to ') + "'" + (target === 'nohup.out' ? 'nohup.out' : target) + "'\n");
+      } else if (inTty) ctx.err('nohup: ignoring input\n');
+      const res = await runChild(ctx, args);
+      if (!res) { ctx.err("nohup: failed to run command '" + args[0] + "': No such file or directory\n"); return 127; }
+      if (target) ctx.fs.append(target, res.out + res.err); else { ctx.out(res.out); ctx.err(res.err); }
+      return res.code;
+    } });
+
+  /* ---- crontab ---- */
+
+  const CRON_SPOOL = '/var/spool/cron/crontabs';
+  const CRON_TEMPLATE = "# Edit this file to introduce tasks to be run by cron.\n# \n# Each task to run has to be defined through a single line\n# indicating with different fields when the task will be run\n# and what command to run for the task\n# \n# To define the time you can provide concrete values for\n# minute (m), hour (h), day of month (dom), month (mon),\n# and day of week (dow) or use '*' in these fields (for 'any').\n# \n# Notice that tasks will be started based on the cron's system\n# daemon's notion of time and timezones.\n# \n# Output of the crontab jobs (including errors) is sent through\n# email to the user the crontab file belongs to (unless redirected).\n# \n# For example, you can run a backup of all your user accounts\n# at 5 a.m every week with:\n# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/\n# \n# For more information see the manual pages of crontab(5) and cron(8)\n# \n# m h  dom mon dow   command\n";
+  const CRON_FIELDS = [['minute', 0, 59], ['hour', 0, 23], ['day-of-month', 1, 31], ['month', 1, 12], ['day-of-week', 0, 7]];
+  const CRON_NAMES = { month: ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'], 'day-of-week': ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] };
+
+  function cronFieldOk(text, [name, lo, hi]) {
+    const names = CRON_NAMES[name] || [];
+    const num = (t) => { const i = names.indexOf(t.toLowerCase()); if (i >= 0) return i + (name === 'month' ? 1 : 0); return /^\d+$/.test(t) ? parseInt(t, 10) : NaN; };
+    return text.split(',').every((part) => {
+      const [range, step] = part.split('/');
+      if (step != null && !/^\d+$/.test(step)) return false;
+      if (range === '*') return true;
+      const [a, b] = range.split('-').map(num);
+      const bounds = (v) => v >= lo && v <= hi;
+      return range.includes('-') ? bounds(a) && bounds(b) : bounds(a);
+    });
+  }
+  /** First problem in a crontab as {line, msg}, or null. Line numbers are 1-based. */
+  function cronProblem(text) {
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i].trim();
+      if (!l || l[0] === '#' || /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(l)) continue;
+      if (/^@(reboot|yearly|annually|monthly|weekly|daily|midnight|hourly)\s+\S/.test(l)) continue;
+      if (l[0] === '@') return { line: i + 1, msg: 'bad command' };
+      const f = l.split(/\s+/);
+      for (let k = 0; k < 5; k++) if (f[k] == null || !cronFieldOk(f[k], CRON_FIELDS[k])) return { line: i + 1, msg: 'bad ' + CRON_FIELDS[k][0] };
+      if (f.length < 6) return { line: i + 1, msg: 'bad command' };
+    }
+    return null;
+  }
+
+  const CRONTAB_USAGE = "usage:\tcrontab [-u user] file\n\tcrontab [-u user] [-i] { -e | -l | -r }\n\t\t(default operation is replace, per 1003.2)\n\t-e\t(edit user's crontab)\n\t-l\t(list user's crontab)\n\t-r\t(delete user's crontab)\n\t-i\tprompt before deleting\n\t-n <host> set host in cluster to run users' crontabs\n\t-c\tget host in cluster to run users' crontabs\n\t-s\tselinux context\n\t-x <mask> enable debugging\n";
+
+  async function chooseEditor(ctx) {
+    const sel = (ctx.env.HOME || ctx.user.home) + '/.selected_editor';
+    let flavor = 'nano';
+    try { if (/vim/.test(ctx.fs.read(sel))) flavor = 'vim'; return flavor; } catch (e) { /* first run: ask */ }
+    ctx.out("\nSelect an editor.  To change later, run 'select-editor'.\n  1. /bin/nano        <---- easiest\n  2. /usr/bin/vim.basic\n  3. /usr/bin/vim.tiny\n  4. /bin/ed\n\n");
+    const ans = await ctx.readLine('Choose 1-4 [1]: ');
+    const path = ['/bin/nano', '/usr/bin/vim.basic', '/usr/bin/vim.tiny', '/bin/ed'][(parseInt(ans, 10) || 1) - 1] || '/bin/nano';
+    flavor = /vim/.test(path) ? 'vim' : 'nano';
+    try { ctx.fs.write(sel, '# Generated by /usr/bin/select-editor\nSELECTED_EDITOR="' + path + '"\n'); } catch (e) { /* read-only home */ }
+    return flavor;
+  }
+
+  reg({ name: 'crontab', pkg: 'cron', section: 1, mode: 0o2755, summary: 'maintain crontab files for individual users', synopsis: 'crontab [-u user] file | crontab [-u user] [-i] {-e | -l | -r}',
+    man: "DESCRIPTION\n       crontab is the program used to install, deinstall or list the tables used to drive the cron daemon. Each user can have their own crontab, kept in /var/spool/cron/crontabs.\n\nOPTIONS\n       -l   display the current crontab on standard output\n       -e   edit the current crontab using the editor\n       -r   remove the current crontab\n       -u user   operate on another user's crontab (root only)\n\nEXAMPLES\n       crontab -l\n       echo '*/5 * * * * /home/kali/scan.sh' | crontab -",
+    async run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'u:elrinxcs' });
+      if (g.err) { ctx.err('crontab: ' + g.err + '\n' + CRONTAB_USAGE); return 1; }
+      const m = ctx.machine; const o = g.opts;
+      let who = ctx.user.name;
+      if (typeof o.u === 'string') {
+        if (!ctx.isRoot && o.u !== who) { ctx.err('must be privileged to use -u\n'); return 1; }
+        if (!m.userByName(o.u)) { ctx.err("crontab: user `" + o.u + "' unknown\n"); return 1; }
+        who = o.u;
+      }
+      const path = CRON_SPOOL + '/' + who;
+      const mutually = ['e', 'l', 'r'].filter((k) => o[k]).length;
+      if (mutually > 1 || (mutually && g.rest.length)) { ctx.err(CRONTAB_USAGE); return 1; }
+      const read = () => { try { return m.vfs.read(path); } catch (e) { return null; } };
+      const write = (text) => {
+        const u = m.userByName(who); const grp = m.groupByName('crontab');
+        m.vfs.seed(path, text, { mode: 0o600, uid: u.uid, gid: grp ? grp.gid : u.gid, mtime: K.clock.now() });
+        log(m, { facility: 'cron', ident: 'crontab', pid: ctx.pid, msg: '(' + who + ') REPLACE (' + who + ')' });
+      };
+      if (o.l) { const t = read(); if (t == null) { ctx.err('no crontab for ' + who + '\n'); return 1; } ctx.out(t); return 0; }
+      if (o.r) {
+        if (read() == null) { ctx.err('no crontab for ' + who + '\n'); return 1; }
+        if (o.i) { const a = await ctx.readLine('crontab: really delete ' + who + "'s crontab? (y/n) "); if (!a || !/^y/i.test(a)) return 0; }
+        m.vfs.unlink(path);
+        log(m, { facility: 'cron', ident: 'crontab', pid: ctx.pid, msg: '(' + who + ') DELETE (' + who + ')' });
+        return 0;
+      }
+      if (o.e) {
+        let original = read();
+        if (original == null) { ctx.err('no crontab for ' + who + ' - using an empty one\n'); original = ''; }
+        const flavor = await chooseEditor(ctx);
+        let content = original === '' ? CRON_TEMPLATE : original;
+        const dir = '/tmp/crontab.' + U.hash32(who + K.clock.now()).toString(36).slice(0, 6).toUpperCase().padEnd(6, 'X');
+        for (;;) {
+          const res = await ctx.term.editor({ path: dir + '/crontab', content, flavor });
+          if (!res || !res.saved || res.content === original || res.content === (original === '' ? CRON_TEMPLATE : original)) { ctx.err('crontab: no changes made to crontab\n'); return 0; }
+          content = res.content;
+          const bad = cronProblem(content);
+          if (!bad) break;
+          ctx.err('"' + dir + '/crontab":' + bad.line + ': ' + bad.msg + "\nerrors in crontab file, can't install.\n");
+          const again = await ctx.readLine('Do you want to retry the same edit? (y/n) ');
+          if (!again || !/^y/i.test(again)) { ctx.err('crontab: edits left in ' + dir + '/crontab\n'); return 1; }
+        }
+        write(content);
+        ctx.out('crontab: installing new crontab\n');
+        return 0;
+      }
+      let text;
+      const src = g.rest[0];
+      if (src == null || src === '-') { text = ctx.stdin != null ? ctx.stdin : ''; if (ctx.stdin == null) { const lines = []; for (let l = await ctx.readLine(''); l != null; l = await ctx.readLine('')) lines.push(l); text = lines.length ? lines.join('\n') + '\n' : ''; } }
+      else { try { text = ctx.fs.read(src); } catch (e) { if (!(e instanceof K.FsError)) throw e; ctx.err('crontab: ' + src + ': ' + e.message + '\n'); return 1; } }
+      const bad = cronProblem(text);
+      if (bad) { ctx.err('"' + (src || '-') + '":' + bad.line + ': ' + bad.msg + "\nerrors in crontab file, can't install.\n"); return 1; }
+      write(text);
+      return 0;
+    } });
+
+  K.fsSeeds.push((machine) => {
+    if (!machine.groupByName('crontab') && !machine.groupByGid(107)) machine.groups.push({ name: 'crontab', gid: 107, members: [] });
+    const grp = machine.groupByName('crontab');
+    machine.vfs.seedDir(CRON_SPOOL, { mode: 0o1730, uid: 0, gid: grp ? grp.gid : 0 });
+  });
+
 })(typeof globalThis !== 'undefined' ? globalThis : this);

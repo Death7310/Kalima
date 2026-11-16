@@ -12,7 +12,7 @@ async function sim() {
 
 test('apt: changing anything needs root and prints the lock errors', async () => {
   const s = await sim();
-  const r = await s.run('apt install tree');
+  const r = await s.run('apt install ncdu');
   assert.equal(r.code, 100);
   assert.match(r.err, /Error: Could not open lock file \/var\/lib\/dpkg\/lock-frontend - open \(13: Permission denied\)/);
   assert.match(r.err, /are you root\?/);
@@ -24,18 +24,18 @@ test('apt: changing anything needs root and prints the lock errors', async () =>
 test('apt install: plan, confirmation, files, logs', async () => {
   const s = await sim();
   s.term.feed('y');
-  const r = await s.run('sudo apt install tree');
+  const r = await s.run('sudo apt install ncdu');
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /Installing:\n  tree\n\nSummary:\n  Upgrading: 0, Installing: 1, Removing: 0, Not Upgrading: \d+\n  Download size: .* kB\n  Space needed: .* \/ .* GB available/);
-  assert.match(r.out, /Get:1 http:\/\/http\.kali\.org\/kali kali-rolling\/main amd64 tree amd64 2\.2\.1-1 \[/);
-  assert.match(r.out, /Selecting previously unselected package tree\./);
-  assert.match(r.out, /Unpacking tree \(2\.2\.1-1\) \.\.\.\nSetting up tree \(2\.2\.1-1\) \.\.\./);
-  assert.equal(s.machine.packages.get('tree').status, 'installed');
-  assert.match(await s.out('apt list --installed tree 2>/dev/null'), /^tree\/kali-rolling,now 2\.2\.1-1 amd64 \[installed\]$/m);
-  assert.match(await s.out('cat /var/log/apt/history.log'), /Commandline: apt install tree\nRequested-By: kali \(1000\)\nInstall: tree:amd64 \(2\.2\.1-1\)/);
-  assert.match(await s.out('cat /var/log/dpkg.log'), /install tree:amd64 <none> 2\.2\.1-1\n.*status half-installed tree:amd64/);
-  const again = await s.run('sudo apt install tree');
-  assert.match(again.out, /tree is already the newest version \(2\.2\.1-1\)\./);
+  assert.match(r.out, /Installing:\n  ncdu\n\nSummary:\n  Upgrading: 0, Installing: 1, Removing: 0, Not Upgrading: \d+\n  Download size: .* kB\n  Space needed: .* \/ .* GB available/);
+  assert.match(r.out, /Get:1 http:\/\/http\.kali\.org\/kali kali-rolling\/main amd64 ncdu amd64 1\.22-1 \[/);
+  assert.match(r.out, /Selecting previously unselected package ncdu\./);
+  assert.match(r.out, /Unpacking ncdu \(1\.22-1\) \.\.\.\nSetting up ncdu \(1\.22-1\) \.\.\./);
+  assert.equal(s.machine.packages.get('ncdu').status, 'installed');
+  assert.match(await s.out('apt list --installed ncdu 2>/dev/null'), /^ncdu\/kali-rolling,now 1\.22-1 amd64 \[installed\]$/m);
+  assert.match(await s.out('cat /var/log/apt/history.log'), /Commandline: apt install ncdu\nRequested-By: kali \(1000\)\nInstall: ncdu:amd64 \(1\.22-1\)/);
+  assert.match(await s.out('cat /var/log/dpkg.log'), /install ncdu:amd64 <none> 1\.22-1\n.*status half-installed ncdu:amd64/);
+  const again = await s.run('sudo apt install ncdu');
+  assert.match(again.out, /ncdu is already the newest version \(1\.22-1\)\./);
 });
 
 test('apt install -y, dependencies, unknown packages and aborting', async () => {
@@ -82,7 +82,7 @@ test('apt update: output, second run hits, outage', async () => {
   const down = await s.run('sudo apt update');
   assert.match(down.out, /Err:1 http:\/\/http\.kali\.org\/kali kali-rolling InRelease\n  Could not connect to http\.kali\.org:80 /);
   assert.match(down.err, /Warning: Failed to fetch http:\/\/http\.kali\.org\/kali\/dists\/kali-rolling\/InRelease/);
-  const inst = await s.run('sudo apt install -y tree');
+  const inst = await s.run('sudo apt install -y ncdu');
   assert.equal(inst.code, 100);
   assert.match(inst.err, /Error: Unable to fetch some archives/);
 });
@@ -100,16 +100,16 @@ test('apt upgrade installs the pending upgrades', async () => {
 
 test('apt search, show, policy, errors', async () => {
   const s = await sim();
-  const se = await s.out('apt search tree 2>/dev/null');
+  const se = await s.out('apt search ncdu 2>/dev/null');
   assert.match(se, /^Sorting\.\.\. Done\nFull Text Search\.\.\. Done\n/);
-  assert.match(se, /^tree\/kali-rolling 2\.2\.1-1 amd64\n  displays an indented directory tree, in color\n\n/m);
-  const w = await s.run('apt search tree');
+  assert.match(se, /^ncdu\/kali-rolling 1\.22-1 amd64\n  ncurses disk usage viewer\n\n/m);
+  const w = await s.run('apt search ncdu');
   assert.match(w.err, /WARNING: apt does not have a stable CLI interface/);
   assert.match(await s.out('apt show curl'), /^Package: curl\nVersion: 8\.17\.0-2\n/);
   assert.equal((await s.run('apt show nonesuch')).code, 100);
   const pol = await s.out('apt-cache policy curl');
   assert.match(pol, /^curl:\n  Installed: 8\.17\.0-1\n  Candidate: 8\.17\.0-2\n  Version table:\n/);
-  assert.match(await s.out('apt-cache policy tree'), /Installed: \(none\)/);
+  assert.match(await s.out('apt-cache policy ncdu'), /Installed: \(none\)/);
   const inv = await s.run('apt frobnicate');
   assert.equal(inv.err, 'Error: Invalid operation frobnicate\n');
   const opt = await s.run('apt --bogus install x');
@@ -151,10 +151,10 @@ test('dpkg -l: real table layout, patterns, rc and not found', async () => {
 test('dpkg -s, -L, -S, -W, --get-selections', async () => {
   const s = await sim();
   assert.match(await s.out('dpkg -s bash'), /^Package: bash\nStatus: install ok installed\n/);
-  const miss = await s.run('dpkg -s tree');
+  const miss = await s.run('dpkg -s ncdu');
   assert.equal(miss.code, 1);
-  assert.equal(miss.err, "dpkg-query: package 'tree' is not installed and no information is available\nUse dpkg --info (= dpkg-deb --info) to examine archive files.\n");
-  assert.equal((await s.run('dpkg -L tree')).err, "dpkg-query: package 'tree' is not installed\nUse dpkg --contents (= dpkg-deb --contents) to list archive files contents.\n");
+  assert.equal(miss.err, "dpkg-query: package 'ncdu' is not installed and no information is available\nUse dpkg --info (= dpkg-deb --info) to examine archive files.\n");
+  assert.equal((await s.run('dpkg -L ncdu')).err, "dpkg-query: package 'ncdu' is not installed\nUse dpkg --contents (= dpkg-deb --contents) to list archive files contents.\n");
   assert.match(await s.out('dpkg -L sudo'), /^\/\.\n\/usr\n\/usr\/bin\n\/usr\/bin\/sudo\n/);
   assert.equal(await s.out('dpkg -S /usr/bin/sudo'), 'sudo: /usr/bin/sudo\n');
   assert.equal((await s.run('dpkg -S /nope')).err, 'dpkg-query: no path found matching pattern /nope\n');
@@ -289,4 +289,115 @@ test('adduser flow, chsh and getent', async () => {
   assert.equal(unk.err, "Unknown database: foo\nTry `getent --help' or `getent --usage' for more information.\n");
   assert.equal((await s.run('getent')).err, "getent: wrong number of arguments\nTry `getent --help' or `getent --usage' for more information.\n");
   assert.equal(await s.out('getent passwd | grep -c :'), '19\n');
+});
+
+test('lscpu, lsmod, lsusb, lspci, vmstat', async () => {
+  const s = await sim();
+  const cpu = await s.out('lscpu');
+  assert.match(cpu, /^Architecture:                            x86_64\nCPU op-mode\(s\):                          32-bit, 64-bit\n/);
+  assert.match(cpu, /^Model name:                              Intel\(R\) Core\(TM\) i7-9750H CPU @ 2\.60GHz$/m);
+  assert.match(cpu, /^CPU\(s\):                                  2$/m);
+  assert.match(cpu, /^Vulnerability Spectre v2: +Mitigation/m);
+  assert.equal(await s.out('lscpu -V'), 'lscpu from util-linux 2.41.2\n');
+  assert.equal((await s.run('lscpu -z')).err, "lscpu: invalid option -- 'z'\nTry 'lscpu --help' for more information.\n");
+  const mods = await s.out('lsmod');
+  assert.match(mods, /^Module                  Size  Used by\nvsock_loopback         12288  0\n/);
+  assert.match(await s.out('lsmod | grep -c ext4'), /^\d+\n/);
+  assert.match(await s.out('lsusb'), /^Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3\.0 root hub\nBus 001 Device 002: .*\nBus 001 Device 001: ID 1d6b:0002 Linux Foundation 2\.0 root hub\n$/);
+  assert.match(await s.out('lsusb -t'), /^\/:  Bus 001\.Port 001: Dev 001, Class=root_hub/);
+  assert.match(await s.out('lspci'), /^00:00\.0 Host bridge: Intel Corporation .*\n00:01\.0 VGA compatible controller: /);
+  assert.match(await s.out('lspci -nn'), /Ethernet controller \[0200\]: Red Hat, Inc\. Virtio 1\.0 network device \[1af4:1041\] \(rev 01\)/);
+  assert.match(await s.out('lspci -k | grep -A1 Ethernet'), /Kernel driver in use: virtio-pci/);
+  const vm = await s.out('vmstat');
+  const lines = vm.split('\n');
+  assert.equal(lines[0], 'procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu-------');
+  assert.equal(lines[1], ' r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu');
+  assert.equal(lines[2].length, lines[1].length);
+  const rep = await s.out('vmstat 1 3');
+  assert.equal(rep.trim().split('\n').length, 5);
+  assert.match(await s.out('vmstat -s'), /^ +\d+ K total memory\n +\d+ K used memory\n/);
+  assert.match((await s.run('vmstat --bogus')).err, /^vmstat: unrecognized option '--bogus'\n\nUsage:\n vmstat/);
+});
+
+test('timedatectl, hostnamectl, locale, lastlog, logname', async () => {
+  const s = await sim();
+  const t = await s.out('timedatectl');
+  assert.match(t, /^               Local time: Fri 2026-11-13 14:30:00 UTC\n           Universal time: Fri 2026-11-13 14:30:00 UTC\n/);
+  assert.match(t, /^System clock synchronized: yes\n              NTP service: active\n          RTC in local TZ: no\n$/m);
+  assert.equal((await s.run('timedatectl set-timezone Europe/Berlin')).err, 'Failed to set time zone: Interactive authentication required.\n');
+  await s.run('sudo timedatectl set-timezone Europe/Berlin');
+  assert.match(await s.out('timedatectl'), /Local time: Fri 2026-11-13 15:30:00 CET\n[\s\S]*Time zone: Europe\/Berlin \(CET, \+0100\)/);
+  assert.match(await s.out('timedatectl show'), /^Timezone=Europe\/Berlin\nLocalRTC=no\n/);
+  const h = await s.out('hostnamectl');
+  assert.match(h, /^ Static hostname: kali\n       Icon name: computer-vm\n/);
+  assert.match(h, /^Operating System: Kali GNU\/Linux Rolling\n          Kernel: Linux 7\.1\.5-kali1-amd64\n/m);
+  assert.equal((await s.run('hostnamectl set-hostname lab')).err, 'Could not set static hostname: Interactive authentication required.\n');
+  await s.run('sudo hostnamectl set-hostname lab-kali');
+  assert.equal(s.machine.hostname, 'lab-kali');
+  assert.equal(await s.out('hostnamectl hostname'), 'lab-kali\n');
+  const loc = await s.out('locale');
+  assert.match(loc, /^LANG=[^\n]*\nLANGUAGE=\nLC_CTYPE="[^"]+"\n/);
+  assert.match(loc, /LC_IDENTIFICATION="[^"]+"\nLC_ALL=\n$/);
+  assert.equal(await s.out('locale -a'), 'C\nC.utf8\nen_US.utf8\nPOSIX\n');
+  const ll = await s.out('lastlog');
+  assert.match(ll, /^Username         Port     From                                       Latest\nroot                                                                \*\*Never logged in\*\*\n/);
+  assert.match(ll, /^kali +pts\/0 +\w{3} \w{3} \d\d \d\d:\d\d:\d\d \+0000 2026$/m);
+  assert.equal((await s.run('lastlog -u nobody2')).err, 'lastlog: Unknown user: nobody2\n');
+  assert.equal(await s.out('logname'), 'kali\n');
+  assert.equal((await s.run('logname --bogus')).err, "logname: unrecognized option '--bogus'\nTry 'logname --help' for more information.\n");
+  assert.match(await s.out('logname --version'), /^logname \(GNU coreutils\) /);
+});
+
+test('nice and nohup', async () => {
+  const s = await sim();
+  assert.equal(await s.out('nice'), '0\n');
+  assert.equal(await s.out('nice -n 5 nice'), '5\n');
+  assert.equal(await s.out('nice nice'), '10\n');
+  assert.equal(await s.out('nice -n 30 nice'), '19\n');
+  assert.equal(await s.out('nice -5 nice'), '5\n');
+  const neg = await s.run('nice -n -5 nice');
+  assert.equal(neg.err, 'nice: cannot set niceness: Permission denied\n');
+  assert.equal(neg.out, '0\n');
+  assert.equal((await s.run('nice -n abc true')).err, "nice: invalid adjustment 'abc'\n");
+  assert.equal((await s.run('nice -n abc true')).code, 125);
+  assert.equal((await s.run('nice nosuchcmd')).code, 127);
+  assert.equal((await s.run('nice --bogus')).err, "nice: unrecognized option '--bogus'\nTry 'nice --help' for more information.\n");
+  const nh = await s.run('nohup echo hi');
+  assert.equal(nh.code, 0);
+  assert.equal(await s.out('nohup echo hi < /dev/null | cat'), 'hi\n');
+  const miss = await s.run('nohup nosuchcmd');
+  assert.equal(miss.code, 127);
+  assert.equal(miss.err, "nohup: ignoring input\nnohup: failed to run command 'nosuchcmd': No such file or directory\n");
+  const none = await s.run('nohup');
+  assert.equal(none.err, "nohup: missing operand\nTry 'nohup --help' for more information.\n");
+  assert.equal(none.code, 125);
+  assert.match(await s.out('nohup --version'), /^nohup \(GNU coreutils\) /);
+});
+
+test('crontab: install, list, remove, validation', async () => {
+  const s = await sim();
+  const none = await s.run('crontab -l');
+  assert.equal(none.code, 1);
+  assert.equal(none.err, 'no crontab for kali\n');
+  assert.equal((await s.run('crontab -r')).err, 'no crontab for kali\n');
+  assert.equal((await s.run('echo "*/5 * * * * /home/kali/scan.sh" | crontab -')).code, 0);
+  assert.equal(await s.out('crontab -l'), '*/5 * * * * /home/kali/scan.sh\n');
+  const st = s.machine.vfs.stat('/var/spool/cron/crontabs/kali');
+  assert.equal(st.mode & 0o7777, 0o600);
+  assert.equal(st.uid, 1000);
+  assert.equal(await s.out('sudo ls /var/spool/cron/crontabs'), 'kali\n');
+  const bad = await s.run('echo "61 * * * * x" | crontab -');
+  assert.equal(bad.code, 1);
+  assert.equal(bad.err, '"-":1: bad minute\nerrors in crontab file, can\'t install.\n');
+  assert.equal((await s.run('echo "* * * * *" | crontab -')).err, '"-":1: bad command\nerrors in crontab file, can\'t install.\n');
+  assert.equal((await s.run('crontab /nope')).err, 'crontab: /nope: No such file or directory\n');
+  assert.equal((await s.run('crontab -u root -l')).err, 'must be privileged to use -u\n');
+  assert.equal(await s.out('sudo crontab -u kali -l'), '*/5 * * * * /home/kali/scan.sh\n');
+  assert.equal((await s.run('crontab -r')).code, 0);
+  assert.equal((await s.run('crontab -l')).code, 1);
+  s.term.feed('1');
+  const e = await s.run('crontab -e');
+  assert.match(e.err, /no crontab for kali - using an empty one\n/);
+  assert.match(e.out, /Select an editor\./);
+  assert.match(e.err, /crontab: no changes made to crontab/);
 });
