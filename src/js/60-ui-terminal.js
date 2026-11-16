@@ -278,6 +278,15 @@
     }
   }
 
+  /** Give a scrolling box a height of whole rows, so that no line is cut in half at its bottom edge. */
+  function snapRows(body, lineH) {
+    body.style.flex = ''; body.style.height = '';          // first let the layout hand it all the free space
+    const free = body.clientHeight;
+    if (!free || !lineH) return;
+    body.style.flex = '0 0 auto';
+    body.style.height = Math.max(1, Math.floor(free / lineH + 0.01)) * lineH + 'px';
+  }
+
   /* ------------------------------------------------------------------ key bars */
   const KEY = (label, key, o) => Object.assign({ label, key }, o);
   const ARROWS = [
@@ -347,12 +356,12 @@
       this.ta.addEventListener('input', () => this._onInput());
       this.ta.addEventListener('compositionstart', () => { this._composing = true; });
       this.ta.addEventListener('compositionend', () => { this._composing = false; this._onInput(); });
-      el.addEventListener('pointerdown', (e) => { this._pointer = e.pointerType; });
+      el.addEventListener('pointerdown', (e) => { this._pointer = e.pointerType; this._down = { x: e.clientX, y: e.clientY }; });
       // a tap must not pull focus out of the input field, or the soft keyboard flickers
       el.addEventListener('mousedown', (e) => { if (this._pointer === 'touch' && document.activeElement === this.ta) e.preventDefault(); });
       el.addEventListener('click', (e) => {
         if (e.target.closest('.kt-keys')) return;
-        if (!this._hasSelection()) this.focus();
+        if (!this.selecting(e)) this.focus();
       });
       el.addEventListener('focusin', () => el.classList.add('kt-focus'));
       el.addEventListener('focusout', () => el.classList.remove('kt-focus'));
@@ -491,6 +500,15 @@
       // a click at the end of a line can leave a range that is not collapsed and yet selects nothing
       return !!sel && !sel.isCollapsed && this.el.contains(sel.anchorNode) && sel.anchorNode !== this.ta && String(sel) !== '';
     }
+    /**
+     * Did this click select text (a drag, a double click, a shift-click)? A plain click does not,
+     * even though the browser may still report the previous selection while the click is handled.
+     */
+    selecting(e) {
+      const d = this._down;
+      const dragged = !!d && Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 4;
+      return (dragged || e.detail > 1 || e.shiftKey) && this._hasSelection();
+    }
     _copySelection() {
       const text = String(getSelection());
       if (!text) return;
@@ -537,7 +555,7 @@
         const r = (this._read = {
           resolve, reject, prompt, hidden: !!o.hidden, history, complete: primary ? o.complete : null,
           shell, zsh: shell && this._zsh, buf: '', pos: 0, hIndex: history.length, draft: '',
-          search: null, menu: null, list: null, ask: null, suggest: '',
+          search: null, menu: null, list: null, ask: null, armed: false, suggest: '',
         });
         this._mode();
         this._syncField();     // now, not at the next repaint: keys can arrive before it
@@ -571,7 +589,7 @@
     /** An edit ends menu completion and removes the candidate list. */
     _edit(buf, pos) {
       const r = this._read;
-      r.menu = null; r.ask = null;
+      r.menu = null; r.ask = null; r.armed = false;
       if (r.list) { r.list = null; this._setBelow(''); }
       this._setBuf(buf, pos);
     }
@@ -740,7 +758,7 @@
       if (r.ask) return this._askKey(k);
       if (r.search) return this._searchKey(k);
       const buf = r.buf; const pos = r.pos; const len = buf.length;
-      if (key !== 'Tab' && key !== 'Shift') r.menu = null;
+      if (key !== 'Tab' && key !== 'Shift') { r.menu = null; r.armed = false; }
       if (k.ctrl && !k.alt) {
         switch (lk) {
           case 'c': this._interruptRead(); return true;
@@ -851,15 +869,18 @@
       let common = items[0].text;
       for (const it of items) { let i = 0; while (i < common.length && common[i] === it.text[i]) i++; common = common.slice(0, i); }
       if (common.length > word.length) { this._edit(head + common + tail, head.length + common.length); return; }
-      // nothing more to insert: list the candidates, and walk through them on further Tabs
+      // Nothing more to insert. zsh lists the candidates and walks through them on further Tabs;
+      // bash rings the bell and lists them on the second Tab.
       const key = r.buf + '\u0000' + r.pos;
-      if (r.list && r.list.key === key) { r.menu = { head, tail, items, index: -1 }; this._menuStep(dir); return; }
+      if (r.zsh) {
+        if (r.list && r.list.key === key) { r.menu = { head, tail, items, index: -1 }; this._menuStep(dir); return; }
+      } else if (!r.armed) { r.armed = true; return; }
       r.list = { key, items, sel: -1 };
       const perRow = Math.max(1, Math.floor(this.cols / (Math.max.apply(null, items.map((it) => it.display.length)) + 2)));
       const lines = Math.ceil(items.length / perRow);
       if (lines > Math.max(4, this.rows - 2)) {
         r.ask = true;
-        this._setBelow(esc('zsh: do you wish to see all ' + items.length + ' possibilities (' + lines + ' lines)? '));
+        this._setBelow(esc(r.zsh ? 'zsh: do you wish to see all ' + items.length + ' possibilities (' + lines + ' lines)? ' : 'Display all ' + items.length + ' possibilities? (y or n)'));
       } else this._showList();
     }
     _askKey(k) {
@@ -1008,6 +1029,10 @@
     constructor(term, text, o, done) {
       this.term = term; this.done = done; this.kind = 'pager';
       this.title = o.title ? String(o.title) : '';
+      // man(1) runs less with its own prompt; a title such as "ls(1)" or "Manual page ls(1)" selects it
+      const man = /^(?:Manual page )?(\S+\(\d\w*\))$/.exec(this.title);
+      this.man = man ? 'Manual page ' + man[1] : '';
+      this.fresh = true; this.sawEnd = false;
       const b = new Buffer();
       b.write(String(text == null ? '' : text));
       this.src = b.lines;
@@ -1024,6 +1049,7 @@
     resize() {
       const keep = this.rows.length ? this.rows[this._top()].li : 0;
       const cols = this.term.cols;
+      snapRows(this.body, this.term.lineH);
       this.rows = [];
       this.src.forEach((l, li) => {
         const n = l.c.length;
@@ -1048,20 +1074,29 @@
     _status() {
       const inp = this.input;
       if (inp) { this.status.innerHTML = esc(inp.prefix + inp.text) + '<span class="kt-cursor"> </span>'; return; }
-      let text = this.msg;
-      if (!text) {
-        const top = this._top(); const bot = Math.min(this.rows.length, top + this._visible());
-        const last = this.rows[bot - 1].li + 1; const total = this.src.length;
-        text = (this.title ? this.title + ' ' : '') + 'lines ' + (this.rows[top].li + 1) + '-' + last + '/' + total +
-          (bot >= this.rows.length ? ' (END)' : ' ' + Math.floor(last * 100 / total) + '%');
+      const text = this.msg || this._prompt();
+      this.status.innerHTML = text === ':' ? ':' : '<span class="kt-inv">' + esc(text) + '</span>';
+    }
+    /** less's short prompt (file name once, then ":" and "(END)"), or the prompt man gives it. */
+    _prompt() {
+      const top = this._top(); const bot = Math.min(this.rows.length, top + this._visible());
+      const end = bot >= this.rows.length;
+      if (end) this.sawEnd = true;
+      if (this.man) {
+        // less learns the length of piped input only when it has read to the end
+        const total = this.src.length;
+        return ' ' + this.man + ' line ' + (this.rows[top].li + 1) + (this.sawEnd ? '/' + total : '') +
+          (end ? ' (END)' : this.sawEnd ? ' ' + Math.floor(this.rows[bot - 1].li * 100 / total) + '%' : '') + ' (press h for help or q to quit)';
       }
-      this.status.innerHTML = '<span class="kt-inv">' + esc(text) + '</span>';
+      if (end) return '(END)';
+      return this.fresh && this.title ? this.title : ':';
     }
     _say(msg) { this.msg = msg; this._status(); }
 
     key(k) {
       if (this.input) return this._inputKey(k);
       const key = k.key; const lk = key.toLowerCase();
+      this.fresh = false;
       if (this.msg) { this.msg = ''; this._status(); if (key === 'Enter') return true; }
       const top = this._top(); const page = this._visible(); const half = Math.max(1, Math.floor(page / 2));
       if (k.ctrl) {
@@ -1157,7 +1192,7 @@
     get dirty() { return this.content() !== this.clean; }
     abort() { this.done({ saved: this.saved, content: this.savedContent, path: this.savedPath }); }
     close() { this.term._closeOverlay(); this.abort(); }
-    resize() { this.draw(); }
+    resize() { snapRows(this.body, this.term.lineH); this.draw(); }
     write(path) { this.saved = true; this.savedContent = this.clean = this.content(); this.savedPath = this.path = path; this.isNew = false; }
 
     maxX() { return this.lines[this.cy].length; }
@@ -1181,8 +1216,7 @@
     }
     _click(e) {
       const lineEl = e.target.closest('.kt-ed-line');
-      const sel = getSelection();
-      if (!lineEl || (sel && !sel.isCollapsed) || this.hideCursor) return;
+      if (!lineEl || this.term.selecting(e) || this.hideCursor) return;
       const i = Array.prototype.indexOf.call(this.text.children, lineEl);
       let node = null; let off = 0;
       if (document.caretPositionFromPoint) { const p = document.caretPositionFromPoint(e.clientX, e.clientY); if (p) { node = p.offsetNode; off = p.offset; } }
@@ -1444,7 +1478,7 @@
       this.msgKind = '';
       this.msg = this.path ? this._fileInfo(this.isNew ? ' [New]' : '') : '';
       this.statusEl = h('div', { class: 'kt-vim-status' });
-      this.body.appendChild(h('div', { class: 'kt-vim-fill', 'aria-hidden': 'true' }, '~\n'.repeat(120)));
+      this.fill = this.body.appendChild(h('div', { class: 'kt-vim-fill', 'aria-hidden': 'true' }));
       this.el = h('div', { class: 'kt-ed kt-vim' }, this.body, this.statusEl);
     }
     _fileInfo(tag) { return '"' + this.path + '"' + (tag === ' [New]' && !this.saved ? ' [New]' : tag + ' ' + this.lineCount + 'L, ' + K.util.byteLen(this.content()) + 'B'); }
@@ -1456,6 +1490,8 @@
       this.hideCursor = this.mode === 'cmd';
       this.cx = clamp(this.cx, 0, this.maxX());
       this._paint();
+      // tildes for the screen lines past the end of the buffer, never more than fit (they must not scroll)
+      this.fill.textContent = '~\n'.repeat(Math.max(0, Math.floor((this.body.clientHeight - this.text.offsetHeight) / this.term.lineH)));
       if (this.mode === 'cmd') { this.statusEl.innerHTML = '<span class="kt-vim-msg">' + esc(this.cmdPrefix + this.cmd) + '<span class="kt-cursor"> </span></span>'; return; }
       const b = this.body; const more = b.scrollHeight - b.clientHeight;
       const where = more <= 1 ? 'All' : b.scrollTop <= 0 ? 'Top' : b.scrollTop >= more - 1 ? 'Bot' : Math.floor(b.scrollTop * 100 / more) + '%';

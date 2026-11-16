@@ -87,14 +87,13 @@
 
 /* ---- full-screen programs ---- */
 .kt-over { z-index: 2; display: flex; flex-direction: column; background: var(--kt-bg); }
-.kt-pager, .kt-ed { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; padding-top: 8px; }
+.kt-pager, .kt-ed { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; padding: 8px 0 6px; }
 .kt-pager-body, .kt-ed-body {
   position: relative; flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
   padding: 0 var(--kt-pad); scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #3a4150 transparent;
 }
 .kt-row { height: var(--kt-lh); white-space: pre; overflow: hidden; }
 .kt-pager-status, .kt-vim-status, .kt-nano-status { flex: none; height: var(--kt-lh); padding: 0 var(--kt-pad); white-space: pre; overflow: hidden; }
-.kt-pager-status { margin-bottom: 6px; }
 .kt-ed-body { cursor: text; }
 
 .kt-nano-title {
@@ -106,13 +105,13 @@
 .kt-nano-status { text-align: center; padding: 0; }
 .kt-nano-ask { padding: 0 var(--kt-pad); background: var(--kt-fg); color: var(--kt-bg); text-align: left; }
 .kt-nano-ask .kt-cursor, .kt-focus .kt-nano-ask .kt-cursor { background: var(--kt-bg); color: var(--kt-fg); outline: none; }
-.kt-nano-legend { flex: none; display: grid; column-gap: 1ch; padding: 0 var(--kt-pad) 6px; }
+.kt-nano-legend { flex: none; display: grid; column-gap: 1ch; padding: 0 var(--kt-pad); }
 .kt-nano-legend span { height: var(--kt-lh); white-space: pre; overflow: hidden; }
 .kt-nano-legend b { background: var(--kt-fg); color: var(--kt-bg); font-weight: 400; }
 
 .kt-vim-fill { color: var(--kt-c4); white-space: pre; user-select: none; -webkit-user-select: none; }
 .kt-vim-nr { color: var(--kt-c3); user-select: none; -webkit-user-select: none; }
-.kt-vim-status { display: flex; margin-bottom: 6px; }
+.kt-vim-status { display: flex; }
 .kt-vim-msg { flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .kt-vim-pend { flex: none; width: 11ch; }
 .kt-vim-ruler { flex: none; width: 18ch; }

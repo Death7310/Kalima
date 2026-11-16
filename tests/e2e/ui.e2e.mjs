@@ -36,13 +36,17 @@ function watch(page) {
   page.on('request', (r) => { if (r.url().split('#')[0] !== URL) problems.push('network request: ' + r.method() + ' ' + r.url().slice(0, 120)); });
 }
 
+/** Wait for the app to boot and add the fixture commands (again after every reload). */
+async function ready(page) {
+  await page.waitForFunction(() => window.K && K.app && K.app.booted);
+  await page.evaluate(installFixtures);
+}
 async function open(browser, o = {}) {
   const context = o.context || await browser.newContext({ viewport: o.viewport || { width: 1280, height: 800 }, hasTouch: !!o.touch, isMobile: !!o.touch });
   const page = await context.newPage();
   watch(page);
   await page.goto(URL);
-  await page.waitForFunction(() => window.K && K.app && K.app.booted);
-  await page.evaluate(installFixtures);
+  await ready(page);
   return page;
 }
 
@@ -65,6 +69,25 @@ const typed = (page) => page.evaluate(() => { const r = K.app.term._read; return
 const waitLine = (page, line) => page.waitForFunction(
   (t) => Array.from(document.querySelectorAll('.kt-screen > .kt-line')).some((el) => el.textContent === t), line);
 const findLine = 'const findLine = (t) => Array.from(document.querySelectorAll(".kt-screen > .kt-line")).reverse().find((el) => el.textContent === t);';
+
+const overlay = (page) => page.evaluate(() => {
+  const o = K.app.term._overlay;
+  if (!o) return null;
+  const el = document.querySelector('.kt-over');
+  return {
+    kind: o.kind, lines: o.lines ? o.lines.slice() : null, cy: o.cy, cx: o.cx, mode: o.mode, msg: o.msg,
+    top: o.rows ? o.rows[o._top()].li + 1 : null, page: o._visible ? o._visible() : null,
+    status: (el.querySelector('.kt-pager-status, .kt-vim-status, .kt-nano-status') || {}).textContent, screen: el.innerText,
+  };
+});
+const press = async (page, ...keys) => { for (const k of keys) await page.keyboard.press(k); };
+const fileOnKali = (page, p) => page.evaluate((f) => { try { return K.kali.vfs.read(f); } catch (e) { return null; } }, p);
+async function start(page, line, mode) {
+  await waitMode(page, 'read');
+  await page.keyboard.type(line);
+  await page.keyboard.press('Enter');
+  await waitMode(page, mode);
+}
 
 /* ---- fixture commands, registered in the page ---- */
 function installFixtures() {
@@ -91,6 +114,15 @@ function installFixtures() {
         const r = await ctx.term.editor({ path: file, content, flavor: ctx.args[0] });
         if (r.saved) ctx.fs.write(r.path || file, r.content);
         return 0;
+      },
+    },
+    {
+      // a full-screen style program reading raw keys, as top and watch do
+      name: 'fx-keys',
+      run(ctx) {
+        return new Promise((resolve) => {
+          const off = ctx.term.onKey((k) => { ctx.println('key ' + k); if (k === 'q') { off(); resolve(0); } });
+        });
       },
     },
     { name: 'fxa-one', run() { return 0; } },
@@ -246,7 +278,7 @@ group('terminal: selection and copy survive typing', async ({ page }) => {
   await page.keyboard.press('Enter');
   await waitText(page, /\nagain\n/);
   await page.mouse.click(box.x + 300, box.y);          // a plain click clears the selection and focuses the input
-  assert.equal(await page.evaluate(() => document.activeElement === K.app.term.ta), true);
+  assert.equal(await page.evaluate(() => document.activeElement === K.app.term.ta), true, await page.evaluate(() => JSON.stringify([document.activeElement.className, String(getSelection()), getSelection().isCollapsed, K.app.term.mode])));
 });
 
 group('terminal: long output stays fast', async ({ page }) => {
@@ -270,6 +302,190 @@ group('terminal: long output stays fast', async ({ page }) => {
   assert.match(await text(page), /^┌──\(kali㉿kali\)-\[~\]\n└─\$ $/, 'clear empties the screen');
 });
 
+group('terminal: raw keys and type-ahead', async ({ page }) => {
+  await start(page, 'fx-keys', 'run');
+  await press(page, 'a', 'ArrowUp', 'Enter', 'q');
+  await waitMode(page, 'read');
+  assert.match(await text(page), /key a\nkey ArrowUp\nkey Enter\nkey q\n/);
+
+  // keys typed while a command runs are kept for the next prompt
+  await page.keyboard.type('fx-lines 3; echo first-done');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('echo typed-ahead');
+  await page.keyboard.press('Enter');
+  await waitText(page, /first-done\n[^]*\$ echo typed-ahead\ntyped-ahead\n/);
+});
+
+/* ---- pager and editors ---- */
+group('pager: j k Space b g G /search n q', async ({ page }) => {
+  await start(page, 'fx-pager', 'pager');
+  let o = await overlay(page);
+  assert.equal(o.top, 1);
+  assert.equal(o.status, ':');
+  assert.ok(o.page > 10, 'the pager fills the terminal (' + o.page + ' rows)');
+  await press(page, 'j', 'j');
+  assert.equal((await overlay(page)).top, 3);
+  await press(page, 'k');
+  assert.equal((await overlay(page)).top, 2);
+  await press(page, 'Space');
+  assert.equal((await overlay(page)).top, 2 + o.page);
+  await press(page, 'b');
+  assert.equal((await overlay(page)).top, 2);
+  await press(page, 'G');
+  o = await overlay(page);
+  assert.equal(o.top, 300 - o.page + 1);
+  assert.equal(o.status, '(END)');
+  await press(page, 'g');
+  assert.equal((await overlay(page)).top, 1);
+  await page.keyboard.type('/needle');
+  assert.equal((await overlay(page)).status.trimEnd(), '/needle');
+  await press(page, 'Enter');
+  assert.equal((await overlay(page)).top, 50, 'the first match moves to the top line');
+  assert.ok(await page.locator('.kt-pager .kt-mark').count() >= 6, 'matches are highlighted');
+  await press(page, 'n');
+  assert.equal((await overlay(page)).top, 100);
+  await press(page, 'N');
+  assert.equal((await overlay(page)).top, 50);
+  await page.keyboard.type('/no-such-text');
+  await press(page, 'Enter');
+  assert.equal((await overlay(page)).status, 'Pattern not found  (press RETURN)');
+  await press(page, 'Enter', 'q');
+  await waitMode(page, 'read');
+  assert.equal(await page.locator('.kt-over').first().isHidden(), true);
+  assert.match(await text(page), /\$ fx-pager\n[^\n]*\n└─\$ $/, 'the pager leaves no text behind');
+
+  await start(page, "fx-pager 'fx-pager(1)'", 'pager');
+  assert.equal((await overlay(page)).status, ' Manual page fx-pager(1) line 1 (press h for help or q to quit)');
+  await press(page, 'G');
+  o = await overlay(page);
+  assert.equal(o.status, ' Manual page fx-pager(1) line ' + o.top + '/300 (END) (press h for help or q to quit)');
+  await press(page, 'q');
+  await waitMode(page, 'read');
+});
+
+group('nano: write out, exit question, cut, paste, search', async ({ page }) => {
+  await start(page, 'fx-edit nano notes.txt', 'nano');
+  let o = await overlay(page);
+  assert.match(o.screen, /GNU nano 8\.6\s+notes\.txt/);
+  assert.equal(o.status, '[ New File ]');
+  assert.match(o.screen, /\^G Help\s+\^O Write Out/);
+  await page.keyboard.type('first line');
+  await press(page, 'Enter');
+  await page.keyboard.type('second line');
+  await press(page, 'Enter');
+  await page.keyboard.type('third');
+  assert.match((await overlay(page)).screen, /Modified/);
+  await press(page, 'Control+o');
+  assert.equal((await overlay(page)).status.trimEnd(), 'File Name to Write: notes.txt');
+  await press(page, 'Enter');
+  o = await overlay(page);
+  assert.equal(o.status, '[ Wrote 3 lines ]');
+  assert.doesNotMatch(o.screen, /Modified/);
+
+  await press(page, 'ArrowUp', 'Control+k');                 // cut "second line"
+  assert.deepEqual((await overlay(page)).lines, ['first line', 'third']);
+  await press(page, 'ArrowUp', 'Control+u');                 // paste it above "first line"
+  assert.deepEqual((await overlay(page)).lines, ['second line', 'first line', 'third']);
+  await press(page, 'Control+w');
+  assert.equal((await overlay(page)).status.trimEnd(), 'Search:');
+  await page.keyboard.type('thi');
+  await press(page, 'Enter');
+  o = await overlay(page);
+  assert.deepEqual([o.cy, o.cx], [2, 0], 'the cursor is on the match');
+  await press(page, 'Control+w');
+  await page.keyboard.type('absent');
+  await press(page, 'Enter');
+  assert.equal((await overlay(page)).status, '[ "absent" not found ]');
+
+  await press(page, 'Control+x');
+  assert.equal((await overlay(page)).status.trimEnd(), 'Save modified buffer?');
+  await press(page, 'Control+c');                            // cancel, still editing
+  assert.equal((await overlay(page)).status, '[ Cancelled ]');
+  await press(page, 'Control+x', 'y');
+  assert.equal((await overlay(page)).status.trimEnd(), 'File Name to Write: notes.txt');
+  await press(page, 'Enter');
+  await waitMode(page, 'read');
+  assert.equal(await fileOnKali(page, '/home/kali/notes.txt'), 'second line\nfirst line\nthird\n');
+
+  await start(page, 'fx-edit nano notes.txt', 'nano');
+  assert.equal((await overlay(page)).status, '[ Read 3 lines ]');
+  await page.keyboard.type('discard me ');
+  await press(page, 'Control+x', 'n');
+  await waitMode(page, 'read');
+  assert.equal(await fileOnKali(page, '/home/kali/notes.txt'), 'second line\nfirst line\nthird\n', 'answering N leaves the file alone');
+});
+
+group('vim: modes, motions, edits, search and ex commands', async ({ page }) => {
+  await start(page, 'fx-edit vim v.txt', 'vim');
+  let o = await overlay(page);
+  assert.equal(o.mode, 'normal');
+  assert.match(o.status, /^"v\.txt" \[New\]/);
+  assert.match(o.screen, /\n~\n~\n/, 'empty screen lines show tildes');
+  assert.equal(await page.evaluate(() => { const b = document.querySelector('.kt-vim .kt-ed-body'); return b.scrollHeight <= b.clientHeight; }), true, 'the tildes do not scroll');
+  await press(page, 'i');
+  assert.match((await overlay(page)).status, /^-- INSERT --/);
+  await page.keyboard.type('alpha');
+  await press(page, 'Enter');
+  await page.keyboard.type('beta');
+  await press(page, 'Escape');
+  o = await overlay(page);
+  assert.deepEqual([o.mode, o.lines, o.cy, o.cx], ['normal', ['alpha', 'beta'], 1, 3]);
+  await press(page, 'o');
+  await page.keyboard.type('gamma');
+  await press(page, 'Escape', 'k', 'k', 'a');                // append after the "a" of alpha that the cursor is on
+  await page.keyboard.type('X');
+  await press(page, 'Escape');
+  assert.deepEqual((await overlay(page)).lines, ['alphaX', 'beta', 'gamma']);
+  await press(page, 'x');
+  assert.deepEqual((await overlay(page)).lines, ['alpha', 'beta', 'gamma']);
+
+  await press(page, '0', 'l', 'l', 'j');
+  o = await overlay(page);
+  assert.deepEqual([o.cy, o.cx], [1, 2]);
+  await press(page, 'h', 'k');
+  o = await overlay(page);
+  assert.deepEqual([o.cy, o.cx], [0, 1]);
+
+  await press(page, 'j', 'd', 'd');                          // delete "beta"
+  assert.deepEqual((await overlay(page)).lines, ['alpha', 'gamma']);
+  await press(page, 'u');
+  assert.deepEqual((await overlay(page)).lines, ['alpha', 'beta', 'gamma']);
+  await press(page, 'g', 'g', 'y', 'y', 'G', 'p');           // copy "alpha" below the last line
+  o = await overlay(page);
+  assert.deepEqual([o.lines, o.cy], [['alpha', 'beta', 'gamma', 'alpha'], 3]);
+
+  await page.keyboard.type('/bet');
+  assert.equal((await overlay(page)).status.trimEnd(), '/bet');
+  await press(page, 'Enter');
+  o = await overlay(page);
+  assert.deepEqual([o.cy, o.cx], [1, 0]);
+
+  await page.keyboard.type(':q');
+  await press(page, 'Enter');
+  assert.match((await overlay(page)).status, /^E37: No write since last change \(add ! to override\)/);
+  await page.keyboard.type(':w');
+  await press(page, 'Enter');
+  assert.match((await overlay(page)).status, /^"v\.txt" \[New\] 4L, 23B written/);
+  await press(page, 'G', 'd', 'd');
+  await page.keyboard.type(':wq');
+  await press(page, 'Enter');
+  await waitMode(page, 'read');
+  assert.equal(await fileOnKali(page, '/home/kali/v.txt'), 'alpha\nbeta\ngamma\n');
+
+  await start(page, 'fx-edit vim v.txt', 'vim');
+  assert.match((await overlay(page)).status, /^"v\.txt" 3L, 17B/);
+  await press(page, 'd', 'd');
+  await page.keyboard.type(':q!');
+  await press(page, 'Enter');
+  await waitMode(page, 'read');
+  assert.equal(await fileOnKali(page, '/home/kali/v.txt'), 'alpha\nbeta\ngamma\n', ':q! throws the change away');
+  await start(page, 'fx-edit vim v.txt', 'vim');
+  await page.keyboard.type(':q');
+  await press(page, 'Enter');
+  await waitMode(page, 'read');
+  assert.equal(await page.evaluate(() => document.activeElement === K.app.term.ta), true, 'focus is back on the command line');
+});
+
 /* ------------------------------------------------------------------- runner */
 const browser = await chromium.launch();
 let failed = 0;
@@ -288,6 +504,9 @@ try {
       failed++;
       console.log(String(error && error.stack ? error.stack : error).split('\n').map((l) => '    ' + l).join('\n'));
       if (SHOTS) await page.screenshot({ path: path.join(SHOTS, 'fail-' + results.length + '.png') }).catch(() => {});
+      // start the next group from a clean page so one failure does not cascade
+      await page.reload().then(() => ready(page)).catch(() => {});
+      problems.length = 0;
     }
   }
 } finally {
