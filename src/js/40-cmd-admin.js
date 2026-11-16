@@ -1864,4 +1864,161 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     machine.vfs.seedDir(CRON_SPOOL, { mode: 0o1730, uid: 0, gid: grp ? grp.gid : 0 });
   });
 
+  /* ================================================== power management */
+
+  const POWER_TEXT = { poweroff: ['power off', 'The system will power off now!'], reboot: ['reboot', 'The system will reboot now!'], halt: ['halt', 'The system will halt now!'] };
+
+  function powerOff(ctx, action, wall) {
+    const m = ctx.machine;
+    if (wall) ctx.out('\nBroadcast message from root@' + m.hostname + ' on pts/0 (' + stamp(K.clock.now(), 'UTC') + '):\n\n' + wall + '\n\n');
+    m.state.power = action;
+    log(m, { facility: 'daemon', ident: 'systemd-logind', pid: 1, msg: 'The system will ' + (action === 'reboot' ? 'reboot' : action === 'halt' ? 'halt' : 'power off') + ' now!' });
+    K.events.emit('power', { action, machine: m, host: m.hostname });
+    return 0;
+  }
+  const polkitPower = (ctx, action) => {
+    ctx.err('Failed to set wall message, ignoring: Interactive authentication required.\nFailed to ' + POWER_TEXT[action][0] + ' system via logind: Interactive authentication required.\nFailed to open initctl fifo: Permission denied\nFailed to talk to init daemon.\n');
+    return 1;
+  };
+
+  function powerCommand(name, defaultAction, summary) {
+    reg({ name, pkg: 'systemd-sysv', path: '/usr/sbin/' + name, section: 8, summary, synopsis: name + ' [OPTIONS...]',
+      man: 'DESCRIPTION\n       ' + summary + '. Needs root; the simulated session ends and the UI offers to restart it.\n\nOPTIONS\n       -f, --force   force immediate action\n       --no-wall     do not send a wall message\n\nEXAMPLES\n       sudo ' + name,
+      run(ctx) {
+        const g = K.getopt(ctx.args, { short: 'pfwdhn', long: ['help', 'halt', 'poweroff', 'reboot', 'force', 'wtmp-only', 'no-wtmp', 'no-wall', 'no-sync'] });
+        if (g.err) { ctx.err(name + ': ' + g.err.replace(/^invalid option/, 'invalid option') + '\n'); return 1; }
+        if (g.opts.help) { ctx.out(name + ' [OPTIONS...]\n\n' + summary.replace(/^./, (c) => c.toUpperCase()) + '.\n\n     --help      Show this help\n     --halt      Halt the machine\n  -p --poweroff  Switch off the machine\n     --reboot    Reboot the machine\n  -f --force     Force immediate halt/power-off/reboot\n  -w --wtmp-only Don\'t halt/power-off/reboot, just write wtmp record\n  -d --no-wtmp   Don\'t write wtmp record\n     --no-wall   Don\'t send wall message before halt/power-off/reboot\n\nSee the ' + name + '(8) man page for details.\n'); return 0; }
+        const action = g.opts.reboot ? 'reboot' : g.opts.halt ? 'halt' : g.opts.poweroff || g.opts.p ? 'poweroff' : defaultAction;
+        if (!ctx.isRoot) return polkitPower(ctx, action);
+        return powerOff(ctx, action, null);
+      } });
+  }
+  powerCommand('reboot', 'reboot', 'reboot the system');
+  powerCommand('poweroff', 'poweroff', 'power off the system');
+  powerCommand('halt', 'halt', 'halt the system');
+
+  /** Parse shutdown's TIME argument into minutes from now, or null. */
+  function shutdownDelay(spec, now) {
+    if (spec === 'now') return 0;
+    let m = /^\+(\d+)$/.exec(spec);
+    if (m) return parseInt(m[1], 10);
+    m = /^(\d{1,2}):(\d{2})$/.exec(spec);
+    if (!m || +m[1] > 23 || +m[2] > 59) return null;
+    const d = new Date(now); const target = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), +m[1], +m[2]);
+    return Math.max(0, Math.ceil(((target < now ? target + 86400000 : target) - now) / 60000));
+  }
+  const SHUTDOWN_HELP = 'shutdown [OPTIONS...] [TIME] [WALL...]\n\nShut down the system.\n\n     --help      Show this help\n  -H --halt      Halt the machine\n  -P --poweroff  Power-off the machine\n  -r --reboot    Reboot the machine\n  -h             Equivalent to --poweroff, overridden by --halt\n  -k             Don\'t halt/power-off/reboot, just send warnings\n     --no-wall   Don\'t send wall message before halt/power-off/reboot\n  -c             Cancel a pending shutdown\n     --show      Show pending shutdown\n\nSee the shutdown(8) man page for details.\n';
+  reg({ name: 'shutdown', pkg: 'systemd-sysv', path: '/usr/sbin/shutdown', section: 8, summary: 'halt, power off or reboot the machine', synopsis: 'shutdown [OPTIONS...] [TIME] [WALL...]',
+    man: "DESCRIPTION\n       shutdown may be used to halt, power off or reboot the machine. The first argument may be a time string (hh:mm, +minutes or now). Without it the shutdown is scheduled one minute ahead. Needs root.\n\nOPTIONS\n       -h, -P   power off (the default)\n       -r       reboot\n       -H       halt\n       -k       only send the warning\n       -c       cancel a pending shutdown\n\nEXAMPLES\n       sudo shutdown -h now\n       sudo shutdown -r +5 'rebooting for maintenance'",
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'HPrhkc', long: ['help', 'halt', 'poweroff', 'reboot', 'no-wall', 'show'], alias: { halt: 'H', poweroff: 'P', reboot: 'r' } });
+      if (g.err) { ctx.err('shutdown: ' + g.err + '\n'); return 1; }
+      if (g.opts.help) { ctx.out(SHUTDOWN_HELP); return 0; }
+      const m = ctx.machine; const now = K.clock.now();
+      if (g.opts.show) { const p = m.state.pendingShutdown; ctx.out(p ? 'Shutdown scheduled for ' + stamp(p.at, 'UTC') + ', use \'shutdown -c\' to cancel.\n' : 'No scheduled shutdown.\n'); return 0; }
+      if (g.opts.c) {
+        if (!ctx.isRoot) { ctx.err('Failed to talk to shutdownd, proceeding with immediate shutdown: Interactive authentication required.\n'); return 1; }
+        if (m.state.pendingShutdown) { delete m.state.pendingShutdown; ctx.out('\nBroadcast message from root@' + m.hostname + ' on pts/0 (' + stamp(now, 'UTC') + '):\n\nThe system shutdown has been cancelled\n\n'); }
+        return 0;
+      }
+      const action = g.opts.r ? 'reboot' : g.opts.H ? 'halt' : 'poweroff';
+      const when = g.rest[0] == null ? '+1' : g.rest[0];
+      const words = g.rest.slice(1);
+      if (shutdownDelay(when, now) == null) { ctx.err('Failed to parse time specification: ' + when + '\n'); return 1; }
+      const delay = shutdownDelay(when, now);
+      if (!ctx.isRoot) {
+        ctx.err('Failed to set wall message, ignoring: Interactive authentication required.\nFailed to call ScheduleShutdown in logind, proceeding with immediate shutdown: Interactive authentication required.\nFailed to open initctl fifo: Permission denied\nFailed to talk to init daemon.\n');
+        return 1;
+      }
+      const wall = words.length ? words.join(' ') : POWER_TEXT[action][1];
+      if (g.opts.k) { ctx.out('\nBroadcast message from root@' + m.hostname + ' on pts/0 (' + stamp(now, 'UTC') + '):\n\n' + wall + '\n\n'); return 0; }
+      if (delay > 0) {
+        m.state.pendingShutdown = { action, at: now + delay * 60000 };
+        ctx.err('Shutdown scheduled for ' + stamp(now + delay * 60000, 'UTC') + ", use 'shutdown -c' to cancel.\n");
+        return 0;
+      }
+      return powerOff(ctx, action, g.opts['no-wall'] ? null : wall);
+    } });
+
+  /* ================================================== neofetch, fastfetch */
+
+  const KALI_LOGO = ['..............', '            ..,;:ccc,.', '          ......\'\'\';lxO.', '.....\'\'\'\'..........,:ld;', '           .\';;;:::;,,.x,', '      ..\'\'\'.            0Xxoc:,.  ...',
+    '  ....                ,ONkc;,;cokOdc\',.', ' .                   OMo           \':ddo.', '                    dMc               :OO;', '                    0M.                 .:o.',
+    '                    ;Wd', '                     ;XO,', '                       ,d0Odlc;,..', '                           ..\',;:cdOOd::,.', '                                    .:d;.\':;.',
+    '                                       \'d,  .\'', '                                         ;l   ..', '                                          .o', '                                            c', '                                            .\'', '                                             .'];
+  const LOGO_WIDTH = 49;
+
+  function uptimeText(ms) {
+    const mins = Math.max(0, Math.floor(ms / 60000));
+    const d = Math.floor(mins / 1440); const h = Math.floor((mins % 1440) / 60); const mi = mins % 60;
+    const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+    const parts = [];
+    if (d) parts.push(plural(d, 'day')); if (h) parts.push(plural(h, 'hour')); if (mi || !parts.length) parts.push(plural(mi, 'min'));
+    return parts.join(', ');
+  }
+  function systemFacts(ctx) {
+    const m = ctx.machine; const mi = memInfo(ctx);
+    const cpu = cpuInfo(ctx);
+    const used = (mi.MemTotal - mi.MemAvailable) / 1024; const total = mi.MemTotal / 1024;
+    return { user: ctx.user.name, host: m.hostname, os: m.os.pretty + ' ' + m.os.arch, kernel: m.os.kernel, uptime: uptimeText(K.clock.now() - K.getBootTime()),
+      packages: Array.from(m.packages.values()).filter((p) => p.status === 'installed').length, shell: (ctx.user.shell || '/usr/bin/zsh').split('/').pop() + ' 5.9', cpu: cpu.model, cores: cpu.n,
+      used, total, swapTotal: mi.SwapTotal / 1024, ip: m.primaryIp(), bits: (m.primaryIface() || {}).bits, iface: (m.primaryIface() || {}).name };
+  }
+  const withLogo = (ctx, lines) => {
+    const n = Math.max(lines.length, KALI_LOGO.length); const out = [];
+    const paint = ctx.isTTY ? (t) => K.c.sgr('1;34', t) : (t) => t;
+    for (let i = 0; i < n; i++) out.push(paint(U.padEnd(KALI_LOGO[i] || '', LOGO_WIDTH)) + (lines[i] == null ? '' : lines[i]));
+    return out.join('\n').replace(/[ ]+$/gm, '') + '\n';
+  };
+
+  reg({ name: 'neofetch', pkg: 'neofetch', section: 1, only: 'kali', summary: 'A fast, highly customizable system info script', synopsis: 'neofetch [options]',
+    man: 'DESCRIPTION\n       Neofetch is a command-line system information tool written in bash. It displays information about your operating system, software and hardware in an aesthetic and visually pleasing way. The Kali logo is shown next to the information.\n\nOPTIONS\n       --off       do not display the logo\n       --version   show the version\n\nEXAMPLES\n       neofetch',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { long: ['off', 'version', 'help', 'stdout', 'disable=', 'color_blocks=', 'ascii_distro='] });
+      if (g.err) { ctx.err('neofetch: ' + g.err + '\n'); return 1; }
+      if (g.opts.version) { ctx.out('Neofetch 7.1.0\n'); return 0; }
+      if (g.opts.help) { ctx.out('neofetch\n\nUsage: neofetch func_name --option "value" --option "value"\n\nNeofetch is a CLI system information tool written in BASH.\nNeofetch displays information about your system next to an image, your OS logo, or any ASCII file of your choice.\n\nOptions:\n    --off                   Do not display the logo\n    --version               Show neofetch version\n    --help                  Print this help.\n'); return 0; }
+      const f = systemFacts(ctx);
+      const c = ctx.isTTY ? (t) => K.c.sgr('1;34', t) : (t) => t;
+      const title = f.user + '@' + f.host;
+      const info = [c(title), '-'.repeat(title.length), c('OS') + ': ' + f.os, c('Host') + ': QEMU Standard PC (Q35 + ICH9, 2009) pc-q35-9.2', c('Kernel') + ': ' + f.kernel, c('Uptime') + ': ' + f.uptime,
+        c('Packages') + ': ' + f.packages + ' (dpkg)', c('Shell') + ': ' + f.shell, c('Resolution') + ': 1920x1080', c('DE') + ': Xfce 4.20', c('WM') + ': Xfwm4', c('WM Theme') + ': Kali-Dark', c('Theme') + ': Kali-Dark [GTK2/3]',
+        c('Icons') + ': Flat-Remix-Blue-Dark [GTK2/3]', c('Terminal') + ': qterminal', c('CPU') + ': ' + f.cpu.replace(/\(R\)|\(TM\)|Core /g, '').replace(/ CPU @.*$/, '') + ' (' + f.cores + ') @ 2.592GHz',
+        c('GPU') + ': 00:01.0 Red Hat, Inc. Virtio 1.0 GPU', c('Memory') + ': ' + Math.round(f.used) + 'MiB / ' + Math.round(f.total) + 'MiB', '', ''];
+      if (ctx.isTTY) { const row = (base) => [0, 1, 2, 3, 4, 5, 6, 7].map((k) => '\x1b[' + (base + k) + 'm   ').join('') + '\x1b[0m'; info[info.length - 2] = row(40); info[info.length - 1] = row(100); }
+      ctx.out(g.opts.off ? info.join('\n').replace(/\n+$/, '') + '\n' : withLogo(ctx, info));
+      return 0;
+    } });
+
+  const GIB = 1024;
+  const gib = (mib) => (mib / GIB).toFixed(2) + ' GiB';
+  reg({ name: 'fastfetch', pkg: 'fastfetch', section: 1, only: 'kali', summary: 'A maintained, feature-rich and performance oriented, neofetch like system information tool', synopsis: 'fastfetch [options]',
+    man: 'DESCRIPTION\n       fastfetch is a neofetch-like tool for fetching system information and displaying it in a pretty way. It is written mostly in C to achieve much better performance.\n\nOPTIONS\n       -h, --help      show help\n       -v, --version   show the version\n       -l none         do not display the logo\n\nEXAMPLES\n       fastfetch',
+    run(ctx) {
+      const g = K.getopt(ctx.args, { short: 'hvl:', long: ['help', 'version', 'logo=', 'structure=', 'pipe'], alias: { help: 'h', version: 'v', logo: 'l' } });
+      if (g.err) { ctx.err('fastfetch: ' + g.err + '\n'); return 1; }
+      if (g.opts.v) { ctx.out('fastfetch 2.48.1 (x86_64)\n'); return 0; }
+      if (g.opts.h) { ctx.out('Usage: fastfetch <options>\n\nOptions:\n   -h,--help:             print this message\n   -v,--version:          print the version of fastfetch\n   -l,--logo <name>:      choose a logo, "none" disables it\n'); return 0; }
+      const f = systemFacts(ctx);
+      const c = ctx.isTTY ? (t) => K.c.sgr('1;34', t) : (t) => t;
+      const title = f.user + '@' + f.host;
+      const cpuName = f.cpu.replace(/\(R\)|\(TM\)/g, '(R)').replace(/\s+CPU @.*$/, '');
+      const disk = 78.7; const diskUsed = 11.2;
+      const info = [c(title), '-'.repeat(title.length), c('OS') + ': ' + f.os, c('Host') + ': QEMU Standard PC (Q35 + ICH9, 2009) (pc-q35-9.2)', c('Kernel') + ': Linux ' + f.kernel, c('Uptime') + ': ' + f.uptime,
+        c('Packages') + ': ' + f.packages + ' (dpkg)', c('Shell') + ': ' + f.shell, c('Display') + ' (Virtual-1): 1920x1080 @ 60 Hz', c('DE') + ': Xfce 4.20', c('WM') + ': Xfwm4 (X11)', c('WM Theme') + ': Kali-Dark',
+        c('Terminal') + ': qterminal', c('CPU') + ': ' + cpuName + ' (' + f.cores + ') @ 2.59 GHz', c('GPU') + ': Red Hat, Inc. Virtio 1.0 GPU', c('Memory') + ': ' + gib(f.used) + ' / ' + gib(f.total) + ' (' + Math.round(f.used / f.total * 100) + '%)',
+        c('Swap') + ': 0 B / ' + gib(f.swapTotal) + ' (0%)', c('Disk') + ' (/): ' + diskUsed.toFixed(2) + ' GiB / ' + disk.toFixed(2) + ' GiB (' + Math.round(diskUsed / disk * 100) + '%) - ext4', c('Local IP') + ' (' + f.iface + '): ' + f.ip + '/' + f.bits,
+        c('Locale') + ': ' + (ctx.env.LANG || 'en_US.UTF-8')];
+      ctx.out(g.opts.l === 'none' ? info.join('\n') + '\n' : withLogo(ctx, info));
+      return 0;
+    } });
+
+  const NOT_SIMULATED = (tool, what) => tool + ': the interactive ' + tool + ' tool is not simulated in Kalima.\n' + what + '\nNothing was changed on this machine.\n';
+  reg({ name: 'kali-tweaks', pkg: 'kali-tweaks', section: 1, only: 'kali', summary: 'configure Kali Linux (metapackages, repositories, shell, virtualization, hardening)', synopsis: 'kali-tweaks',
+    man: 'DESCRIPTION\n       kali-tweaks is a text-mode menu that applies common Kali configuration changes. It is not simulated in Kalima: the command only prints a note.\n\nIn real Kali the sections are Metapackages (install kali-linux-* sets), Network Repositories (enable or disable the network mirror and experimental or bleeding-edge repositories), Shell & Prompt (zsh or bash prompt style), Virtualization (guest tools for VMware, VirtualBox, Hyper-V, QEMU) and Hardening (sysctl and boot settings).\n\nEXAMPLES\n       kali-tweaks',
+    run(ctx) { ctx.out(NOT_SIMULATED('kali-tweaks', 'In real Kali it opens a menu with Metapackages, Network Repositories, Shell & Prompt, Virtualization and Hardening sections.\nUse "sudo apt install kali-linux-default" to install a metapackage, or edit /etc/apt/sources.list.d/kali.sources by hand.')); return 0; } });
+  reg({ name: 'kali-undercover', pkg: 'kali-undercover', section: 1, only: 'kali', summary: 'switch the desktop to a Windows-like look', synopsis: 'kali-undercover',
+    man: 'DESCRIPTION\n       kali-undercover toggles between the normal Kali Xfce desktop and a look-alike of a common proprietary desktop, so that the screen draws less attention in public places. Running it again switches back. It is not simulated in Kalima: the command only prints a note.\n\nEXAMPLES\n       kali-undercover',
+    run(ctx) { ctx.out(NOT_SIMULATED('kali-undercover', 'In real Kali it swaps the Xfce theme, icons, panel layout and wallpaper for a Windows-like set; running it again restores the Kali look.')); return 0; } });
+
 })(typeof globalThis !== 'undefined' ? globalThis : this);

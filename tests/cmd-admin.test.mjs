@@ -401,3 +401,49 @@ test('crontab: install, list, remove, validation', async () => {
   assert.match(e.out, /Select an editor\./);
   assert.match(e.err, /crontab: no changes made to crontab/);
 });
+
+test('reboot, poweroff, halt and shutdown emit power events', async () => {
+  const s = await sim();
+  const events = [];
+  s.K.events.on('power', (e) => events.push(e.action));
+  const nr = await s.run('reboot');
+  assert.equal(nr.code, 1);
+  assert.equal(nr.err, 'Failed to set wall message, ignoring: Interactive authentication required.\nFailed to reboot system via logind: Interactive authentication required.\nFailed to open initctl fifo: Permission denied\nFailed to talk to init daemon.\n');
+  assert.match((await s.run('poweroff')).err, /Failed to power off system via logind/);
+  assert.match((await s.run('shutdown now')).err, /Failed to call ScheduleShutdown in logind, proceeding with immediate shutdown: Interactive authentication required\./);
+  assert.deepEqual(events, []);
+  assert.equal((await s.run('sudo reboot')).code, 0);
+  assert.equal((await s.run('sudo poweroff')).out, '');
+  assert.equal((await s.run('sudo halt')).code, 0);
+  const now = await s.run('sudo shutdown -h now');
+  assert.match(now.out, /^\nBroadcast message from root@kali on pts\/0 \(Fri 2026-11-13 14:30:00 UTC\):\n\nThe system will power off now!\n\n$/);
+  await s.run('sudo shutdown -r now "back soon"');
+  assert.deepEqual(events, ['reboot', 'poweroff', 'halt', 'poweroff', 'reboot']);
+  const sched = await s.run('sudo shutdown +5');
+  assert.equal(sched.err, "Shutdown scheduled for Fri 2026-11-13 14:35:00 UTC, use 'shutdown -c' to cancel.\n");
+  assert.equal(events.length, 5, 'a scheduled shutdown does not fire immediately');
+  assert.match(await s.out('sudo shutdown --show'), /Shutdown scheduled for/);
+  assert.match(await s.out('sudo shutdown -c'), /The system shutdown has been cancelled/);
+  assert.equal((await s.run('sudo shutdown -h bogus')).err, 'Failed to parse time specification: bogus\n');
+  assert.equal((await s.run('sudo reboot --bogus')).err, "reboot: unrecognized option '--bogus'\n");
+  assert.match(await s.out('reboot --help'), /^reboot \[OPTIONS\.\.\.\]\n\nReboot the system\./);
+});
+
+test('neofetch, fastfetch and the kali-* notes', async () => {
+  const s = await sim();
+  const nf = await s.out('neofetch');
+  assert.match(nf, /kali@kali\n/);
+  assert.match(nf, /OS: Kali GNU\/Linux Rolling x86_64\n/);
+  assert.match(nf, /Kernel: 7\.1\.5-kali1-amd64\n/);
+  assert.match(nf, /Packages: \d+ \(dpkg\)\n/);
+  assert.match(nf, /Memory: \d+MiB \/ \d+MiB/);
+  assert.match(nf, /^\.{14}/);
+  const ff = await s.out('fastfetch');
+  assert.match(ff, /OS: Kali GNU\/Linux Rolling x86_64\n/);
+  assert.match(ff, /Kernel: Linux 7\.1\.5-kali1-amd64\n/);
+  assert.match(ff, /Local IP \(eth0\): 10\.10\.10\.5\/24\n/);
+  assert.match(await s.out('fastfetch -l none | head -1'), /^kali@kali\n$/);
+  assert.match(await s.out('kali-tweaks'), /not simulated in Kalima/);
+  assert.match(await s.out('kali-undercover'), /Nothing was changed on this machine\./);
+  assert.match(await s.out('neofetch --version'), /^Neofetch /);
+});
