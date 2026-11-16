@@ -427,7 +427,6 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     return false;
   }
 
-  function dpkgStamp(ms) { return U.isoDate(ms); }
   function histStamp(ms) { return U.isoDate(ms).replace(' ', '  '); }
 
   /** Carry out a prepared plan: download, unpack, configure, update the database and the logs. */
@@ -457,7 +456,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     let announcedDb = false;
     const announce = () => { if (!announcedDb) { ctx.out('(Reading database ... ' + dbFileCount(m) + ' files and directories currently installed.)\n'); announcedDb = true; } };
     const dlog = (text) => appendFile(m, '/var/log/dpkg.log', text);
-    const stamp = () => dpkgStamp(K.clock.now()) + ' ';
+    const stamp = () => U.isoDate(K.clock.now()) + ' ';
     dlog(stamp() + 'startup archives unpack\n');
     for (const r of plan.install.concat(plan.deps)) {
       const auto = plan.deps.includes(r);
@@ -569,7 +568,6 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
 
   /* ---- listing, search and show ---- */
 
-  const globRe = (pat) => new RegExp('^' + pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
   function statusLabel(rec) {
     const flags = isInstalled(rec) ? ['installed'].concat(rec.inst.auto ? ['automatic'] : []) : [];
     if (isUpgradable(rec)) return '[upgradable from: ' + rec.current + ']';
@@ -585,7 +583,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
   function aptList(ctx, db, g) {
     aptWarning(ctx);
     ctx.out('Listing... Done\n');
-    const res = g.rest.map(globRe);
+    const res = g.rest.map(globToRegExp);
     let recs = Array.from(db.values()).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     if (res.length) recs = recs.filter((r) => res.some((re) => re.test(r.name)));
     if (g.opts.installed) recs = recs.filter(isInstalled);
@@ -1003,7 +1001,6 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     m.passwords[name] = saved.pw; delete adm.locked[name];
     return true;
   }
-  const isLocked = (m, name) => !!(adminState(m).locked && adminState(m).locked[name]);
   const busyProc = (m, name) => m.procs.find((p) => p.user === name && p.pid > 1);
 
   function usermodMain(ctx) {
