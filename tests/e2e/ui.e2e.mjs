@@ -705,17 +705,15 @@ group('lab panel: engagement, scope, address and discovered hosts', async ({ pag
   assert.match(words, /ENGAGEMENT HF-LAB-2026-11/i);
   assert.match(words, /Halcyon Freight internal network assessment/);
   assert.match(words, /In scope\s+10\.10\.10\.0\/24\s+\*\.halcyon\.lab/);
-  assert.match(words, /Address\s+10\.10\.10\.5\/24 on eth0/);
-  assert.match(words, /Gateway\s+10\.10\.10\.1\s+DNS\s+10\.10\.10\.53/);
-  assert.match(words, /Discovered hosts\s+0\s+Nothing yet/);
+  assert.match(words, /Network map\s+0 hosts found\s+10\.10\.10\.5\/24\s*kali \(you\)\s+eth0\s+gateway 10\.10\.10\.1\s+dns 10\.10\.10\.53\s+No other hosts yet/);
   assert.equal(await termFocused(page), true, 'opening the panel does not take the keyboard');
 
   // web01 answers; .99 does not exist; dc01 drops pings and has no web server; 8.8.8.8 is not a lab host
   await run(page, 'fx-probe 10.10.10.10 10.10.10.99 10.10.10.50 8.8.8.8');
   await page.locator('.k-node:not(.is-self)').first().waitFor();
   words = await lab.locator('.k-hosts').innerText();
-  assert.match(words, /Discovered hosts\s+1\b/);
-  assert.match(words, /10\.10\.10\.5\s*kali \(you\)\s+10\.10\.10\.10\s*web01\.halcyon\.lab\s+80 http/);
+  assert.match(words, /Network map\s+1 host found/);
+  assert.match(words, /kali \(you\)[^]*dns 10\.10\.10\.53\s+10\.10\.10\.10\s*web01\.halcyon\.lab\s+80 http/);
   assert.doesNotMatch(words, /8\.8\.8\.8|10\.10\.10\.99|10\.10\.10\.50/);
   await run(page, 'fx-probe 10.10.10.1');
   await page.waitForFunction(() => document.querySelectorAll('.k-node:not(.is-self)').length === 2);
@@ -810,6 +808,133 @@ group('settings: erase saved progress', async ({ page }) => {
   await ready(page);
   assert.equal(await page.locator('dialog[open]').count(), 0, 'erasing does not bring the welcome back');
   assert.deepEqual(await page.evaluate(() => [K.lessons.progress.summary().done, K.settings.timeScale]), [0, 0], 'progress is gone, preferences stay');
+});
+
+/* ---- layout ---- */
+const box = (page, sel) => page.locator(sel).first().boundingBox();
+
+group('wide layout: lesson beside the terminal, resizable and collapsible', async ({ page }) => {
+  let lesson = await box(page, '#k-panel-lesson'); let work = await box(page, '#k-panel-terminal');
+  assert.ok(lesson.x + lesson.width <= work.x + 1 && Math.abs(lesson.y - work.y) < 1, 'the lesson panel sits to the left of the terminal');
+  assert.equal(await page.locator('.k-views').isHidden(), true, 'no view switcher on a wide screen');
+  const colsBefore = await page.evaluate(() => K.app.term.cols);
+
+  const split = await box(page, '.k-split');
+  await page.mouse.move(split.x + split.width / 2, split.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(split.x + split.width / 2 + 120, split.y + 220, { steps: 5 });
+  await page.mouse.up();
+  const wider = await box(page, '#k-panel-lesson');
+  assert.ok(Math.abs(wider.width - (lesson.width + 120)) <= 2, 'dragging the divider resizes the panel (' + lesson.width + ' -> ' + wider.width + ')');
+  await page.waitForFunction((c) => K.app.term.cols < c, colsBefore);
+  assert.equal(await termFocused(page), true, 'after resizing the keyboard is in the terminal');
+  await page.locator('.k-split').focus();
+  await page.keyboard.press('ArrowLeft');
+  assert.ok(Math.abs((await box(page, '#k-panel-lesson')).width - (wider.width - 24)) <= 1, 'the divider also works from the keyboard');
+  await page.keyboard.press('Home');
+  assert.equal((await box(page, '#k-panel-lesson')).width, 300, 'the panel has a minimum width');
+  await page.locator('.k-split').dblclick();
+  assert.equal((await box(page, '#k-panel-lesson')).width, 420);
+
+  const toggle = page.getByRole('button', { name: 'Lesson panel' });
+  assert.equal(await toggle.getAttribute('aria-pressed'), 'true');
+  await toggle.click();
+  assert.equal(await page.locator('#k-panel-lesson').isHidden(), true);
+  work = await box(page, '#k-panel-terminal');
+  assert.equal(work.x, 0, 'with the panel collapsed the terminal starts at the left edge');
+  assert.equal(await termFocused(page), true);
+  await page.reload();
+  await ready(page);
+  assert.equal(await page.locator('#k-panel-lesson').isHidden(), true, 'the collapsed state is remembered');
+  await page.getByRole('button', { name: 'Lesson panel' }).click();
+  assert.equal(await page.locator('#k-panel-lesson').isVisible(), true);
+
+  // a key pressed while nothing has focus still reaches the command line
+  await page.locator('.k-doc h2, .k-panel-head h2').first().click();
+  await page.evaluate(() => document.activeElement.blur());
+  await page.keyboard.type('echo stray-keys');
+  await page.keyboard.press('Enter');
+  await waitText(page, /\nstray-keys\n/);
+});
+
+group('phone viewport: one view at a time, touch keys, usable terminal', async ({ browser }) => {
+  const page = await open(browser, { viewport: { width: 360, height: 740 }, touch: true });
+  try {
+    const dlg = await box(page, 'dialog[open]');
+    assert.ok(dlg.x >= 0 && dlg.x + dlg.width <= 360 && dlg.y >= 0 && dlg.y + dlg.height <= 740, 'the welcome fits the screen');
+    await page.getByRole('button', { name: 'Start' }).tap();
+    await dialogGone(page);
+
+    const tabs = page.locator('.k-views');
+    assert.equal(await tabs.isVisible(), true);
+    await tabs.getByRole('tab', { name: 'Lesson' }).tap();
+    assert.equal(await page.locator('#k-panel-terminal').isHidden(), true, 'only one view shows at a time');
+    await panel(page).getByRole('button', { name: /First commands/ }).first().tap();
+    assert.match(await page.locator('.k-step.is-current').innerText(), /Print the word hello/);
+    const fits = () => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && Array.from(document.querySelectorAll('.k-app *')).every((el) => {
+      const r = el.getBoundingClientRect(); return r.width === 0 || el.closest('.kt-keys, .k-termtabs, pre') || (r.left >= -0.5 && r.right <= innerWidth + 0.5);
+    }));
+    assert.equal(await fits(), true, 'nothing in the lesson view is wider than the screen');
+
+    await page.getByRole('button', { name: 'Open terminal' }).tap();
+    const kt = await box(page, '.k-term:not([hidden]) .kt');
+    assert.equal(kt.width, 360, 'the terminal gets the full width');
+    assert.ok(await page.evaluate(() => K.app.term.cols) >= 40, 'at least 40 columns on a phone');
+    assert.equal(await termFocused(page), true, 'switching to the terminal focuses it');
+    assert.match(await page.locator('.k-task').innerText(), /STEP 1\/4\s+Print the word hello with echo\./i);
+    assert.equal(await fits(), true, 'nothing in the terminal view is wider than the screen');
+
+    // the key bar stands in for the keys a phone keyboard lacks
+    const keys = page.locator('.k-term:not([hidden]) .kt-keys');
+    assert.equal(await keys.isVisible(), true);
+    assert.deepEqual((await keys.locator('button').allInnerTexts()).slice(0, 5), ['Tab', 'Ctrl', '^C', '^D', 'Esc']);
+    await page.keyboard.type('fxa');
+    await keys.getByRole('button', { name: 'Tab', exact: true }).tap();
+    assert.equal(await typed(page), 'fxa-one ');
+    assert.equal(await termFocused(page), true, 'tapping a key keeps the keyboard open');
+    await keys.getByRole('button', { name: 'Control: applies to the next key' }).tap();
+    assert.equal(await keys.getByRole('button', { name: /^Control:/ }).getAttribute('aria-pressed'), 'true');
+    await page.keyboard.insertText('u');                       // text from a soft keyboard arrives without key codes
+    assert.equal(await typed(page), '', 'Ctrl then u clears the line');
+    await page.keyboard.insertText('echo hello');
+    assert.equal(await typed(page), 'echo hello');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => /Step complete/.test(document.querySelector('.k-task').textContent));
+    await page.waitForFunction(() => /STEP 2\/4/i.test(document.querySelector('.k-task').textContent));
+    await page.keyboard.insertText('echo abandoned');
+    await keys.getByRole('button', { name: 'Control C' }).tap();
+    assert.equal(await typed(page), '');
+
+    // full-screen programs bring their own keys
+    await start(page, 'fx-pager', 'pager');
+    assert.deepEqual((await keys.locator('button').allInnerTexts()).slice(0, 3), ['q', 'Space', 'b']);
+    await keys.getByRole('button', { name: 'page down' }).tap();
+    assert.ok((await overlay(page)).top > 1);
+    await keys.getByRole('button', { name: 'quit' }).tap();
+    await waitMode(page, 'read');
+
+    await page.locator('.k-task').tap();
+    assert.equal(await page.locator('#k-panel-lesson').isVisible(), true, 'the step strip leads back to the lesson');
+    await tabs.getByRole('tab', { name: 'Lab' }).tap();
+    assert.match(await page.locator('#k-panel-lab').innerText(), /HF-LAB-2026-11[^]*Network map/);
+    assert.equal(await page.locator('#k-panel-lesson').isHidden(), true);
+    assert.equal(await fits(), true, 'nothing in the lab view is wider than the screen');
+
+    await page.getByRole('button', { name: 'Settings' }).tap();
+    const sheet = await box(page, 'dialog[open]');
+    assert.ok(sheet.x >= 0 && sheet.x + sheet.width <= 360 && sheet.y + sheet.height <= 740, 'settings fit the screen');
+    await closeDialogs(page);
+    await dialogGone(page);
+
+    await page.reload();
+    await ready(page);
+    assert.equal(await page.locator('#k-panel-lab').isVisible(), true, 'the chosen view survives a reload');
+    assert.equal(await page.locator('dialog[open]').count(), 0);
+    await tabs.getByRole('tab', { name: 'Lesson' }).tap();
+    assert.match(await panel(page).innerText(), /Step 2 of 4/, 'lesson progress survives a reload');
+  } finally {
+    await page.context().close();
+  }
 });
 
 /* ------------------------------------------------------------------- runner */

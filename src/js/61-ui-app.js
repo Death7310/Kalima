@@ -115,7 +115,7 @@
     constructor(host) {
       this.host = host;
       this.wide = root.matchMedia(WIDE);
-      this.settings = Object.assign({ timeScale: 1, fontSize: this.wide.matches ? 14 : 13, keybar: 'auto', welcomed: false }, store.get('settings', {}));
+      this.settings = Object.assign({ timeScale: 1, fontSize: this.wide.matches ? 14 : 12, keybar: 'auto', welcomed: false }, store.get('settings', {}));
       this.state = Object.assign({ lesson: null, view: null, sideWidth: SIDE_DEFAULT, lessonOpen: true, labOpen: null }, store.get('ui', {}));
       this.found = store.get('lab', {});     // lab hosts seen so far, by IP: { up, ports: { 'tcp/22': true } }
       this.tabs = []; this.active = null; this.term = null; this.tabSeq = 0;
@@ -713,8 +713,7 @@
     _iface() { return K.kali.ifaces.find((i) => i.kind !== 'loopback') || K.kali.ifaces[0]; }
 
     renderLab() {
-      const world = K.net.world; const e = world.engagement; const kali = K.kali;
-      const lan = world.nets[0]; const iface = this._iface();
+      const e = K.net.world.engagement;
       const scope = e.scope.concat((e.domains || []).map((d) => '*.' + d));
       const row = (k, v) => '<div class="k-kv"><dt>' + k + '</dt><dd>' + v + '</dd></div>';
       const code = (s) => '<code>' + esc(s) + '</code>';
@@ -725,9 +724,6 @@
         ((e.exclude || []).length ? row('Excluded', e.exclude.map(code).join(' ')) : '') +
         row('Window', esc(e.window)) + row('Contact', esc(e.contact)) + '</dl>' +
         '<p class="k-note">Stay inside the scope. Active tools in this simulator refuse other targets, as a professional would.</p></section>' +
-        '<section class="k-card"><h3>Your machine</h3><dl>' +
-        row('Address', code(iface.ip + '/' + iface.bits) + ' on ' + esc(iface.name)) + row('Network', code(lan.cidr)) +
-        row('Gateway', code(lan.gateway)) + row('DNS', kali.dns.map(code).join(' ')) + '</dl></section>' +
         '<section class="k-hosts"></section></div>';
       this._renderHosts();
     }
@@ -736,11 +732,13 @@
       if (!box) return;
       const ipKey = (ip) => ip.split('.').map((n) => ('00' + n).slice(-3)).join('.');
       const ips = Object.keys(this.found).filter((ip) => this._labHost(ip)).sort((a, b) => (ipKey(a) < ipKey(b) ? -1 : 1));
-      let html = '<div class="k-hosts-head"><h3>Discovered hosts</h3><span class="k-mod-count">' + ips.length + '</span></div>';
-      if (!ips.length) html += '<p class="k-note">Nothing yet. Hosts appear here when they answer something you send: a ping, a scan, a web request.</p>';
-      html += '<ol class="k-map"><li class="k-node is-self"><span class="k-node-dot" aria-hidden="true"></span><div><span class="k-node-ip">' + esc(this._iface().ip) +
-        '</span><span class="k-node-name">kali (you)</span></div></li>' + ips.map((ip) => this._hostHtml(ip)).join('') + '</ol>';
-      box.innerHTML = html;
+      const iface = this._iface(); const lan = K.net.world.nets[0];
+      const facts = [iface.name, 'gateway ' + lan.gateway].concat(K.kali.dns.map((ip) => 'dns ' + ip));
+      box.innerHTML = '<div class="k-hosts-head"><h3>Network map</h3><span class="k-head-note">' + plural(ips.length, 'host') + ' found</span></div>' +
+        '<ol class="k-map"><li class="k-node is-self"><span class="k-node-dot" aria-hidden="true"></span><div><span class="k-node-ip">' + esc(iface.ip + '/' + iface.bits) +
+        '</span><span class="k-node-name">kali (you)</span><ul class="k-ports">' + facts.map((f) => '<li>' + esc(f) + '</li>').join('') + '</ul></div></li>' +
+        ips.map((ip) => this._hostHtml(ip)).join('') + '</ol>' +
+        (ips.length ? '' : '<p class="k-note">No other hosts yet. They appear here when they answer something you send: a ping, a scan, a web request.</p>');
     }
     _hostHtml(ip) {
       const host = this._labHost(ip); const svcs = K.net.servicesOf(host);
