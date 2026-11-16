@@ -442,3 +442,115 @@ test('mktemp creates files and directories', async () => {
   assert.equal((await sh('mktemp abc')).err, "mktemp: too few X's in template 'abc'\n");
   assert.match((await sh('mktemp /nodir/xXXXX')).err, /^mktemp: failed to create file via template '\/nodir\/x[A-Za-z0-9]{4}': No such file or directory\n$/);
 });
+
+/* ---------------------------------------------------------------- file, tac, pagers, editors */
+
+test('file identifies common types', async () => {
+  const { sh, out } = await setup();
+  await sh('cd /tmp; mkdir fd; touch empty; echo hi > a.txt; printf "h\\303\\251\\n" > u.txt; ln -s fd lnk; ln -s nowhere bad');
+  assert.equal(await out('file fd'), 'fd: directory\n');
+  assert.equal(await out('file empty'), 'empty: empty\n');
+  assert.equal(await out('file a.txt'), 'a.txt: ASCII text\n');
+  assert.equal(await out('file -b a.txt'), 'ASCII text\n');
+  assert.equal(await out('file u.txt'), 'u.txt: Unicode text, UTF-8 text\n');
+  assert.equal(await out('file lnk bad'), 'lnk: symbolic link to fd\nbad: broken symbolic link to nowhere\n');
+  assert.equal(await out('file -L lnk'), 'lnk: directory\n');
+  assert.equal(await out('file a.txt empty'), 'a.txt: ASCII text\nempty: empty\n');
+  assert.equal(await out('file a.txt nonexistent-file'), "a.txt:            ASCII text\nnonexistent-file: cannot open `nonexistent-file' (No such file or directory)\n");
+  assert.match(await out('file /bin/ls'), /^\/bin\/ls: ELF 64-bit LSB pie executable, x86-64, version 1 \(SYSV\), dynamically linked, interpreter \/lib64\/ld-linux-x86-64\.so\.2, BuildID\[sha1\]=[0-9a-f]{40}, for GNU\/Linux 3\.2\.0, stripped\n$/);
+  assert.equal(await out('file -i a.txt fd'), 'a.txt: text/plain; charset=us-ascii\nfd:    inode/directory; charset=binary\n');
+  assert.equal(await out('file --mime-type a.txt'), 'a.txt: text/plain\n');
+  assert.equal(await out('echo hello | file -'), '/dev/stdin: ASCII text\n');
+});
+
+test('file recognises scripts, markup and containers', async () => {
+  const { sh, out } = await setup();
+  const w = async (name, data) => sh(`printf '${data}' > /tmp/${name}`);
+  await w('s.sh', '#!/bin/bash\\necho\\n');
+  await w('p.sh', '#!/bin/sh\\n');
+  await w('p.py', '#!/usr/bin/env python3\\nprint(1)\\n');
+  await w('p.pl', '#!/usr/bin/perl\\nprint 1;\\n');
+  await w('j.json', '{"a": 1}\\n');
+  await w('h.html', '<!DOCTYPE html>\\n<html></html>\\n');
+  await w('x.xml', '<?xml version="1.0"?>\\n<a/>\\n');
+  await w('cert.pem', '-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----\\n');
+  await w('rsa.pem', '-----BEGIN RSA PRIVATE KEY-----\\nMIIB\\n');
+  await w('crlf', 'a\\r\\nb\\r\\n');
+  await w('nonl', 'abc');
+  await w('bin', '\\000\\001\\002');
+  await w('doc.pdf', '%%PDF-1.4\\n1 0 obj\\n');
+  await w('pic.png', '\\211PNG\\r\\n\\032\\n');
+  const f = async (n) => (await out('file -b /tmp/' + n)).trim();
+  assert.equal(await f('s.sh'), 'Bourne-Again shell script, ASCII text executable');
+  assert.equal(await f('p.sh'), 'POSIX shell script, ASCII text executable');
+  assert.equal(await f('p.py'), 'Python script, ASCII text executable');
+  assert.equal(await f('p.pl'), 'Perl script text executable');
+  assert.equal(await f('j.json'), 'JSON text data');
+  assert.equal(await f('h.html'), 'HTML document, ASCII text');
+  assert.equal(await f('x.xml'), 'XML 1.0 document, ASCII text');
+  assert.equal(await f('cert.pem'), 'PEM certificate');
+  assert.equal(await f('rsa.pem'), 'PEM RSA private key');
+  assert.equal(await f('crlf'), 'ASCII text, with CRLF line terminators');
+  assert.equal(await f('nonl'), 'ASCII text, with no line terminators');
+  assert.equal(await f('bin'), 'data');
+  assert.equal(await f('doc.pdf'), 'PDF document, version 1.4');
+  assert.equal(await f('pic.png'), 'PNG image data');
+  // synthetic archives with the right magic bytes
+  await sh(`printf '\\037\\213\\010\\010\\000\\000\\000\\000\\000\\003x.tar\\000abcdefgh\\000\\050\\000\\000' > /tmp/x.gz`);
+  assert.match(await f('x.gz'), /^gzip compressed data, was "x\.tar", from Unix, original size modulo 2\^32 10240$/);
+  await sh(`printf 'PK\\003\\004\\024\\000\\000\\000\\010\\000rest' > /tmp/x.zip`);
+  assert.equal(await f('x.zip'), 'Zip archive data, at least v2.0 to extract, compression method=deflate');
+  assert.equal((await sh('file')).code, 1);
+  assert.match((await sh('file --version')).out, /^file-5\.\d+/);
+});
+
+test('tac reverses lines', async () => {
+  const { sh, out } = await setup();
+  await sh('printf "a\\nb\\nc\\n" > /tmp/t; printf "x\\ny" > /tmp/u');
+  assert.equal(await out('tac /tmp/t'), 'c\nb\na\n');
+  assert.equal(await out('tac /tmp/u'), 'yx\n');
+  assert.equal(await out('seq 1 3 | tac'), '3\n2\n1\n');
+  assert.equal(await out('printf "a,b,c" | tac -s ,'), 'cb,a,');
+  assert.equal((await sh('tac /nope')).err, "tac: failed to open '/nope' for reading: No such file or directory\n");
+});
+
+test('less and more pass text through when not a terminal and page on a terminal', async () => {
+  const { sim, sh, out } = await setup();
+  await sh('printf "l1\\nl2\\n" > /tmp/pg');
+  assert.equal(await out('less /tmp/pg'), 'l1\nl2\n');
+  assert.equal(await out('cat /tmp/pg | less'), 'l1\nl2\n');
+  assert.equal(await out('more /tmp/pg'), 'l1\nl2\n');
+  assert.equal(await out('less -N /tmp/pg'), '     1 l1\n     2 l2\n');
+  assert.equal((await sh('less /nope')).err, '/nope: No such file or directory\n');
+  assert.equal((await sh('more /nope')).err, 'more: cannot open /nope: No such file or directory\n');
+  let seen = null;
+  sim.term.pager = async (text, o) => { seen = { text, o }; };
+  await sim.type('less /tmp/pg');
+  assert.deepEqual(seen, { text: 'l1\nl2\n', o: { title: '/tmp/pg' } });
+  await sim.type('echo piped | more');
+  assert.equal(seen.text, 'piped\n');
+});
+
+test('nano, vim and vi call the terminal editor and write the result back', async () => {
+  const { sim, sh, out } = await setup();
+  await sh('echo old > /tmp/ed');
+  let call = null;
+  sim.term.editor = async (o) => { call = o; return { saved: true, content: 'new text\n' }; };
+  await sim.type('nano /tmp/ed');
+  assert.deepEqual(call, { path: '/tmp/ed', content: 'old\n', flavor: 'nano' });
+  assert.equal(await out('cat /tmp/ed'), 'new text\n');
+  await sim.type('vim /tmp/fresh');
+  assert.deepEqual(call, { path: '/tmp/fresh', content: '', flavor: 'vim' });
+  assert.equal(await out('cat /tmp/fresh'), 'new text\n');
+  sim.term.editor = async (o) => { call = o; return { saved: false, content: 'ignored' }; };
+  await sim.type('vi /tmp/ed');
+  assert.equal(call.flavor, 'vim');
+  assert.equal(await out('cat /tmp/ed'), 'new text\n', 'not saved, not written');
+  let r = await sh('nano /tmp/ed');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /Too many errors from stdin/);
+  r = await sh('echo x | vim -');
+  assert.match(r.err, /Vim: Warning/);
+  assert.match((await sh('vim --version')).out, /^VIM - Vi IMproved/);
+  assert.match((await sh('nano --version')).out, /GNU nano, version/);
+});

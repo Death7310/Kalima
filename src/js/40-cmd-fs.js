@@ -1446,5 +1446,330 @@
     },
   });
 
+  /* ===================================================================== file */
+
+  const FILE_USAGE = 'Usage: file [-bcCdEhikLlNnprsSvzZ0] [--apple] [--extension] [--mime-encoding]\n            [--mime-type] [-e <testname>] [-F <separator>]  [-f <namefile>]\n            [-m <magicfiles>] [-P <parameter=value>] [--exclude-quiet]\n            <file> ...\n       file -C [-m <magicfiles>]\n       file [--help]\n';
+
+  const SCRIPT_TYPES = [
+    [/(^|[/ ])bash$/, 'Bourne-Again shell script', 'text/x-shellscript'],
+    [/(^|[/ ])(ba)?sh$|dash$/, 'POSIX shell script', 'text/x-shellscript'],
+    [/(^|[/ ])zsh$/, "Paul Falstad's zsh script", 'text/x-shellscript'],
+    [/(^|[/ ])python[\d.]*$/, 'Python script', 'text/x-script.python'],
+    [/(^|[/ ])perl[\d.]*$/, 'Perl script', 'text/x-perl'],
+    [/(^|[/ ])ruby[\d.]*$/, 'Ruby script', 'text/x-ruby'],
+    [/(^|[/ ])php[\d.]*$/, 'PHP script', 'text/x-php'],
+    [/(^|[/ ])(node|nodejs)$/, 'Node.js script executable', 'application/javascript'],
+  ];
+
+  const u32le = (s, i) => (s.charCodeAt(i) | (s.charCodeAt(i + 1) << 8) | (s.charCodeAt(i + 2) << 16) | (s.charCodeAt(i + 3) << 24)) >>> 0;
+  const u32be = (s, i) => ((s.charCodeAt(i) << 24) | (s.charCodeAt(i + 1) << 16) | (s.charCodeAt(i + 2) << 8) | s.charCodeAt(i + 3)) >>> 0;
+  const hexHash = (name) => { let h = ''; for (let i = 0; h.length < 40; i++) h += U.hash32(name + ':' + i).toString(16).padStart(8, '0'); return h.slice(0, 40); };
+
+  /** Describe text content as `file` does: charset plus line-terminator modifiers. */
+  function textDescription(text) {
+    const ascii = !/[^\x00-\x7f]/.test(text);
+    const bom = text.charCodeAt(0) === 0xfeff;
+    let d = bom ? 'Unicode text, UTF-8 (with BOM) text' : ascii ? 'ASCII text' : 'Unicode text, UTF-8 text';
+    const lines = text.split('\n');
+    const longest = Math.max.apply(null, lines.map((l) => U.byteLen(l.replace(/\r$/, ''))));
+    const mods = [];
+    if (longest > 300) mods.push('with very long lines (' + longest + ')');
+    if (/\r\n/.test(text)) mods.push('with CRLF line terminators');
+    else if (/\r/.test(text)) mods.push('with CR line terminators');
+    if (text.indexOf('\n') < 0) mods.push('with no line terminators');
+    return { base: d, mods, ascii };
+  }
+
+  function describeJpeg(s) {
+    let d = 'JPEG image data';
+    if (s.slice(6, 10) === 'JFIF') d += ', JFIF standard ' + s.charCodeAt(11) + '.' + U.pad2(s.charCodeAt(12));
+    let i = 2;
+    while (i + 4 < s.length) {
+      if (s.charCodeAt(i) !== 0xff) break;
+      const marker = s.charCodeAt(i + 1); const len = (s.charCodeAt(i + 2) << 8) | s.charCodeAt(i + 3);
+      if (marker >= 0xc0 && marker <= 0xc2) {
+        const h = (s.charCodeAt(i + 5) << 8) | s.charCodeAt(i + 6); const w = (s.charCodeAt(i + 7) << 8) | s.charCodeAt(i + 8);
+        return d + ', ' + (marker === 0xc2 ? 'progressive' : 'baseline') + ', precision ' + s.charCodeAt(i + 4) + ', ' + w + 'x' + h + ', components ' + s.charCodeAt(i + 9);
+      }
+      i += 2 + len;
+    }
+    return d;
+  }
+
+  function describePng(s) {
+    if (s.length < 29) return 'PNG image data';
+    const depth = s.charCodeAt(24); const ct = s.charCodeAt(25);
+    const kind = { 0: 'grayscale', 2: 'RGB', 3: 'colormap', 4: 'gray+alpha', 6: 'RGBA' }[ct] || 'RGB';
+    const colour = ct === 2 || ct === 6 ? depth + '-bit/color ' + kind : depth + '-bit ' + kind;
+    return 'PNG image data, ' + u32be(s, 16) + ' x ' + u32be(s, 20) + ', ' + colour + ', ' + (s.charCodeAt(28) ? 'interlaced' : 'non-interlaced');
+  }
+
+  function describeGzip(s) {
+    const flags = s.charCodeAt(3); let d = 'gzip compressed data';
+    let off = 10;
+    if (flags & 4) off += 2 + (s.charCodeAt(off) | (s.charCodeAt(off + 1) << 8));
+    if (flags & 8) { const e = s.indexOf('\0', off); if (e > 0) d += ', was "' + s.slice(off, e) + '"'; }
+    const mtime = u32le(s, 4);
+    if (mtime) { const t = new Date(mtime * 1000); d += ', last modified: ' + U.DAYS[t.getUTCDay()] + ' ' + U.MONTHS[t.getUTCMonth()] + ' ' + U.padStart(t.getUTCDate(), 2) + ' ' + U.isoDate(mtime * 1000).slice(11) + ' ' + t.getUTCFullYear(); }
+    const xfl = s.charCodeAt(8);
+    if (xfl === 2) d += ', max compression'; else if (xfl === 4) d += ', max speed';
+    const os = { 0: 'FAT filesystem', 3: 'Unix', 11: 'NTFS filesystem (NT)' }[s.charCodeAt(9)];
+    if (os) d += ', from ' + os;
+    if (s.length >= 18) d += ', original size modulo 2^32 ' + u32le(s, s.length - 4);
+    return d;
+  }
+
+  /** Classify file content. Returns {desc, mime, enc}. */
+  function sniff(ctx, path, st) {
+    const bin = (desc, mime) => ({ desc, mime, enc: 'binary' });
+    if (st.isDir) return bin('directory', 'inode/directory');
+    if (st.isDev) return bin('character special (' + (DEV_SPECIAL[st.dev] || [0, 0]).join('/') + ')', 'inode/chardevice');
+    let s;
+    try { s = ctx.fs.read(path); } catch (e) { if (!isFsError(e)) throw e; return { error: e }; }
+    return sniffContent(s, path);
+  }
+
+  /** Classify the content of a regular file (or of standard input). */
+  function sniffContent(s, name) {
+    const bin = (desc, mime) => ({ desc, mime, enc: 'binary' });
+    if (s === '') return bin('empty', 'inode/x-empty');
+    if (s.startsWith('\x7fELF')) {
+      const m = /kalima:([^\n]+)/.exec(s.slice(0, 64));
+      const id = hexHash(m ? m[1] : name);
+      return bin('ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=' + id + ', for GNU/Linux 3.2.0, stripped', 'application/x-pie-executable');
+    }
+    if (s.startsWith('\x1f\x8b')) return bin(describeGzip(s), 'application/gzip');
+    if (s.startsWith('BZh')) return bin('bzip2 compressed data, block size = ' + (s.charCodeAt(3) - 48) * 100 + 'k', 'application/x-bzip2');
+    if (s.startsWith('\xfd7zXZ')) return bin('XZ compressed data, checksum CRC64', 'application/x-xz');
+    if (s.startsWith('PK\x03\x04')) {
+      const v = s.charCodeAt(4); const method = { 0: 'store', 8: 'deflate' }[s.charCodeAt(8)] || 'deflate';
+      return bin('Zip archive data, at least v' + Math.floor(v / 10) + '.' + (v % 10) + ' to extract, compression method=' + method, 'application/zip');
+    }
+    if (s.startsWith('PK\x05\x06')) return bin('Zip archive data (empty)', 'application/zip');
+    if (s.slice(257, 262) === 'ustar') return bin(s.slice(257, 265) === 'ustar  \0' ? 'POSIX tar archive (GNU)' : 'POSIX tar archive', 'application/x-tar');
+    if (s.startsWith('\x89PNG\r\n\x1a\n')) return bin(describePng(s), 'image/png');
+    if (s.startsWith('\xff\xd8\xff')) return bin(describeJpeg(s), 'image/jpeg');
+    if (s.startsWith('GIF8')) return bin('GIF image data, version ' + s.slice(3, 6) + ', ' + (s.charCodeAt(6) | (s.charCodeAt(7) << 8)) + ' x ' + (s.charCodeAt(8) | (s.charCodeAt(9) << 8)), 'image/gif');
+    if (s.startsWith('%PDF-')) {
+      const pages = (s.match(/\/Type\s*\/Page(?![s\w])/g) || []).length;
+      return bin('PDF document, version ' + s.slice(5, 8) + (pages ? ', ' + pages + ' page(s)' : ''), 'application/pdf');
+    }
+    if (s.startsWith('SQLite format 3\0')) return bin('SQLite 3.x database', 'application/vnd.sqlite3');
+    if (/[\x00-\x08\x0e-\x1a\x1c-\x1f�]/.test(s)) return bin('data', 'application/octet-stream');
+
+    const t = textDescription(s);
+    const tail = (extra) => [extra || t.base].concat(t.mods).join(', ');
+    const charset = t.ascii ? 'us-ascii' : 'utf-8';
+    const text = (desc, mime) => ({ desc, mime, enc: charset });
+    const head = s.replace(/^﻿/, '').trimStart();
+    const she = /^#!\s*(\S+)(?:\s+(\S+))?/.exec(s);
+    if (she) {
+      const interp = she[1].endsWith('/env') && she[2] ? she[2] : she[1];
+      const known = SCRIPT_TYPES.find((r) => r[0].test(interp));
+      if (known) {
+        if (known[1] === 'Perl script') return text('Perl script text executable' + t.mods.map((m) => ', ' + m).join(''), known[2]);
+        if (known[1].endsWith('executable')) return text(known[1] + ', ' + tail(), known[2]);
+        return text(known[1] + ', ' + t.base + ' executable' + t.mods.map((m) => ', ' + m).join(''), known[2]);
+      }
+      return text('a ' + she[1] + (she[2] && she[1].endsWith('/env') ? ' ' + she[2] : '') + ' script, ' + t.base + ' executable' + t.mods.map((m) => ', ' + m).join(''), 'text/plain');
+    }
+    if (/^-----BEGIN CERTIFICATE-----/.test(head)) return text('PEM certificate', 'application/x-x509-ca-cert');
+    if (/^-----BEGIN CERTIFICATE REQUEST-----/.test(head)) return text('PEM certificate request', 'application/pkcs10');
+    if (/^-----BEGIN RSA PRIVATE KEY-----/.test(head)) return text('PEM RSA private key', 'application/x-pem-file');
+    if (/^-----BEGIN OPENSSH PRIVATE KEY-----/.test(head)) return text('OpenSSH private key', 'application/x-pem-file');
+    if (/^-----BEGIN EC PRIVATE KEY-----/.test(head)) return text('PEM EC private key', 'application/x-pem-file');
+    const ssh = /^ssh-(rsa|ed25519|dss) /.exec(head) || /^ecdsa-sha2-nistp\d+ /.exec(head);
+    if (ssh) return text('OpenSSH ' + (ssh[1] ? { rsa: 'RSA', ed25519: 'ED25519', dss: 'DSA' }[ssh[1]] : 'ECDSA') + ' public key', 'text/plain');
+    if (/^<\?xml\s/.test(head)) {
+      const v = /version=["']([\d.]+)["']/.exec(head);
+      if (/<svg[\s>]/.test(head)) return text('SVG Scalable Vector Graphics image', 'image/svg+xml');
+      return text('XML ' + (v ? v[1] : '1.0') + ' document, ' + tail(), 'text/xml');
+    }
+    if (/^<!doctype html|^<html/i.test(head)) return text('HTML document, ' + tail(), 'text/html');
+    if (/^<\?php/.test(head)) return text('PHP script, ' + tail(), 'text/x-php');
+    if (/^[[{]/.test(head)) {
+      try { JSON.parse(s); return text('JSON text data', 'application/json'); } catch (e) { /* plain text */ }
+    }
+    return text(tail(), 'text/plain');
+  }
+
+  function describeFile(ctx, f, o) {
+    let st;
+    try { st = o.follow ? ctx.fs.stat(f) : ctx.fs.lstat(f); } catch (e) {
+      if (!isFsError(e)) throw e;
+      if (o.follow && e.code === 'ENOENT') {
+        try { const l = ctx.fs.lstat(f); if (l.isLink) return { desc: 'broken symbolic link to ' + l.target, mime: 'inode/symlink', enc: 'binary' }; } catch (e2) { /* fall through */ }
+      }
+      return { error: e };
+    }
+    if (st.isLink) {
+      const ok = tryStat(ctx, f);
+      return { desc: (ok ? 'symbolic link to ' : 'broken symbolic link to ') + st.target, mime: 'inode/symlink', enc: 'binary' };
+    }
+    return sniff(ctx, f, st);
+  }
+  function tryStat(ctx, f) { try { return ctx.fs.stat(f); } catch (e) { return null; } }
+
+  K.cmd.register({
+    name: 'file', pkg: 'file', section: 1, summary: 'determine file type', synopsis: 'file [OPTION...] [FILE...]',
+    man: 'DESCRIPTION\n       file tests each argument in an attempt to classify it. There are three sets of tests, performed in this order: filesystem tests, magic tests, and language tests. The first test that succeeds causes the file type to be printed.\n\nOPTIONS\n       -b, --brief\n              do not prepend filenames to output lines\n       -i, --mime\n              output MIME type strings instead of the more traditional human readable ones\n       --mime-type, --mime-encoding\n              output only the MIME type or only the encoding\n       -L, --dereference\n              follow symlinks\n       -h, --no-dereference\n              do not follow symlinks (default)\n\nEXAMPLES\n       file /bin/ls\n              Show that /bin/ls is an ELF executable.\n       file -b payload.bin\n              Print the type without the file name.',
+    async run(ctx) {
+      const g = ctx.getopt({ short: 'bchiLlNnprsSvzZEkdFf:', long: ['brief', 'mime', 'mime-type', 'mime-encoding', 'dereference', 'no-dereference', 'help', 'version', 'separator='], alias: { brief: 'b', mime: 'i', dereference: 'L', 'no-dereference': 'h' } });
+      if (g.err) { ctx.err(FILE_USAGE); return 1; }
+      if (g.opts.version) { ctx.out('file-5.45\nmagic file from /etc/magic:/usr/share/misc/magic\n'); return 0; }
+      if (g.opts.help) { ctx.out('Usage: file [OPTION...] [FILE...]\nDetermine type of FILEs.\n\n  -b, --brief                do not prepend filenames to output lines\n  -i, --mime                 output MIME type strings (--mime-type and\n                             --mime-encoding)\n  -L, --dereference          follow symlinks\n  -h, --no-dereference       don\'t follow symlinks (default)\n      --help                 display this help and exit\n      --version              output version information and exit\n'); return 0; }
+      const files = g.rest.length ? g.rest : null;
+      if (!files) { ctx.out(FILE_USAGE); return 1; }
+      const o = { follow: !!g.opts.L };
+      const width = Math.max.apply(null, files.map((f) => (f === '-' ? '/dev/stdin' : f).length)) + 1;
+      for (const f of files) {
+        const shown = f === '-' ? '/dev/stdin' : f;
+        let r;
+        r = f === '-' ? sniffContent(await stdinText(ctx), shown) : describeFile(ctx, f, o);
+        let line;
+        if (r.error) {
+          line = 'cannot open `' + f + "' (" + r.error.message + ')';
+        } else if (g.opts['mime-type']) line = r.mime;
+        else if (g.opts['mime-encoding']) line = r.enc;
+        else if (g.opts.i) line = r.mime + '; charset=' + r.enc;
+        else line = r.desc;
+        ctx.out((g.opts.b ? '' : U.padEnd(shown + ':', width) + ' ') + line + '\n');
+      }
+      return 0;
+    },
+  });
+
+  /* ===================================================================== tac */
+
+  gnu({
+    name: 'tac', summary: 'concatenate and print files in reverse', synopsis: 'tac [OPTION]... [FILE]...',
+    man: 'DESCRIPTION\n       Write each FILE to standard output, last line first.\n\nOPTIONS\n       -s, --separator=STRING\n              use STRING as the separator instead of newline\n\nEXAMPLES\n       tac /var/log/auth.log | head\n              The ten newest authentication log lines.',
+    help: "  -b, --before             attach the separator before instead of after\n  -r, --regex              interpret the separator as a regular expression\n  -s, --separator=STRING   use STRING as the separator instead of newline\n",
+    authors: 'Jay Lepreau and David MacKenzie',
+    spec: { short: 'brs:', long: ['before', 'regex', 'separator='], alias: { before: 'b', regex: 'r', separator: 's' } },
+    async main(ctx, g) {
+      const sep = g.opts.s == null ? '\n' : g.opts.s;
+      if (sep === '') { ctx.eprintln('tac: separator cannot be empty'); return 1; }
+      let status = 0;
+      for (const f of g.rest.length ? g.rest : ['-']) {
+        let text;
+        try { text = f === '-' ? await stdinText(ctx) : ctx.fs.read(f); } catch (e) {
+          if (!isFsError(e)) throw e;
+          ctx.eprintln('tac: failed to open ' + q(f) + ' for reading: ' + e.message); status = 1; continue;
+        }
+        const parts = text.split(sep);
+        const trailing = parts.pop();
+        const records = parts.map((p) => p + sep);
+        if (trailing !== '') records.push(trailing);
+        if (g.opts.b) { ctx.out(text); continue; }
+        ctx.out(records.reverse().join(''));
+      }
+      return status;
+    },
+  });
+
+  /* ================================================================ less, more */
+
+  /** Shared pager front end: files or stdin, pager on a terminal, plain output otherwise. */
+  async function pageFiles(ctx, g, missing, opts) {
+    const files = g.rest;
+    let status = 0; const chunks = [];
+    if (!files.length) {
+      if (ctx.stdin == null) { ctx.eprintln(opts.noInput); return 1; }
+      chunks.push({ name: null, text: ctx.stdin });
+    }
+    for (const f of files) {
+      try {
+        if (ctx.fs.isDir(f)) { ctx.println(opts.dirMsg(f)); status = 1; continue; }
+        chunks.push({ name: f, text: ctx.fs.read(f) });
+      } catch (e) {
+        if (!isFsError(e)) throw e;
+        ctx.eprintln(missing(f, e)); status = 1;
+      }
+    }
+    if (g.opts.N) {
+      for (const c of chunks) { let n = 0; c.text = splitLines(c.text).map((l) => U.padStart(++n, 6) + ' ' + l).join('\n') + (c.text.endsWith('\n') ? '\n' : ''); }
+    }
+    if (!chunks.length) return status;
+    const text = chunks.map((c, i) => (chunks.length > 1 && opts.headers ? (i ? '\n' : '') + '::::::::::::::\n' + c.name + '\n::::::::::::::\n' : '') + c.text).join('');
+    if (ctx.isTTY && ctx.term && ctx.term.pager) await ctx.term.pager(text, { title: chunks[0].name || '(standard input)' });
+    else ctx.out(text);
+    return status;
+  }
+
+  gnu({
+    name: 'less', pkg: 'less', summary: 'opposite of more', synopsis: 'less [OPTIONS] [FILE]...',
+    man: 'DESCRIPTION\n       less is a program similar to more, but it has many more features. less does not have to read the entire input file before starting, so with large input files it starts up faster than text editors like vi.\n\n       Inside less: SPACE or f scroll forward, b scroll back, /pattern search, n next match, g and G go to the start and the end, q quit, h help.\n\nOPTIONS\n       -N, --LINE-NUMBERS\n              causes a line number to be displayed at the beginning of each line\n       -S, --chop-long-lines\n              causes lines longer than the screen width not to be folded\n       -R, --RAW-CONTROL-CHARS\n              like -r, but only ANSI colour escape sequences are output in raw form\n       -F     quit if the entire file can be displayed on one screen\n       -X     disables sending the termcap initialization and deinitialization strings\n\nEXAMPLES\n       less /var/log/syslog\n              Page through the system log.\n       ps aux | less -S\n              Page a wide process list without wrapping.',
+    help: "  -N  or --LINE-NUMBERS  Display line number for each line.\n  -R  or --RAW-CONTROL-CHARS  Output \"raw\" control characters.\n  -S  or --chop-long-lines  Chop (truncate) long lines rather than wrapping.\n  -F  or --quit-if-one-screen  Quit if entire file fits on first screen.\n  -X  or --no-init       Don't use termcap init/deinit strings.\n",
+    authors: 'Mark Nudelman',
+    spec: { short: 'NSRFXrisMmeEwcCgGfaPpjkntTuUVx:z:', long: ['LINE-NUMBERS', 'chop-long-lines', 'RAW-CONTROL-CHARS', 'quit-if-one-screen', 'no-init', 'ignore-case', 'IGNORE-CASE'], alias: { 'LINE-NUMBERS': 'N', 'chop-long-lines': 'S', 'RAW-CONTROL-CHARS': 'R', 'quit-if-one-screen': 'F', 'no-init': 'X' } },
+    main: (ctx, g) => pageFiles(ctx, g, (f, e) => f + ': ' + e.message, {
+      noInput: 'Missing filename ("less --help" for help)', dirMsg: (f) => f + ' is a directory', headers: false,
+    }),
+  });
+
+  gnu({
+    name: 'more', pkg: 'util-linux', summary: 'file perusal filter for crt viewing', synopsis: 'more [options] file...',
+    man: 'DESCRIPTION\n       more is a filter for paging through text one screenful at a time.\n\nOPTIONS\n       -d     display help instead of ringing bell\n       -f     count logical rather than screen lines\n       -s     squeeze multiple blank lines into one\n       -N     display line numbers (not in real more; accepted for convenience)\n\nEXAMPLES\n       more /etc/services\n              Read the services file a screen at a time.',
+    help: "Options:\n  -d, --silent          display help instead of ringing bell\n  -f, --logical         count logical rather than screen lines\n  -s, --squeeze         squeeze multiple blank lines into one\n  -h, --help            display this help\n  -V, --version         display version\n",
+    authors: 'Eric Shienbrood, Geoff Collyer, and others',
+    spec: { short: 'dflprsucV0123456789n:', long: ['silent', 'logical', 'no-pause', 'print-over', 'clean-print', 'squeeze', 'plain'] },
+    main: (ctx, g) => pageFiles(ctx, g, (f, e) => 'more: cannot open ' + f + ': ' + e.message, {
+      noInput: 'more: bad usage\nTry \'more --help\' for more information.', dirMsg: (f) => '\n*** ' + f + ': directory ***\n', headers: true,
+    }),
+  });
+
+  /* =========================================================== nano, vim, vi */
+
+  function editorCommand(def) {
+    K.cmd.register(Object.assign({ section: 1, async run(ctx) {
+      const g = ctx.getopt({ short: def.shortOpts, long: ['help', 'version'].concat(def.longOpts || []) });
+      if (g.err) { ctx.eprintln(ctx.name + ': ' + g.err); ctx.eprintln("Try '" + ctx.name + " --help' for more information."); return 1; }
+      if (g.opts.version) { ctx.out(def.version); return 0; }
+      if (g.opts.help) { ctx.out('Usage: ' + def.synopsis + '\n'); return 0; }
+      if (!ctx.stdinTTY) { ctx.eprintln(def.notTerminal); return 1; }
+      if (!ctx.isTTY || !ctx.term || !ctx.term.editor) { ctx.eprintln(def.notTerminalOut); return 1; }
+      const file = g.rest.find((a) => !/^\+\d*$/.test(a)) || null;
+      let content = '';
+      if (file != null) {
+        try {
+          if (ctx.fs.isDir(file)) { ctx.eprintln(def.dirMsg(file)); return 1; }
+          content = ctx.fs.read(file);
+        } catch (e) {
+          if (!isFsError(e)) throw e;
+          if (e.code !== 'ENOENT') { ctx.eprintln(def.readError(file, e)); content = ''; }
+        }
+      }
+      const res = await ctx.term.editor({ path: file == null ? null : ctx.fs.abs(file), content, flavor: def.flavor });
+      if (res && res.saved && file != null) {
+        try { ctx.fs.write(file, res.content); } catch (e) {
+          if (!isFsError(e)) throw e;
+          ctx.eprintln(def.writeError(file, e)); return 1;
+        }
+      }
+      return 0;
+    } }, def.reg));
+  }
+
+  editorCommand({
+    flavor: 'nano', shortOpts: 'ABCDEFGHIKLMNOPQRSTUWYZabcdegiklmnopqrstuvwxyz0123456789@$_%+-', synopsis: 'nano [OPTIONS] [[+LINE[,COLUMN]] FILE]...',
+    version: ' GNU nano, version 8.4\n (C) 1999-2011, 2013-2025 Free Software Foundation, Inc.\n Email: nano@nano-editor.org\tWeb: https://nano-editor.org/\n',
+    notTerminal: 'Too many errors from stdin', notTerminalOut: 'Too many errors from stdin',
+    dirMsg: (f) => '"' + f + '" is a directory', readError: (f, e) => 'Error reading ' + f + ': ' + e.message,
+    writeError: (f, e) => 'Error writing ' + f + ': ' + e.message,
+    reg: { name: 'nano', pkg: 'nano', summary: 'Nano\'s ANOther editor, inspired by Pico', synopsis: 'nano [OPTIONS] [[+LINE[,COLUMN]] FILE]...',
+      man: 'DESCRIPTION\n       nano is a small and friendly text editor. Besides editing plain text it offers features such as undo/redo, syntax colouring, interactive search and replace, auto-indentation and line numbers.\n\n       Common keys: Ctrl+O write the file out, Ctrl+X exit, Ctrl+W search, Ctrl+K cut a line, Ctrl+U paste, Ctrl+G help.\n\nOPTIONS\n       -l, --linenumbers\n              display line numbers in front of the text\n       -B, --backup\n              when saving a file, back up the previous version\n\nEXAMPLES\n       nano notes.txt\n              Edit notes.txt, creating it when saved if it does not exist.' },
+  });
+
+  const VIM_VERSION = 'VIM - Vi IMproved 9.1 (2024 Jan 02, compiled Nov 10 2025 10:11:12)\nIncluded patches: 1-1500\nCompiled by Debian\n';
+  editorCommand({
+    flavor: 'vim', shortOpts: 'bcCdDeEfFgGhHlLmMnNoOpqrRsStTuUvVwWxXyYzZ', synopsis: 'vim [arguments] [file ..]       edit specified file(s)',
+    version: VIM_VERSION,
+    notTerminal: 'Vim: Warning: Input is not from a terminal', notTerminalOut: 'Vim: Warning: Output is not to a terminal',
+    dirMsg: (f) => '"' + f + '" is a directory', readError: (f, e) => '"' + f + '" ' + e.message, writeError: (f, e) => 'E212: Can\'t open file for writing',
+    reg: { name: 'vim', aliases: ['vi'], path: '/usr/bin/vim', pkg: 'vim', summary: 'Vi IMproved, a programmer\'s text editor', synopsis: 'vim [options] [file ..]',
+      man: 'DESCRIPTION\n       Vim is a text editor that is upwards compatible to Vi. It can be used to edit all kinds of plain text.\n\n       Modes: press i to insert text, Esc to return to normal mode, then :w to write, :q to quit, :wq to write and quit, :q! to quit without saving. /pattern searches, dd deletes a line, u undoes.\n\nOPTIONS\n       -R     read-only mode\n       -n     no swap file\n       +N     start at line N\n\nEXAMPLES\n       vim /etc/hosts\n              Edit the hosts file (needs sudo to save).\n       vi notes.txt\n              vi is the same program.' },
+  });
+
   /* @@END */
 })(typeof globalThis !== 'undefined' ? globalThis : this);
