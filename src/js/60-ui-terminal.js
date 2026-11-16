@@ -488,7 +488,8 @@
     hasFocus() { return this.el.contains(document.activeElement); }
     _hasSelection() {
       const sel = typeof getSelection === 'function' ? getSelection() : null;
-      return !!sel && !sel.isCollapsed && this.el.contains(sel.anchorNode) && sel.anchorNode !== this.ta;
+      // a click at the end of a line can leave a range that is not collapsed and yet selects nothing
+      return !!sel && !sel.isCollapsed && this.el.contains(sel.anchorNode) && sel.anchorNode !== this.ta && String(sel) !== '';
     }
     _copySelection() {
       const text = String(getSelection());
@@ -539,6 +540,7 @@
           search: null, menu: null, list: null, ask: null, suggest: '',
         });
         this._mode();
+        this._syncField();     // now, not at the next repaint: keys can arrive before it
         const p = this._pending; this._pending = '';
         const nl = p.indexOf('\n');
         if (nl >= 0) { r.buf = p.slice(0, nl); this._pending = p.slice(nl + 1); this._submit(); return; }
@@ -579,6 +581,7 @@
       this._read = null;
       this._setBelow('');
       this._mode();
+      this._syncField();
       this._stick = true; this._schedule();
       return r;
     }
@@ -631,7 +634,10 @@
         if (lk === 'c' && this._hasSelection()) return;                                // copy the selection instead of interrupting
       }
       if (e.shiftKey && key === 'Insert') return;
-      const k = { key, ctrl, alt, shift: e.shiftKey, native: e.target === this.ta };
+      // Editing the field would move the browser's selection into it, so while output is
+      // selected the keys are applied by hand and the selection stays for copying.
+      if (e.target === this.ta && this._hasSelection()) this.el.focus({ preventScroll: true });
+      const k = { key, ctrl, alt, shift: e.shiftKey, native: document.activeElement === this.ta };
       if (this._latch) { this._setLatch(false); k.ctrl = true; }
       if (this._handleKey(k)) e.preventDefault();
     }
@@ -657,7 +663,7 @@
         }
         if (r.search) { r.search.query = v; this._searchUpdate(true); return; }
         if (v !== r.buf) { r.menu = null; r.ask = null; if (r.list) { r.list = null; this._setBelow(''); } }
-        r.buf = v; r.pos = s; r.hIndex = r.hIndex;   // history position is kept: editing a recalled line is allowed
+        r.buf = v; r.pos = s;
         this._refresh();
         return;
       }
@@ -972,6 +978,7 @@
       this._overlay = null;
       this.over.hidden = true; this.over.textContent = '';
       this._mode();
+      this._syncField();
       this._stick = true; this._schedule();
     }
 
