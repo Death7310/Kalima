@@ -32,7 +32,7 @@
           return bad;
         }
         if (g.opts.help && !def.noHelp) { ctx.out(helpText(def)); return 0; }
-        if (g.opts.version && !def.noHelp) { ctx.out(versionText(ctx.name, def)); return 0; }
+        if (g.opts.version && !def.noHelp) { ctx.out(def.version || versionText(ctx.name, def)); return 0; }
         return def.main(ctx, g);
       },
     }));
@@ -1769,6 +1769,183 @@
     dirMsg: (f) => '"' + f + '" is a directory', readError: (f, e) => '"' + f + '" ' + e.message, writeError: (f, e) => 'E212: Can\'t open file for writing',
     reg: { name: 'vim', aliases: ['vi'], path: '/usr/bin/vim', pkg: 'vim', summary: 'Vi IMproved, a programmer\'s text editor', synopsis: 'vim [options] [file ..]',
       man: 'DESCRIPTION\n       Vim is a text editor that is upwards compatible to Vi. It can be used to edit all kinds of plain text.\n\n       Modes: press i to insert text, Esc to return to normal mode, then :w to write, :q to quit, :wq to write and quit, :q! to quit without saving. /pattern searches, dd deletes a line, u undoes.\n\nOPTIONS\n       -R     read-only mode\n       -n     no swap file\n       +N     start at line N\n\nEXAMPLES\n       vim /etc/hosts\n              Edit the hosts file (needs sudo to save).\n       vi notes.txt\n              vi is the same program.' },
+  });
+
+  /* ================================================================ du, df */
+
+  /** Blocks (in bytes) that an entry occupies on disk. */
+  const diskBytes = (st) => blocksOf(st) * 1024;
+
+  function duUnit(g) {
+    const o = g.opts;
+    if (o.b) return { div: 1, human: false, apparent: true };
+    if (o.h) return { div: 1, human: true, apparent: !!o['apparent-size'] };
+    if (o.m) return { div: 1048576, human: false, apparent: !!o['apparent-size'] };
+    const bs = o['block-size'];
+    const n = bs && /^\d+[KMG]?$/.test(bs) ? parseSize(bs.replace(/^(\d+)([KMG])$/, '$1$2')) : null;
+    return { div: n || 1024, human: false, apparent: !!o['apparent-size'] };
+  }
+
+  gnu({
+    name: 'du', summary: 'estimate file space usage', synopsis: 'du [OPTION]... [FILE]...',
+    man: 'DESCRIPTION\n       Summarize device usage of the set of FILEs, recursively for directories.\n\nOPTIONS\n       -a, --all\n              write counts for all files, not just directories\n       -b, --bytes\n              equivalent to --apparent-size --block-size=1\n       -c, --total\n              produce a grand total\n       -d, --max-depth=N\n              print the total for a directory only if it is N or fewer levels below the command line argument\n       -h, --human-readable\n              print sizes in human readable format (e.g., 1K 234M 2G)\n       -k     like --block-size=1K\n       -s, --summarize\n              display only a total for each argument\n\nEXAMPLES\n       du -sh /var/log\n              Total size of the log directory.\n       du -h -d 1 ~ | sort -h\n              Which top-level folders in the home directory are biggest.',
+    help: "  -a, --all             write counts for all files, not just directories\n      --apparent-size   print apparent sizes rather than device usage\n  -b, --bytes           equivalent to '--apparent-size --block-size=1'\n  -c, --total           produce a grand total\n  -d, --max-depth=N     print the total for a directory (or file, with --all)\n                          only if it is N or fewer levels below the command\n                          line argument\n  -h, --human-readable  print sizes in human readable format (e.g., 1K 234M 2G)\n  -k                    like --block-size=1K\n  -m                    like --block-size=1M\n  -s, --summarize       display only a total for each argument\n",
+    authors: 'Torbjorn Granlund, David MacKenzie, Paul Eggert, and Jim Meyering',
+    spec: { short: 'abchkmsd:xSDLP0', long: ['all', 'bytes', 'total', 'human-readable', 'summarize', 'max-depth=', 'apparent-size', 'block-size=', 'si', 'one-file-system', 'null'], alias: { all: 'a', bytes: 'b', total: 'c', 'human-readable': 'h', summarize: 's', 'max-depth': 'd' } },
+    main(ctx, g) {
+      const o = g.opts;
+      if (o.s && o.d != null) { ctx.eprintln('du: summarizing conflicts with --max-depth=' + o.d); ctx.eprintln("Try 'du --help' for more information."); return 1; }
+      const maxDepth = o.s ? 0 : o.d == null ? Infinity : parseInt(o.d, 10);
+      if (o.d != null && !/^\d+$/.test(o.d)) { ctx.eprintln('du: invalid maximum depth ' + q(o.d)); ctx.eprintln("Try 'du --help' for more information."); return 1; }
+      const unit = duUnit(g);
+      const fmt = (bytes) => (unit.human ? U.humanSize(bytes) : String(Math.ceil(bytes / unit.div)));
+      const sizeOf = (st) => (unit.apparent ? st.size : diskBytes(st));
+      let status = 0; let grand = 0;
+      const line = (bytes, name) => ctx.out(fmt(bytes) + '\t' + name + '\n');
+      const walk = (path, name, depth) => {
+        ctx.checkAbort();
+        let st;
+        try { st = ctx.fs.lstat(path); } catch (e) {
+          if (!isFsError(e)) throw e;
+          ctx.eprintln('du: cannot access ' + q(name) + ': ' + e.message); status = 1; return 0;
+        }
+        let total = sizeOf(st);
+        if (st.isDir) {
+          let names = [];
+          try { names = ctx.fs.readdir(path); } catch (e) {
+            if (!isFsError(e)) throw e;
+            ctx.eprintln('du: cannot read directory ' + q(name) + ': ' + e.message); status = 1;
+          }
+          for (const n of names) total += walk(joinPath(path, n), joinPath(name, n), depth + 1);
+          if (depth <= maxDepth) line(total, name);
+        } else if ((o.a && depth <= maxDepth) || depth === 0) line(total, name);
+        return total;
+      };
+      for (const f of g.rest.length ? g.rest : ['.']) grand += walk(f, f, 0);
+      if (o.c) line(grand, 'total');
+      return status;
+    },
+  });
+
+  // The simulated machine's mounted filesystems (sizes in KiB).
+  const MOUNTS = [
+    { dev: 'udev', type: 'devtmpfs', mount: '/dev', size: 1950568, used: 0 },
+    { dev: 'tmpfs', type: 'tmpfs', mount: '/run', size: 396072, used: 1196 },
+    { dev: '/dev/sda1', type: 'ext4', mount: '/', size: 82419448, used: 14380128 },
+    { dev: 'tmpfs', type: 'tmpfs', mount: '/dev/shm', size: 1980348, used: 0 },
+    { dev: 'tmpfs', type: 'tmpfs', mount: '/run/lock', size: 5120, used: 0 },
+    { dev: 'tmpfs', type: 'tmpfs', mount: '/tmp', size: 1980348, used: 12 },
+    { dev: 'tmpfs', type: 'tmpfs', mount: '/run/user/1000', size: 396068, used: 112 },
+  ];
+
+  function dfRows(ctx, g) {
+    const hum = g.opts.h || g.opts.H;
+    const fmt = (kib) => (hum ? U.humanSize(kib * 1024) : String(kib));
+    const unitHead = hum ? 'Size' : '1K-blocks';
+    const rows = (list) => list.map((m) => {
+      const avail = m.size - m.used;
+      return { dev: m.dev, type: m.type, size: fmt(m.size), used: fmt(m.used), avail: fmt(avail), pct: Math.ceil((m.used / (m.used + avail)) * 100) + '%', mount: m.mount };
+    });
+    return { rows, unitHead, hum };
+  }
+
+  function dfTable(ctx, rows, o, hum, unitHead) {
+    const cols = [{ k: 'dev', h: 'Filesystem', min: 14, left: true }];
+    if (o.T) cols.push({ k: 'type', h: 'Type', left: true });
+    cols.push({ k: 'size', h: unitHead, min: hum ? 5 : 0 }, { k: 'used', h: 'Used', min: hum ? 5 : 0 }, { k: 'avail', h: hum ? 'Avail' : 'Available', min: hum ? 5 : 0 }, { k: 'pct', h: 'Use%', min: 0 }, { k: 'mount', h: 'Mounted on', left: true, last: true });
+    for (const c of cols) c.w = Math.max(c.min || 0, c.h.length, ...rows.map((r) => r[c.k].length));
+    const fmtRow = (r) => cols.map((c) => (c.last ? r[c.k] : c.left ? U.padEnd(r[c.k], c.w) : U.padStart(r[c.k], c.w))).join(' ');
+    const head = {}; for (const c of cols) head[c.k] = c.h;
+    return [head].concat(rows).map(fmtRow).join('\n') + '\n';
+  }
+
+  gnu({
+    name: 'df', summary: 'report file system space usage', synopsis: 'df [OPTION]... [FILE]...',
+    man: 'DESCRIPTION\n       This manual page documents the GNU version of df. df displays the amount of space available on the file system containing each file name argument. If no file name is given, the space available on all currently mounted file systems is shown.\n\nOPTIONS\n       -h, --human-readable\n              print sizes in powers of 1024 (e.g., 1023M)\n       -T, --print-type\n              print file system type\n       -k     like --block-size=1K\n\nEXAMPLES\n       df -h\n              Show every filesystem in human readable sizes.\n       df -hT /\n              Show the type and usage of the root filesystem.',
+    help: "  -a, --all             include pseudo, duplicate, inaccessible file systems\n  -h, --human-readable  print sizes in powers of 1024 (e.g., 1023M)\n  -H, --si              print sizes in powers of 1000 (e.g., 1.1G)\n  -k                    like --block-size=1K\n  -T, --print-type      print file system type\n",
+    authors: 'Torbjorn Granlund, David MacKenzie, and Paul Eggert',
+    spec: { short: 'ahHkTPl', long: ['all', 'human-readable', 'si', 'print-type', 'local'], alias: { all: 'a', 'human-readable': 'h', si: 'H', 'print-type': 'T' } },
+    main(ctx, g) {
+      const { rows, unitHead, hum } = dfRows(ctx, g);
+      let list = MOUNTS; let status = 0;
+      if (g.rest.length) {
+        list = [];
+        for (const f of g.rest) {
+          let real;
+          try { real = ctx.fs.realpath(f); } catch (e) {
+            if (!isFsError(e)) throw e;
+            ctx.eprintln('df: ' + f + ': ' + e.message); status = 1; continue;
+          }
+          const m = MOUNTS.filter((x) => x.mount === '/' || real === x.mount || real.startsWith(x.mount + '/')).sort((a, b) => b.mount.length - a.mount.length)[0];
+          if (list.indexOf(m) < 0) list.push(m);
+        }
+        if (!list.length) return status;
+      }
+      ctx.out(dfTable(ctx, rows(list), g.opts, hum, unitHead));
+      return status;
+    },
+  });
+
+  /* =================================================================== tree */
+
+  gnu({
+    name: 'tree', pkg: 'tree', summary: 'list contents of directories in a tree-like format', synopsis: 'tree [-acdfghilnpqrstuvxACDFJQNSUX] [-L level [-R]] [-H baseHREF] [-T title]\n\t[-o filename] [--nolinks] [-P pattern] [-I pattern] [--inodes] [--device]\n\t[--noreport] [--dirsfirst] [--version] [--help] [--filelimit #] [--si]\n\t[--prune] [--du] [--timefmt format] [--matchdirs] [--fromfile] [--] [directory ...]',
+    man: 'DESCRIPTION\n       Tree is a recursive directory listing program that produces a depth indented listing of files. With no arguments, tree lists the files in the current directory. When directory arguments are given, tree lists all the files and/or directories found in the given directories each in turn. Upon completion of listing all files and directories found, tree returns the total number of files and/or directories listed.\n\nOPTIONS\n       -a     All files are printed, including hidden ones\n       -d     List directories only\n       -f     Print the full path prefix for each file\n       -L level\n              Max display depth of the directory tree\n       -C     Turn colorization on always\n       --noreport\n              Omits printing of the file and directory report at the end of the tree listing\n       --dirsfirst\n              List directories before files\n\nEXAMPLES\n       tree -L 2 ~/engagement\n              Show two levels of the engagement folder.\n       tree -a -d\n              Every directory, including hidden ones, but no files.',
+    help: "  ------- Listing options -------\n  -a            All files are listed.\n  -d            List directories only.\n  -l            Follow symbolic links like directories.\n  -f            Print the full path prefix for each file.\n  -L level      Descend only level directories deep.\n  --dirsfirst   List directories before files (-U disables).\n  --noreport    Turn off file/directory count at end of tree listing.\n  -C            Turn colorization on always.\n",
+    version: 'tree v2.2.1 (c) 1996 - 2024 by Steve Baker, Thomas Moore, Francesc Rocher, Florian Sesser, Kyosuke Tokoro\n',
+    spec: { short: 'adflL:CNpPIsiqrthuUF', long: ['noreport', 'dirsfirst', 'charset=', 'filelimit=', 'prune', 'inodes', 'device'] },
+    main(ctx, g) {
+      const o = g.opts;
+      if (o.L != null && !/^\d+$/.test(o.L) || o.L === '0') { ctx.eprintln('tree: Invalid level, must be greater than 0.'); return 1; }
+      const maxLevel = o.L == null ? Infinity : parseInt(o.L, 10);
+      const utf = !/^(C|POSIX)$/.test(ctx.env.LC_ALL || ctx.env.LANG || 'C') && !/ascii/i.test(o.charset || '');
+      const glyph = utf ? { mid: '├── ', last: '└── ', bar: '│   ', gap: '    ' } : { mid: '|-- ', last: '`-- ', bar: '|   ', gap: '    ' };
+      const color = !!o.C;
+      const collate = collator(ctx.env);
+      let dirs = 0; let files = 0;
+      const label = (e, shown) => {
+        let t = shown + (o.F && e.st.isDir ? '/' : '');
+        const key = color ? colorKey(e.st, false) : null;
+        if (key) t = paint(LS_COLOR[key], t);
+        if (e.st.isLink) t += ' -> ' + e.st.target;
+        return t;
+      };
+      const visit = (path, prefix, level) => {
+        ctx.checkAbort();
+        let names = ctx.fs.readdir(path);
+        if (!o.a) names = names.filter((n) => n[0] !== '.');
+        let entries = names.map((n) => ({ name: n, full: joinPath(path, n), st: ctx.fs.lstat(joinPath(path, n)) }));
+        if (o.d) entries = entries.filter((e) => e.st.isDir);
+        entries.sort((a, b) => collate(a.name, b.name));
+        if (o.r) entries.reverse();
+        if (o.dirsfirst) entries = entries.filter((e) => e.st.isDir).concat(entries.filter((e) => !e.st.isDir));
+        entries.forEach((e, i) => {
+          const last = i === entries.length - 1;
+          let extra = '';
+          if (o.p) extra += '[' + modeString(e.st) + ']  ';
+          if (o.s) extra += '[' + U.padStart(e.st.size, 11) + ']  ';
+          const readable = !e.st.isDir || (ctx.fs.can(e.full, 'r') && ctx.fs.can(e.full, 'x'));
+          if (e.st.isDir) dirs++; else files++;
+          ctx.out(prefix + (last ? glyph.last : glyph.mid) + extra + label(e, o.f ? e.full : e.name) + (readable ? '' : '  [error opening dir]') + '\n');
+          if (e.st.isDir && readable && level < maxLevel) visit(e.full, prefix + (last ? glyph.gap : glyph.bar), level + 1);
+        });
+      };
+      let status = 0;
+      for (const root of g.rest.length ? g.rest : ['.']) {
+        let st;
+        try { st = ctx.fs.stat(root); } catch (e) {
+          if (!isFsError(e)) throw e;
+          ctx.out(root + ' [error opening dir]\n'); status = 2; continue;
+        }
+        ctx.out(root + '\n');
+        if (st.isDir && ctx.fs.can(root, 'r')) visit(root, '', 1);
+        else if (st.isDir) { ctx.out('[error opening dir]\n'); status = 2; }
+      }
+      if (!o.noreport) {
+        ctx.out('\n' + dirs + ' ' + (dirs === 1 ? 'directory' : 'directories') + (o.d ? '' : ', ' + files + ' ' + (files === 1 ? 'file' : 'files')) + '\n');
+      }
+      return status;
+    },
   });
 
   /* @@END */

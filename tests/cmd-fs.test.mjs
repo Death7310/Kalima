@@ -554,3 +554,57 @@ test('nano, vim and vi call the terminal editor and write the result back', asyn
   assert.match((await sh('vim --version')).out, /^VIM - Vi IMproved/);
   assert.match((await sh('nano --version')).out, /GNU nano, version/);
 });
+
+/* ---------------------------------------------------------------- du, df, tree */
+
+test('du reports disk usage in 1K blocks', async () => {
+  const { sh, out } = await setup();
+  await sh('mkdir -p /tmp/du/a/b; cd /tmp/du; printf "%5000s" x > a/f; echo hi > a/b/g; : > empty');
+  assert.equal(await out('du'), '8\t./a/b\n20\t./a\n24\t.\n');
+  assert.equal(await out('du -s'), '24\t.\n');
+  assert.equal(await out('du -a'), '4\t./a/b/g\n8\t./a/b\n8\t./a/f\n20\t./a\n0\t./empty\n24\t.\n');
+  assert.equal(await out('du -d 1'), '20\t./a\n24\t.\n');
+  assert.equal(await out('du -d0'), '24\t.\n');
+  assert.equal(await out('du -sh a'), '20K\ta\n');
+  assert.equal(await out('du -sc a empty'), '20\ta\n0\tempty\n20\ttotal\n');
+  assert.equal(await out('du -sb a/f'), '5000\ta/f\n');
+  assert.equal(await out('du a/f'), '8\ta/f\n');
+  const r = await sh('du nope');
+  assert.equal(r.err, "du: cannot access 'nope': No such file or directory\n");
+  assert.equal(r.code, 1);
+  assert.equal((await sh('du -s -d 1 .')).code, 1);
+  assert.equal(await out('du -ah /tmp/du/a/f /etc/hostname'), '8.0K\t/tmp/du/a/f\n4.0K\t/etc/hostname\n');
+});
+
+test('df lists simulated filesystems', async () => {
+  const { sh, out } = await setup();
+  const o = (await out('df')).split('\n');
+  assert.match(o[0], /^Filesystem {5}1K-blocks +Used Available Use% Mounted on$/);
+  assert.ok(o.some((l) => /^\/dev\/sda1 +\d+ +\d+ +\d+ +\d+% \/$/.test(l)));
+  const h = (await out('df -h')).split('\n');
+  assert.match(h[0], /^Filesystem {6}Size {2}Used Avail Use% Mounted on$/);
+  assert.ok(h.some((l) => /^\/dev\/sda1 +\d+G +\d+G +\d+G +\d+% \/$/.test(l)));
+  const t = (await out('df -hT /')).split('\n');
+  assert.match(t[0], /^Filesystem +Type +Size +Used Avail Use% Mounted on$/);
+  assert.match(t[1], /^\/dev\/sda1 +ext4 /);
+  assert.equal((await out('df -h /tmp')).split('\n').length, 3);
+  assert.match(await out('df /tmp'), /^Filesystem .*\ntmpfs +\d+ +\d+ +\d+ +\d+% \/tmp\n$/);
+  assert.equal((await sh('df /nonexistent')).err, 'df: /nonexistent: No such file or directory\n');
+});
+
+test('tree draws the directory structure and counts', async () => {
+  const { sh, out } = await setup();
+  await sh('mkdir -p /tmp/tr/a/b /tmp/tr/c; cd /tmp/tr; touch a/f1 a/b/f2 .hid top');
+  assert.equal(await out('tree'), '.\n├── a\n│   ├── b\n│   │   └── f2\n│   └── f1\n├── c\n└── top\n\n3 directories, 3 files\n');
+  assert.equal(await out('tree -L 1'), '.\n├── a\n├── c\n└── top\n\n2 directories, 1 file\n');
+  assert.equal(await out('tree -a -L 1'), '.\n├── a\n├── c\n├── .hid\n└── top\n\n2 directories, 2 files\n'.replace('├── .hid\n└── top', '├── .hid\n└── top'));
+  assert.equal(await out('tree -d'), '.\n├── a\n│   └── b\n└── c\n\n3 directories\n');
+  assert.equal(await out('tree -f -L 1 a'), 'a\n├── a/b\n└── a/f1\n\n1 directory, 1 file\n');
+  assert.equal(await out('tree --noreport -L 1 c'), 'c\n');
+  assert.equal(await out('tree /tmp/nonexistent'), '/tmp/nonexistent [error opening dir]\n\n0 directories, 0 files\n');
+  assert.equal(await out('LC_ALL=C tree -L 1'), '.\n|-- a\n|-- c\n`-- top\n\n2 directories, 1 file\n');
+  assert.match(await out('tree -C -L 1'), /\x1b\[01;34ma\x1b\[0m/);
+  assert.match(await out('tree --version'), /^tree v2\.2\.1/);
+  await sh('mkdir /tmp/tr/priv; chmod 000 /tmp/tr/priv');
+  assert.match(await out('tree -L 1 -d'), /priv {2}\[error opening dir\]/);
+});
