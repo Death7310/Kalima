@@ -5,7 +5,7 @@
 .kt {
   --kt-fs: 14px;
   --kt-lh: 18px;
-  --kt-bg: #101217;
+  --kt-bg: var(--k-term-bg, #101217);
   --kt-fg: #e8eaf0;
   --kt-pad: 10px;
   --kt-c0: #1f2229; --kt-c1: #e0494f; --kt-c2: #5ebdab; --kt-c3: #fea44c;

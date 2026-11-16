@@ -637,6 +637,8 @@
     insert(text) { this.paste(String(text).replace(/\n+$/, '')); }
 
     /* ---- keyboard ---- */
+    /** Handle a key event that reached the page while the terminal did not have the focus. */
+    keydown(e) { this._onKeyDown(e); }
     _onKeyDown(e) {
       if (e.isComposing || e.keyCode === 229 || e.metaKey) return;   // IME text arrives through input events; Cmd chords belong to the OS
       let key = e.key;

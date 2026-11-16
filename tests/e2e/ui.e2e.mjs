@@ -36,11 +36,15 @@ function watch(page) {
   page.on('request', (r) => { if (r.url().split('#')[0] !== URL) problems.push('network request: ' + r.method() + ' ' + r.url().slice(0, 120)); });
 }
 
-/** Wait for the app to boot and add the fixture commands (again after every reload). */
+/** Wait for the app to boot and add the fixtures (again after every reload). */
+let withLessons = false;      // the lesson groups switch this on; earlier groups see an app without lessons
 async function ready(page) {
   await page.waitForFunction(() => window.K && K.app && K.app.booted);
   await page.evaluate(installFixtures);
+  if (withLessons) await page.evaluate(installLessons);
 }
+const closeDialogs = (page) => page.evaluate(() => { for (const d of document.querySelectorAll('dialog[open]')) d.close(); });
+const termFocused = (page) => page.evaluate(() => document.activeElement === K.app.term.ta);
 async function open(browser, o = {}) {
   const context = o.context || await browser.newContext({ viewport: o.viewport || { width: 1280, height: 800 }, hasTouch: !!o.touch, isMobile: !!o.touch });
   const page = await context.newPage();
@@ -132,12 +136,58 @@ function installFixtures() {
   for (const def of defs) { K.cmd.register(def); K.kali.installCommand(def); }
 }
 
+/* ---- a fixture curriculum (real lesson packs arrive separately) ---- */
+function installLessons() {
+  K.lessons.register({
+    id: 'fx-basics', title: 'Fixture basics', order: 1, summary: 'Two lessons used by the interface test.',
+    lessons: [
+      {
+        id: 'fx-first', title: 'First commands', minutes: 8,
+        objectives: ['Print text with `echo`', 'Change directory'],
+        intro: 'The **shell** runs *one line* at a time.\n\n- Names are case sensitive.\n- Press `Tab` to complete.\n\n```\necho <b>not markup</b>\n```\n\n<img src=x onerror="window.fxInjected=1">',
+        steps: [
+          { id: 's1', prompt: 'Print the word `hello` with `echo`.', hint: 'Type **echo** and then the word.', solution: 'echo hello', check: { cmd: 'echo', out: /^hello$/m } },
+          { id: 's2', prompt: 'The shell keeps a working directory. Read on when you are ready.', info: true },
+          { id: 's3', prompt: 'Which command prints the working directory?', hint: 'Print working directory.', answer: ['pwd', '/bin/pwd'] },
+          { id: 's4', prompt: 'Change to the `/etc` directory.', solution: 'cd /etc', check: { cwd: '/etc' } },
+        ],
+        quiz: [
+          { q: 'What does `pwd` print?', choices: ['The password file', 'The working directory', 'The last command'], answer: 1, why: 'It stands for *print working directory*.' },
+          { q: 'Which key completes a name?', choices: ['Tab', 'Esc'], answer: 0, why: 'Tab asks the shell to complete it.' },
+        ],
+        refs: ['zshbuiltins(1)', 'FHS 3.0'],
+      },
+      { id: 'fx-second', title: 'Second lesson', minutes: 5, steps: [{ id: 'a', prompt: 'Run `pwd`.', solution: 'pwd', check: { cmd: 'pwd' } }] },
+    ],
+  });
+  K.lessons.register({ id: 'fx-more', title: 'Fixture extras', order: 2, lessons: [{ id: 'fx-third', title: 'Third lesson', steps: [{ id: 'a', prompt: 'Continue.', info: true }] }] });
+  K.app.renderLesson();
+}
+
 /* ------------------------------------------------------------------- groups */
+const WELCOME = 'first run: welcome';
+group(WELCOME, async ({ page }) => {
+  const dlg = page.locator('dialog[open]');
+  await dlg.waitFor();
+  const words = await dlg.innerText();
+  assert.match(words, /Welcome to Kalima/);
+  assert.match(words, /simulated and offline/i, 'says that everything is simulated and offline');
+  assert.match(words, /only be used on systems you own or have written permission to test/i, 'says that real use needs authorization');
+  await page.keyboard.type('blocked');
+  assert.doesNotMatch(await text(page), /blocked/, 'the terminal does not take keys while the dialog is open');
+  await dlg.getByRole('button', { name: 'Start' }).click();
+  await dlg.waitFor({ state: 'detached' });
+  assert.equal(await termFocused(page), true, 'closing the welcome puts the keyboard in the terminal');
+  await page.reload();
+  await ready(page);
+  assert.equal(await page.locator('dialog[open]').count(), 0, 'the welcome shows only on the first run');
+});
+
 group('terminal: prompt and echo', async ({ page }) => {
   await waitText(page, /\(kali㉿kali\)-\[~\]\n└─\$ $/);
   await run(page, 'echo hello');
   assert.match(await text(page), /└─\$ echo hello\nhello\n/);
-  assert.equal(await page.evaluate(() => document.activeElement === K.app.term.ta), true, 'the terminal has keyboard focus');
+  assert.equal(await termFocused(page), true, 'the terminal has keyboard focus');
 });
 
 group('terminal: history with Up and Down', async ({ page }) => {
@@ -486,6 +536,115 @@ group('vim: modes, motions, edits, search and ex commands', async ({ page }) => 
   assert.equal(await page.evaluate(() => document.activeElement === K.app.term.ta), true, 'focus is back on the command line');
 });
 
+/* ---- lessons ---- */
+const panel = (page) => page.locator('#k-panel-lesson');
+const stepState = (page) => page.evaluate(() => Array.from(document.querySelectorAll('.k-step')).map((el) => (el.className.match(/is-\w+/g) || []).join('+')));
+const waitCurrent = (page, n) => page.waitForFunction((i) => { const el = document.querySelectorAll('.k-step')[i]; return !!el && el.classList.contains('is-current'); }, n - 1);
+
+group('lessons: empty state, then the browser', async ({ page }) => {
+  assert.match(await panel(page).innerText(), /No lessons are installed/);
+  assert.equal(await page.locator('.k-top-progress').isHidden(), true);
+  assert.equal(await page.evaluate(() => K.ui.md('<i>x</i> & **b** *i* `c*d*`\n\n- one\n  more\n- two\n\n```\na < b\n```')),
+    '<p>&lt;i&gt;x&lt;/i&gt; &amp; <strong>b</strong> <em>i</em> <code>c*d*</code></p><ul><li>one more</li><li>two</li></ul><pre><code>a &lt; b</code></pre>');
+
+  withLessons = true;
+  await page.evaluate(installLessons);
+  const words = await panel(page).innerText();
+  assert.match(words, /Lessons\s+0 of 3 complete/);
+  assert.match(words, /START HERE\s+First commands/i);
+  assert.match(words, /Fixture basics\s+0\/2[^]*First commands\s+8 min[^]*Second lesson[^]*Fixture extras\s+0\/1[^]*Third lesson/);
+  assert.match(await page.locator('.k-top-progress').innerText(), /0 of 3 lessons/);
+});
+
+group('lessons: steps, hint, solution, question, quiz and completion', async ({ page }) => {
+  await panel(page).getByRole('button', { name: /First commands 8 min/ }).click();
+  const doc = page.locator('.k-doc');
+  assert.equal(await doc.locator('h2').innerText(), 'First commands');
+  assert.match(await doc.locator('.k-objectives').innerText(), /Print text with echo\s+Change directory/);
+  assert.equal(await doc.locator('.k-md').first().innerHTML(),
+    '<p>The <strong>shell</strong> runs <em>one line</em> at a time.</p><ul><li>Names are case sensitive.</li><li>Press <code>Tab</code> to complete.</li></ul>' +
+    '<pre><code>echo &lt;b&gt;not markup&lt;/b&gt;</code></pre><p>&lt;img src=x onerror="window.fxInjected=1"&gt;</p>');
+  assert.equal(await page.evaluate(() => window.fxInjected), undefined, 'lesson text cannot inject markup');
+  assert.deepEqual(await stepState(page), ['is-current', 'is-todo', 'is-todo', 'is-todo']);
+  assert.equal(await page.locator('.k-step[aria-current="step"]').count(), 1);
+  assert.match(await panel(page).innerText(), /Step 1 of 4/);
+  assert.equal(await termFocused(page), true, 'opening a lesson leaves the keyboard in the terminal');
+
+  // a command that does not satisfy the check changes nothing
+  await run(page, 'echo something else');
+  assert.deepEqual(await stepState(page), ['is-current', 'is-todo', 'is-todo', 'is-todo']);
+
+  // hint first, then the solution, which can be put on the command line
+  assert.equal(await panel(page).getByRole('button', { name: 'Show solution' }).count(), 0);
+  await panel(page).getByRole('button', { name: 'Hint' }).click();
+  assert.match(await page.locator('.k-hint').innerText(), /HINT\s+Type echo and then the word\./i);
+  await panel(page).getByRole('button', { name: 'Show solution' }).click();
+  assert.match(await page.locator('.k-hint.is-solution').innerText(), /echo hello/);
+  await panel(page).getByRole('button', { name: 'Put it on the command line' }).click();
+  assert.equal(await typed(page), 'echo hello');
+  assert.equal(await termFocused(page), true);
+  await page.keyboard.press('Enter');
+
+  // calm success state, then the next step opens by itself
+  await page.locator('.k-step.is-fresh').waitFor();
+  assert.match(await page.locator('.k-step.is-fresh').innerText(), /Step complete/);
+  assert.equal(await page.evaluate(() => K.lessons.progress.of('fx-first').steps.s1), true);
+  await waitCurrent(page, 2);
+  assert.deepEqual(await stepState(page), ['is-done', 'is-current', 'is-todo', 'is-todo']);
+
+  // info step
+  await panel(page).getByRole('button', { name: 'Continue' }).click();
+  await waitCurrent(page, 3);
+
+  // question step: a wrong answer, then a right one
+  const answer = panel(page).getByLabel('Your answer');
+  await answer.fill('ls');
+  await answer.press('Enter');
+  assert.match(await page.locator('.k-step.is-current').innerText(), /Not quite/);
+  assert.deepEqual(await stepState(page), ['is-done', 'is-done', 'is-current', 'is-todo']);
+  assert.equal(await answer.inputValue(), 'ls', 'the wrong answer stays in the field for editing');
+  await answer.fill(' PWD ');
+  await panel(page).getByRole('button', { name: 'Check' }).click();
+  await waitCurrent(page, 4);
+  assert.equal(await termFocused(page), true, 'after the answer the keyboard returns to the terminal');
+
+  // last command step (no hint: the solution is offered directly)
+  assert.equal(await panel(page).getByRole('button', { name: 'Hint' }).count(), 0);
+  assert.equal(await panel(page).getByRole('button', { name: 'Show solution' }).count(), 1);
+  await run(page, 'cd /etc');
+  const quiz = page.locator('.k-quiz');
+  await quiz.waitFor();
+  assert.match(await panel(page).innerText(), /\bQuiz\b/);
+  assert.equal(await page.evaluate(() => K.lessons.progress.isDone('fx-first')), false, 'the lesson is not complete before the quiz');
+
+  // quiz: immediate feedback with the explanation
+  const q1 = quiz.locator('.k-q').nth(0); const q2 = quiz.locator('.k-q').nth(1);
+  await q1.getByRole('button', { name: /The password file/ }).click();
+  assert.match(await q1.locator('.k-why').innerText(), /Not quite\. The answer is B\. It stands for print working directory\./);
+  assert.equal(await q1.locator('.k-choice.is-wrong').count(), 1);
+  assert.match(await q1.locator('.k-choice.is-right').innerText(), /The working directory/);
+  assert.equal(await q1.locator('.k-choice:disabled').count(), 3, 'an answered question is locked');
+  await q2.getByRole('button', { name: /Tab/ }).click();
+  assert.match(await q2.locator('.k-why').innerText(), /Correct\. Tab asks the shell to complete it\./);
+
+  const done = page.locator('.k-complete');
+  await done.waitFor();
+  assert.match(await done.innerText(), /Lesson complete\s+Quiz: 1 of 2 correct\./);
+  assert.match(await panel(page).locator('.k-refs').innerText(), /zshbuiltins\(1\)\s+FHS 3\.0/);
+  assert.deepEqual(await page.evaluate(() => { const p = K.lessons.progress.of('fx-first'); return [p.done, p.quiz[0], p.quiz[1]]; }), [true, false, true]);
+  assert.match(await page.locator('.k-top-progress').innerText(), /1 of 3 lessons/);
+
+  await done.getByRole('button', { name: /Next: Second lesson/ }).click();
+  assert.equal(await doc.locator('h2').innerText(), 'Second lesson');
+  await panel(page).getByRole('button', { name: 'All lessons' }).click();
+  const words = await panel(page).innerText();
+  assert.match(words, /1 of 3 complete/);
+  assert.match(words, /CONTINUE\s+Second lesson/i);
+  assert.equal(await page.locator('.k-lesson-row.is-done').count(), 1);
+  assert.match(await page.locator('.k-lesson-row.is-done').innerText(), /First commands[^]*Completed/);
+  await run(page, 'cd');
+});
+
 /* ------------------------------------------------------------------- runner */
 const browser = await chromium.launch();
 let failed = 0;
@@ -495,7 +654,10 @@ try {
     if (ONLY && !g.name.includes(ONLY)) continue;
     const t0 = Date.now();
     let error = null;
-    try { await g.fn({ page, browser }); } catch (e) { error = e; }
+    try {
+      if (g.name !== WELCOME) await closeDialogs(page);
+      await g.fn({ page, browser });
+    } catch (e) { error = e; }
     if (!error && problems.length) error = new Error(problems.join('\n'));
     problems.length = 0;
     results.push({ name: g.name, ok: !error });
