@@ -1,12 +1,16 @@
-/* Kalima — text processing, encoding and hashing commands.
+/* Kalima — everyday text filters, encoding and hashing commands.
  *
- * grep sed awk cut sort uniq wc tr tee xargs diff cmp comm paste join nl rev
- * fold fmt column expand unexpand seq yes expr bc factor shuf split base64
- * base32 xxd hexdump od strings md5sum sha*sum cksum sum openssl jq
+ *   searching and counting   grep egrep fgrep wc
+ *   ordering and selecting   sort uniq cut tr paste comm nl rev column
+ *   pipelines and output     tee xargs seq yes
+ *   hashing and encoding     md5sum sha1sum sha224sum sha256sum sha384sum sha512sum
+ *                            cksum base64 base32 xxd strings
+ *   comparing and evaluating diff cmp expr
  *
- * Everything here works on the simulated filesystem only. Interpreters (sed,
- * awk, bc, jq, expr) are real parsers: learner input is never evaluated as
- * JavaScript.
+ * Everything works on the simulated filesystem only. The digests are real
+ * (pure JavaScript over the UTF-8 bytes of the content). Interpreters such as
+ * expr are real parsers: learner input is never evaluated as JavaScript.
+ * Not here: sed, awk, jq, bc, openssl, hexdump and od.
  */
 ;(function (root) {
   'use strict';
@@ -812,15 +816,6 @@
   /* ============================================================ shared helpers */
   /** `alias` map for K.getopt from [short, long] pairs, so both spellings share one slot. */
   const aliasOf = (pairs) => Object.fromEntries(pairs.map(([s, l]) => [l, s]));
-  const sumBytes = (s) => U.byteLen(s);
-  const isRegular = (st) => st.isFile;
-
-  /** Parse a numeric option such as `-n 5`; reports the GNU message and returns null when malformed. */
-  function numberOption(ctx, value, what, status) {
-    const n = parseCount(value);
-    if (n == null) { ctx.err(ctx.name + ': ' + value + ': ' + what + '\n'); return null; }
-    return n;
-  }
 
   /* ===================================================================== wc */
   const wcWords = (text) => (text.match(/[^ \t\n\r\f\v\u0085\u00a0\u2000-\u200a\u2028\u2029\u3000]+/g) || []).length;
@@ -877,7 +872,7 @@
         if (f === '-') { width = 7; break; }
         let st;
         try { st = ctx.fs.stat(f); } catch (e) { if (!isFsError(e)) throw e; continue; }
-        if (!isRegular(st)) { width = 7; break; }
+        if (!st.isFile) { width = 7; break; }
         regular += st.size;
       }
       if (width === 1) width = String(regular).length;
@@ -2212,6 +2207,925 @@
       }
       sink.flush();
       return status;
+    },
+  });
+
+  /* ==================================================================== cksum */
+  let crcTable = null;
+  function posixCrc(bytes) {
+    if (!crcTable) {
+      crcTable = [];
+      for (let i = 0; i < 256; i++) { let c = i << 24; for (let k = 0; k < 8; k++) c = (c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1) >>> 0; crcTable.push(c >>> 0); }
+    }
+    let crc = 0;
+    const feed = (b) => { crc = (((crc << 8) >>> 0) ^ crcTable[((crc >>> 24) ^ b) & 255]) >>> 0; };
+    for (const b of bytes) feed(b);
+    for (let n = bytes.length; n > 0; n = Math.floor(n / 256)) feed(n & 255);
+    return (~crc) >>> 0;
+  }
+  const bsdChecksum = (bytes) => { let c = 0; for (const b of bytes) { c = ((c >>> 1) + ((c & 1) << 15) + b) & 0xffff; } return c; };
+  const sysvChecksum = (bytes) => { let s = 0; for (const b of bytes) s += b; s = (s & 0xffff) + (s >>> 16); return ((s & 0xffff) + (s >>> 16)) & 0xffff; };
+  const CKSUM_ALGOS = ['bsd', 'sysv', 'crc', 'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'blake2b', 'sm3'];
+
+  define({
+    name: 'cksum', pkg: 'coreutils', summary: 'compute and verify file checksums',
+    usage: ['[OPTION]... [FILE]...'],
+    desc: 'Print or verify checksums.\nBy default use the 32 bit CRC algorithm.\nWith no FILE, or when FILE is -, read standard input.',
+    opts: [['-a, --algorithm=TYPE', 'select the digest type to use.  See DIGEST below'], ['    --tag', 'create a BSD-style checksum (the default for all but bsd, sysv and crc)'], ['    --untagged', 'create a reversed style checksum, without digest type'], ['-z, --zero', 'end each output line with NUL, not newline']],
+    notes: 'DIGEST determines the digest algorithm and default output format: sysv, bsd, crc (default), md5, sha1, sha224, sha256, sha384, sha512.',
+    examples: [['cksum report.txt', 'Print the CRC, size and name.'], ['cksum -a sha256 report.txt', 'Print a BSD-style SHA256 line.']],
+    version: coreutils('Padraig Brady'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'a:cdl:tzw', long: ['algorithm=', 'tag', 'untagged', 'zero', 'base64', 'length=', 'check', 'raw'], alias: { algorithm: 'a', zero: 'z', length: 'l', check: 'c' } });
+      if (typeof g === 'number') return g;
+      const o = g.opts; const algo = o.a == null ? 'crc' : o.a;
+      if (!CKSUM_ALGOS.includes(algo)) {
+        return usageError(ctx, 'invalid argument ' + q(algo) + " for '--algorithm'\nValid arguments are:" + CKSUM_ALGOS.map((a) => '\n  - ' + q(a)).join(''));
+      }
+      if (o.l != null && !/^\d+$/.test(o.l)) { ctx.err('cksum: invalid length: ' + q(o.l) + '\n'); return 1; }
+      const eol = o.z ? '\0' : '\n'; let status = 0;
+      for (const f of g.rest.length ? g.rest : ['-']) {
+        let text;
+        try {
+          if (f !== '-' && ctx.fs.stat(f).isDir) { ctx.err('cksum: ' + f + ': Is a directory\n'); status = 1; continue; }
+          text = await readOperand(ctx, f);
+        } catch (e) { if (!isFsError(e)) throw e; ctx.err('cksum: ' + f + ': ' + e.message + '\n'); status = 1; continue; }
+        const bytes = U.toBytes(text); const name = f === '-' && !g.rest.length ? '' : f;
+        const suffix = name === '' ? '' : ' ' + name;
+        if (algo === 'crc') ctx.out(posixCrc(bytes) + ' ' + bytes.length + suffix + eol);
+        else if (algo === 'bsd') ctx.out(String(bsdChecksum(bytes)).padStart(5, '0') + ' ' + String(Math.ceil(bytes.length / 1024)).padStart(5) + suffix + eol);
+        else if (algo === 'sysv') ctx.out(sysvChecksum(bytes) + ' ' + Math.ceil(bytes.length / 512) + suffix + eol);
+        else if (!DIGESTS[algo]) { ctx.err('cksum: ' + algo + ': not supported in this simulator\n'); return 1; }
+        else {
+          const hex = DIGESTS[algo].fn(Uint8Array.from(bytes));
+          const shown = o.base64 ? btoa(String.fromCharCode.apply(null, hex.match(/../g).map((h) => parseInt(h, 16)))) : hex;
+          ctx.out((o.untagged ? shown + '  ' + name : DIGESTS[algo].label + ' (' + name + ') = ' + shown) + eol);
+        }
+      }
+      return status;
+    },
+  });
+
+  /* ===================================================================== comm */
+  define({
+    name: 'comm', pkg: 'coreutils', summary: 'compare two sorted files line by line',
+    usage: ['[OPTION]... FILE1 FILE2'],
+    desc: 'Compare sorted files FILE1 and FILE2 line by line.\nWhen FILE1 or FILE2 (not both) is -, read standard input.\nWith no options, produce three-column output. Column one contains lines unique to FILE1, column two contains lines unique to FILE2, and column three contains lines common to both files.',
+    opts: [['-1', 'suppress column 1 (lines unique to FILE1)'], ['-2', 'suppress column 2 (lines unique to FILE2)'], ['-3', 'suppress column 3 (lines that appear in both files)'],
+      ['    --check-order', 'check that the input is correctly sorted, even if all input lines are pairable'], ['    --nocheck-order', 'do not check that the input is correctly sorted'],
+      ['    --output-delimiter=STR', 'separate columns with STR'], ['    --total', 'output a summary'], ['-z, --zero-terminated', 'line delimiter is NUL, not newline']],
+    examples: [['comm -12 <(sort a.txt) <(sort b.txt)', 'Show only lines present in both files.'], ['comm -23 old.txt new.txt', 'Show lines that were removed.']],
+    version: coreutils('Richard M. Stallman and David MacKenzie'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: '123z', long: ['check-order', 'nocheck-order', 'output-delimiter=', 'total', 'zero-terminated'], alias: { 'zero-terminated': 'z' } });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      if (g.rest.length < 2) return usageError(ctx, g.rest.length ? 'missing operand after ' + q(g.rest[0]) : 'missing operand');
+      if (g.rest.length > 2) return usageError(ctx, 'extra operand ' + q(g.rest[2]));
+      const eol = o.z ? '\0' : '\n'; const delim = o['output-delimiter'] != null ? o['output-delimiter'] : '\t';
+      const lists = [];
+      for (const f of g.rest) {
+        try { const t = await readOperand(ctx, f); const p = t.split(eol); if (p[p.length - 1] === '') p.pop(); lists.push(p); }
+        catch (e) { if (!isFsError(e)) throw e; ctx.err('comm: ' + f + ': ' + e.message + '\n'); return 1; }
+      }
+      const coll = collation(ctx.env);
+      const prefix = [o[1] ? null : '', o[2] ? null : (o[1] ? '' : delim), o[3] ? null : (delim.repeat((o[1] ? 0 : 1) + (o[2] ? 0 : 1)))];
+      let i = 0; let j = 0; let status = 0; const totals = [0, 0, 0]; const warned = [false, false];
+      const check = (list, at, n) => {
+        if (o['nocheck-order'] || at === 0 || coll(list[at - 1], list[at]) <= 0) return true;
+        if (!warned[n] || o['check-order']) { ctx.err('comm: file ' + (n + 1) + ' is not in sorted order\n'); warned[n] = true; }
+        status = 1; return !o['check-order'];
+      };
+      const out = new Sink(ctx);
+      const emit = (col, line) => { totals[col]++; if (prefix[col] !== null) out.write(prefix[col] + line + eol); };
+      while (i < lists[0].length || j < lists[1].length) {
+        if (i < lists[0].length && !check(lists[0], i, 0)) break;
+        if (j < lists[1].length && !check(lists[1], j, 1)) break;
+        const c = i >= lists[0].length ? 1 : j >= lists[1].length ? -1 : coll(lists[0][i], lists[1][j]);
+        if (c < 0) emit(0, lists[0][i++]);
+        else if (c > 0) emit(1, lists[1][j++]);
+        else { emit(2, lists[0][i]); i++; j++; }
+      }
+      if (o.total) out.write(totals.join(delim) + delim + 'total' + eol);
+      out.flush();
+      if (status && !o['check-order']) ctx.err('comm: input is not in sorted order\n');
+      return status;
+    },
+  });
+
+  /* ==================================================================== paste */
+  define({
+    name: 'paste', pkg: 'coreutils', summary: 'merge lines of files',
+    usage: ['[OPTION]... [FILE]...'],
+    desc: 'Write lines consisting of the sequentially corresponding lines from each FILE, separated by TABs, to standard output.\nWith no FILE, or when FILE is -, read standard input.',
+    opts: [['-d, --delimiters=LIST', 'reuse characters from LIST instead of TABs'], ['-s, --serial', 'paste one file at a time instead of in parallel'], ['-z, --zero-terminated', 'line delimiter is NUL, not newline']],
+    notes: 'LIST characters are used in turn; \\n, \\t, \\\\ and \\0 (empty string) are understood.',
+    examples: [['paste -sd, names.txt', 'Join all lines of a file with commas.'], ['paste users.txt shells.txt', 'Put two files side by side.']],
+    version: coreutils('David M. Ihnat and Padraig Brady'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'd:sz', long: ['delimiters=', 'serial', 'zero-terminated'], alias: { delimiters: 'd', serial: 's', 'zero-terminated': 'z' } });
+      if (typeof g === 'number') return g;
+      const o = g.opts; const eol = o.z ? '\0' : '\n';
+      const list = [];
+      const spec = o.d == null ? '\t' : o.d;
+      for (let i = 0; i < spec.length; i++) {
+        if (spec[i] === '\\') {
+          const n = spec[++i];
+          if (n === undefined) { ctx.err("paste: delimiter list ends with an unescaped backslash: " + spec + '\n'); return 1; }
+          list.push(n === 'n' ? '\n' : n === 't' ? '\t' : n === '0' ? '' : n === '\\' ? '\\' : n);
+        } else list.push(spec[i]);
+      }
+      if (!list.length) list.push('');
+      const files = g.rest.length ? g.rest : ['-'];
+      const columns = []; let status = 0;
+      for (const f of files) {
+        try {
+          const t = f === '-' && columns.some((c) => c.stdin) ? '' : await readOperand(ctx, f);
+          const p = t.split(eol); if (p[p.length - 1] === '') p.pop();
+          columns.push({ lines: p, stdin: f === '-' });
+        } catch (e) { if (!isFsError(e)) throw e; ctx.err('paste: ' + f + ': ' + e.message + '\n'); status = 1; }
+      }
+      // every "-" shares one input: lines are dealt out round-robin
+      const stdinCols = columns.filter((c) => c.stdin);
+      if (stdinCols.length > 1) {
+        const all = stdinCols[0].lines;
+        stdinCols.forEach((c, k) => { c.lines = all.filter((_, n) => n % stdinCols.length === k); });
+      }
+      if (status) return 1;
+      let res = '';
+      if (o.s) {
+        for (const c of columns) {
+          res += c.lines.map((l, i) => l + (i < c.lines.length - 1 ? list[i % list.length] : '')).join('') + eol;
+        }
+      } else {
+        const rows = Math.max.apply(null, columns.map((c) => c.lines.length).concat([0]));
+        for (let r = 0; r < rows; r++) {
+          res += columns.map((c, k) => (c.lines[r] || '') + (k < columns.length - 1 ? list[k % list.length] : '')).join('') + eol;
+        }
+      }
+      ctx.out(res);
+      return 0;
+    },
+  });
+
+  /* ======================================================================= nl */
+  define({
+    name: 'nl', pkg: 'coreutils', summary: 'number lines of files',
+    usage: ['[OPTION]... [FILE]...'],
+    desc: 'Write each FILE to standard output, with line numbers added.\nWith no FILE, or when FILE is -, read standard input.',
+    opts: [['-b, --body-numbering=STYLE', 'use STYLE for numbering body lines'], ['-d, --section-delimiter=CC', 'use CC for logical page delimiters'], ['-f, --footer-numbering=STYLE', 'use STYLE for numbering footer lines'],
+      ['-h, --header-numbering=STYLE', 'use STYLE for numbering header lines'], ['-i, --line-increment=NUMBER', 'line number increment at each line'], ['-l, --join-blank-lines=NUMBER', 'group of NUMBER empty lines counted as one'],
+      ['-n, --number-format=FORMAT', 'insert line numbers according to FORMAT'], ['-p, --no-renumber', 'do not reset line numbers for each section'], ['-s, --number-separator=STRING', 'add STRING after (possible) line number'],
+      ['-v, --starting-line-number=NUMBER', 'first line number for each section'], ['-w, --number-width=NUMBER', 'use NUMBER columns for line numbers']],
+    notes: 'STYLE is one of: a (number all lines), t (number only nonempty lines), n (number no lines), pBRE (number only lines that contain a match for the basic regular expression, BRE). FORMAT is one of: ln (left justified, no leading zeros), rn (right justified, no leading zeros, the default), rz (right justified, leading zeros).',
+    examples: [['nl -ba script.sh', 'Number every line including blank ones.'], ['nl -w3 -s": " notes.txt', 'Use a narrower number column and a colon separator.']],
+    version: coreutils('Scott Bartram and David MacKenzie'),
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'b:d:f:h:i:l:n:ps:v:w:', long: ['body-numbering=', 'section-delimiter=', 'footer-numbering=', 'header-numbering=', 'line-increment=', 'join-blank-lines=', 'number-format=', 'no-renumber', 'number-separator=', 'starting-line-number=', 'number-width='],
+        alias: { 'body-numbering': 'b', 'section-delimiter': 'd', 'footer-numbering': 'f', 'header-numbering': 'h', 'line-increment': 'i', 'join-blank-lines': 'l', 'number-format': 'n', 'no-renumber': 'p', 'number-separator': 's', 'starting-line-number': 'v', 'number-width': 'w' } });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      const style = (v, dflt, what) => {
+        const s = v == null ? dflt : v;
+        if (s === 'a' || s === 't' || s === 'n') return { kind: s };
+        if (s[0] === 'p') {
+          try { return { kind: 'p', re: compilePosix(s.slice(1), 'bre') }; } catch (e) { if (e instanceof RegexError) { ctx.err('nl: ' + e.message + '\n'); return null; } throw e; }
+        }
+        usageError(ctx, 'invalid ' + what + ' numbering style: ' + q(s)); return false;
+      };
+      const body = style(o.b, 't', 'body'); const header = style(o.h, 'n', 'header'); const footer = style(o.f, 'n', 'footer');
+      if (body === false || header === false || footer === false) return 1;
+      if (!body || !header || !footer) return 1;
+      const fmt = o.n == null ? 'rn' : o.n;
+      if (!['ln', 'rn', 'rz'].includes(fmt)) return usageError(ctx, 'invalid line numbering format: ' + q(fmt));
+      const int = (v, dflt, what, min) => {
+        if (v == null) return dflt;
+        if (!/^-?\d+$/.test(v)) { ctx.err('nl: invalid ' + what + ': ' + q(v) + '\n'); return null; }
+        if (+v < min) { ctx.err('nl: invalid ' + what + ': ' + q(v) + ': Numerical result out of range\n'); return null; }
+        return parseInt(v, 10);
+      };
+      const width = int(o.w, 6, 'line number field width', 1); const incr = int(o.i, 1, 'line number increment', -Infinity);
+      const join = int(o.l, 1, 'line number of blank lines', 1); const start = int(o.v, 1, 'starting line number', -Infinity);
+      if ([width, incr, join, start].includes(null)) return 1;
+      const sep = o.s == null ? '\t' : o.s;
+      const dl = o.d == null ? '\\:' : (o.d.length === 1 ? o.d + ':' : o.d.slice(0, 2));
+      const { inputs, failed } = await readInputs(ctx, g.rest);
+      let n = start; let blanks = 0; let section = 'body'; let res = '';
+      const numberIt = (st, line) => {
+        if (st.kind === 'a') {   // -l N: only every Nth consecutive blank line is numbered
+          if (line !== '') { blanks = 0; return true; }
+          if (++blanks < join) return false;
+          blanks = 0; return true;
+        }
+        return st.kind === 't' ? line !== '' : st.kind === 'p' ? st.re.test(line) : false;
+      };
+      for (const inp of inputs) {
+        for (const line of splitLines(inp.text)) {
+          const marks = { [dl.repeat(3)]: 'header', [dl.repeat(2)]: 'body', [dl]: 'footer' };
+          if (marks[line]) { section = marks[line]; if (!o.p || section === 'header') { n = start; } blanks = 0; res += '\n'; continue; }
+          const st = section === 'header' ? header : section === 'footer' ? footer : body;
+          if (numberIt(st, line)) {
+            const num = String(n);
+            res += (fmt === 'ln' ? num.padEnd(width) : fmt === 'rz' ? (num[0] === '-' ? '-' + num.slice(1).padStart(width - 1, '0') : num.padStart(width, '0')) : num.padStart(width)) + sep + line + '\n';
+            n += incr;
+          } else res += ' '.repeat(width) + sep.replace(/[^]/g, ' ').slice(0, 0) + ' '.repeat(Array.from(sep).length) + line + '\n';
+        }
+      }
+      ctx.out(res);
+      return failed ? 1 : 0;
+    },
+  });
+
+  /* ======================================================================= rev */
+  define({
+    name: 'rev', pkg: 'util-linux', summary: 'reverse lines characterwise', style: 'util-linux',
+    usage: ['[options] [file ...]'],
+    desc: 'Reverse the order of characters in every line.',
+    opts: [[' -z, --zero', 'use NUL as line separator']],
+    examples: [["echo kali | rev", 'Print "ilak".'], ["echo 'a:b:c' | rev | cut -d: -f1 | rev", 'Take the last field of each line.']],
+    version: utilLinux,
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'zhV', long: ['zero'], alias: { zero: 'z', h: 'help', V: 'version' } });
+      if (typeof g === 'number') return g;
+      const eol = g.opts.z ? '\0' : '\n'; let status = 0; let res = '';
+      for (const f of g.rest.length ? g.rest : ['-']) {
+        let text;
+        try { text = await readOperand(ctx, f); } catch (e) { if (!isFsError(e)) throw e; ctx.err('rev: cannot open ' + f + ': ' + e.message + '\n'); status = 1; continue; }
+        const lines = text.split(eol); const noEol = lines[lines.length - 1] !== '';
+        if (!noEol) lines.pop();
+        res += lines.map((l, i) => Array.from(l).reverse().join('') + (i === lines.length - 1 && noEol ? '' : eol)).join('');
+      }
+      ctx.out(res);
+      return status;
+    },
+  });
+
+  const EXPR_HELP = [
+    "Usage: expr EXPRESSION",
+    "  or:  expr OPTION",
+    "",
+    "      --help        display this help and exit",
+    "      --version     output version information and exit",
+    "",
+    "Print the value of EXPRESSION to standard output.  A blank line below",
+    "separates increasing precedence groups.  EXPRESSION may be:",
+    "",
+    "  ARG1 | ARG2       ARG1 if it is neither null nor 0, otherwise ARG2",
+    "",
+    "  ARG1 & ARG2       ARG1 if neither argument is null or 0, otherwise 0",
+    "",
+    "  ARG1 < ARG2       ARG1 is less than ARG2",
+    "  ARG1 <= ARG2      ARG1 is less than or equal to ARG2",
+    "  ARG1 = ARG2       ARG1 is equal to ARG2",
+    "  ARG1 != ARG2      ARG1 is unequal to ARG2",
+    "  ARG1 >= ARG2      ARG1 is greater than or equal to ARG2",
+    "  ARG1 > ARG2       ARG1 is greater than ARG2",
+    "",
+    "  ARG1 + ARG2       arithmetic sum of ARG1 and ARG2",
+    "  ARG1 - ARG2       arithmetic difference of ARG1 and ARG2",
+    "",
+    "  ARG1 * ARG2       arithmetic product of ARG1 and ARG2",
+    "  ARG1 / ARG2       arithmetic quotient of ARG1 divided by ARG2",
+    "  ARG1 % ARG2       arithmetic remainder of ARG1 divided by ARG2",
+    "",
+    "  STRING : REGEXP   anchored pattern match of REGEXP in STRING",
+    "",
+    "  match STRING REGEXP        same as STRING : REGEXP",
+    "  substr STRING POS LENGTH   substring of STRING, POS counted from 1",
+    "  index STRING CHARS         index in STRING where any CHARS is found, or 0",
+    "  length STRING              length of STRING",
+    "  + TOKEN                    interpret TOKEN as a string, even if it is a",
+    "                               keyword like 'match' or an operator like '/'",
+    "",
+    "  ( EXPRESSION )             value of EXPRESSION",
+    "",
+    "Beware that many operators need to be escaped or quoted for shells.",
+    "Comparisons are arithmetic if both ARGs are numbers, else lexicographical.",
+    "Pattern matches return the string matched between \\( and \\) or null; if",
+    "\\( and \\) are not used, they return the number of characters matched or 0.",
+    "",
+    "Exit status is 0 if EXPRESSION is neither null nor 0, 1 if EXPRESSION is null",
+    "or 0, 2 if EXPRESSION is syntactically invalid, and 3 if an error occurred.",
+    "",
+    "GNU coreutils online help: <https://www.gnu.org/software/coreutils/>",
+    "Report any translation bugs to <https://translationproject.org/team/>",
+    "Full documentation <https://www.gnu.org/software/coreutils/expr>",
+    "or available locally via: info '(coreutils) expr invocation'",
+  ].join('\n') + '\n';
+
+  /* ====================================================================== expr */
+  class ExprError extends Error { constructor(msg, status) { super(msg); this.status = status || 2; } }
+
+  /** Evaluate an expr command line; values are JS strings, integers are decimal strings. */
+  function exprEvaluate(args, env) {
+    let pos = 0; let last = '';
+    const isInt = (s) => /^-?\d+$/.test(s);
+    const truthy = (s) => (isInt(s) ? BigInt(s) !== 0n : s !== '');
+    const peek = () => args[pos];
+    const take = () => { last = args[pos]; return args[pos++]; };
+    const operand = (opName) => {
+      if (pos >= args.length) throw new ExprError('syntax error: missing argument after ' + q(last || opName));
+      return take();
+    };
+    const toInt = (s) => { if (!isInt(s)) throw new ExprError('non-integer argument'); return BigInt(s); };
+    const coll = collation(env);
+
+    const orExpr = () => {
+      let l = andExpr();
+      while (peek() === '|') { take(); const r = andExpr(); l = truthy(l) ? l : truthy(r) ? r : '0'; }
+      return l;
+    };
+    const andExpr = () => {
+      let l = cmpExpr();
+      while (peek() === '&') { take(); const r = cmpExpr(); l = truthy(l) && truthy(r) ? l : '0'; }
+      return l;
+    };
+    const cmpExpr = () => {
+      let l = addExpr();
+      while (['=', '==', '!=', '<', '<=', '>', '>='].includes(peek())) {
+        const op = take(); const r = addExpr();
+        const c = isInt(l) && isInt(r) ? (BigInt(l) < BigInt(r) ? -1 : BigInt(l) > BigInt(r) ? 1 : 0) : coll(l, r);
+        const res = { '=': c === 0, '==': c === 0, '!=': c !== 0, '<': c < 0, '<=': c <= 0, '>': c > 0, '>=': c >= 0 }[op];
+        l = res ? '1' : '0';
+      }
+      return l;
+    };
+    const addExpr = () => {
+      let l = mulExpr();
+      while (peek() === '+' || peek() === '-') { const op = take(); const r = mulExpr(); l = String(op === '+' ? toInt(l) + toInt(r) : toInt(l) - toInt(r)); }
+      return l;
+    };
+    const mulExpr = () => {
+      let l = matchExpr();
+      while (peek() === '*' || peek() === '/' || peek() === '%') {
+        const op = take(); const r = matchExpr(); const a = toInt(l); const b = toInt(r);
+        if (op !== '*' && b === 0n) throw new ExprError('division by zero');
+        l = String(op === '*' ? a * b : op === '/' ? a / b : a % b);
+      }
+      return l;
+    };
+    const regexMatch = (s, pat) => {
+      let re;
+      try { re = compilePosix(pat, 'bre', { wrap: (src) => '^(?:' + src + ')' }); }
+      catch (e) { if (e instanceof RegexError) throw new ExprError(e.message); throw e; }
+      const m = re.exec(s, 0);
+      if (/\\\(/.test(pat)) return m && m[1] !== undefined ? m[1] : '';
+      return m ? String(Array.from(m[0]).length) : '0';
+    };
+    const matchExpr = () => {
+      let l = primary();
+      while (peek() === ':') { take(); l = regexMatch(l, operand(':')); }
+      return l;
+    };
+    const primary = () => {
+      if (pos >= args.length) throw new ExprError('syntax error: missing argument after ' + q(last));
+      const t = take();
+      if (t === '(') {
+        const v = orExpr();
+        if (peek() !== ')') throw new ExprError(pos >= args.length ? "syntax error: expecting ')' after " + q(last) : "syntax error: expecting ')' instead of " + q(peek()));
+        take(); return v;
+      }
+      if (t === '+') return operand('+');
+      if (t === 'length') return String(Array.from(operand('length')).length);
+      if (t === 'match') { const s = operand('match'); return regexMatch(s, operand('match')); }
+      if (t === 'index') { const s = operand('index'); const set = operand('index'); const at = Array.from(s).findIndex((c) => set.includes(c)); return String(at + 1); }
+      if (t === 'substr') {
+        const s = Array.from(operand('substr')); const p = toInt(operand('substr')); const n = toInt(operand('substr'));
+        if (p <= 0n || n <= 0n || p > BigInt(s.length)) return '';
+        return s.slice(Number(p) - 1, Number(p) - 1 + Number(n)).join('');
+      }
+      if (t === ')') { pos--; throw new ExprError('syntax error: unexpected ' + q(t)); }
+      if (['|', '&', '=', '==', '!=', '<', '<=', '>', '>=', '*', '/', '%', ':'].includes(t)) { pos--; throw new ExprError('syntax error: unexpected argument ' + q(t)); }
+      return t;
+    };
+
+    if (!args.length) throw new ExprError('missing operand');
+    const v = orExpr();
+    if (pos < args.length) throw new ExprError('syntax error: unexpected argument ' + q(args[pos]));
+    return v;
+  }
+
+  K.cmd.register({
+    name: 'expr', pkg: 'coreutils', section: 1, summary: 'evaluate expressions',
+    synopsis: 'expr EXPRESSION',
+    man: () => manBody({
+      desc: 'Print the value of EXPRESSION to standard output. A blank line below separates increasing precedence groups. EXPRESSION may be:\n\nARG1 | ARG2   ARG1 if it is neither null nor 0, otherwise ARG2\nARG1 & ARG2   ARG1 if neither argument is null or 0, otherwise 0\nARG1 < ARG2, <=, =, ==, !=, >=, >   comparison\nARG1 + ARG2, ARG1 - ARG2   arithmetic sum or difference\nARG1 * ARG2, ARG1 / ARG2, ARG1 % ARG2   arithmetic product, quotient, remainder\nSTRING : REGEXP   anchored pattern match of REGEXP in STRING\nmatch STRING REGEXP, substr STRING POS LENGTH, index STRING CHARS, length STRING   string functions\n( EXPRESSION )   value of EXPRESSION\n\nBeware that many operators need to be escaped or quoted for shells.',
+      exit: '0 if EXPRESSION is neither null nor 0, 1 if EXPRESSION is null or 0, 2 if EXPRESSION is syntactically invalid, and 3 if an error occurred.',
+      examples: [['expr 2 + 3 \\* 4', 'Prints 14.'], ["expr 'kali-linux' : '.*-\\(.*\\)'", 'Prints "linux", the part inside \\( \\).']],
+    }),
+    run(ctx) {
+      if (ctx.args.length === 1 && ctx.args[0] === '--help') { ctx.out(EXPR_HELP); return 0; }
+      if (ctx.args.length === 1 && ctx.args[0] === '--version') { ctx.out(coreutils('Mike Parker, James Youngman, and Paul Eggert')('expr')); return 0; }
+      try {
+        const v = exprEvaluate(ctx.args[0] === '--' ? ctx.args.slice(1) : ctx.args, ctx.env);
+        ctx.out(v + '\n');
+        return /^-?0+$/.test(v) || v === '' ? 1 : 0;
+      } catch (e) {
+        if (!(e instanceof ExprError)) throw e;
+        if (e.message === 'missing operand') return usageError(ctx, e.message, e.status);
+        ctx.err('expr: ' + e.message + '\n');
+        return e.status;
+      }
+    },
+  });
+
+  /* ===================================================================== column */
+  define({
+    name: 'column', pkg: 'util-linux', summary: 'columnate lists', style: 'util-linux',
+    usage: ['[options] [<file>...]'],
+    desc: 'Columnate lists.',
+    opts: [[' -t, --table', 'create a table'], [' -s, --separator <string>', 'possible table delimiters'], [' -o, --output-separator <string>', 'columns delimiter for table output (default is two spaces)'],
+      [' -c, --output-width <width>', 'width of output in number of characters'], [' -x, --fillrows', 'fill rows before columns'], [' -N, --table-columns <names>', 'comma separated columns names'],
+      [' -R, --table-right <columns>', 'right align text in these columns'], [' -n, --table-noextreme', 'ignore extreme columns']],
+    examples: [["mount | column -t", 'Align the output of a command into a table.'], ["column -t -s: /etc/passwd", 'Show /etc/passwd as a table.']],
+    version: utilLinux,
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'tns:o:c:xN:R:LJhV', long: ['table', 'table-noextreme', 'separator=', 'output-separator=', 'output-width=', 'fillrows', 'table-columns=', 'table-right=', 'table-empty-lines', 'json', 'keep-empty-lines'],
+        alias: { table: 't', separator: 's', 'output-separator': 'o', 'output-width': 'c', fillrows: 'x', 'table-columns': 'N', 'table-right': 'R', 'table-empty-lines': 'L', json: 'J', 'table-noextreme': 'n' } });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      const { inputs, failed } = await readInputs(ctx, g.rest, (name, e) => 'cannot open ' + name + ': ' + e.message);
+      const lines = [].concat(...inputs.map((i) => splitLines(i.text)));
+      const width = o.c != null ? parseInt(o.c, 10) : ctx.isTTY ? ctx.cols : 80;
+      let res = '';
+      if (o.t) {
+        const sepSet = o.s;
+        const split = (l) => (sepSet == null ? l.split(/[ \t]+/).filter((x, i) => x !== '' || i > 0).filter((x) => x !== '') : l.split(new RegExp('[' + U.escapeRe(sepSet).replace(/[\]\\^-]/g, '\\$&') + ']')));
+        const rows = lines.filter((l) => o.L || l.trim() !== '').map(split);
+        const cols = Math.max.apply(null, rows.map((r) => r.length).concat([0]));
+        const names = o.N ? o.N.split(',') : null;
+        const widths = Array.from({ length: cols }, (_, c) => Math.max.apply(null, rows.map((r) => Array.from(r[c] || '').length).concat(names ? [Array.from(names[c] || '').length] : [0])));
+        const right = new Set((o.R || '').split(',').filter(Boolean).map((n) => (names && names.includes(n) ? names.indexOf(n) : parseInt(n, 10) - 1)));
+        const outSep = o.o == null ? '  ' : o.o;
+        const fmt = (r) => r.map((cell, c) => {
+          const last = c === r.length - 1; const w = widths[c];
+          const len = Array.from(cell).length;
+          return right.has(c) ? ' '.repeat(w - len) + cell : last ? cell : cell + ' '.repeat(w - len);
+        }).join(outSep);
+        if (names) res += fmt(names.slice(0, cols)) + '\n';
+        res += rows.map((r) => fmt(r) + '\n').join('');
+      } else {
+        const entries = lines.filter((l) => l !== '');
+        if (!entries.length) { ctx.out(''); return failed ? 1 : 0; }
+        const TAB = 8;
+        let maxLen = Math.max.apply(null, entries.map((e) => Array.from(e).length));
+        maxLen = (maxLen + TAB) & ~(TAB - 1);
+        const numCols = Math.max(1, Math.floor(width / maxLen));
+        if (o.x) {
+          for (let i = 0; i < entries.length; i += numCols) {
+            const row = entries.slice(i, i + numCols); let out = ''; let chcnt = 0;
+            row.forEach((e, k) => {
+              out += e; chcnt += Array.from(e).length;
+              if (k < row.length - 1) { const target = (k + 1) * maxLen; while (((chcnt + TAB) & ~(TAB - 1)) <= target) { out += '\t'; chcnt = (chcnt + TAB) & ~(TAB - 1); } }
+            });
+            res += out + '\n';
+          }
+        } else {
+          const numRows = Math.ceil(entries.length / numCols);
+          for (let row = 0; row < numRows; row++) {
+            let out = ''; let chcnt = 0; let endcol = maxLen;
+            for (let base = row; base < entries.length; base += numRows) {
+              out += entries[base]; chcnt += Array.from(entries[base]).length;
+              if (base + numRows >= entries.length) break;
+              let next;
+              while ((next = (chcnt + TAB) & ~(TAB - 1)) <= endcol) { out += '\t'; chcnt = next; }
+              endcol += maxLen;
+            }
+            res += out + '\n';
+          }
+        }
+      }
+      ctx.out(res);
+      return failed ? 1 : 0;
+    },
+  });
+
+  /* ======================================================================= cmp */
+  const cmpControl = (b) => (b >= 128 ? 'M-' + cmpControl(b - 128) : b < 32 ? '^' + String.fromCharCode(b + 64) : b === 127 ? '^?' : String.fromCharCode(b));
+  const CMP_USAGE_HINT = "cmp: Try 'cmp --help' for more information.\n";
+  define({
+    name: 'cmp', pkg: 'diffutils', summary: 'compare two files byte by byte',
+    usage: ['[OPTION]... FILE1 [FILE2 [SKIP1 [SKIP2]]]'],
+    desc: 'Compare two files byte by byte.\n\nThe optional SKIP1 and SKIP2 specify the number of bytes to skip at the beginning of each file (zero by default).\nIf a FILE is \'-\' or missing, read standard input.',
+    opts: [['-b, --print-bytes', 'print differing bytes'], ['-i, --ignore-initial=SKIP', 'skip first SKIP bytes of both inputs'], ['-i, --ignore-initial=SKIP1:SKIP2', 'skip first SKIP1 bytes of FILE1 and first SKIP2 bytes of FILE2'],
+      ['-l, --verbose', 'output byte numbers and differing byte values'], ['-n, --bytes=LIMIT', 'compare at most LIMIT bytes'], ['-s, --quiet, --silent', 'suppress all normal output']],
+    exit: '0 if inputs are the same, 1 if different, 2 if trouble.',
+    examples: [['cmp original.bin patched.bin', 'Report the first byte where two files differ.'], ['cmp -l a.bin b.bin | wc -l', 'Count the differing bytes.']],
+    version: (name) => name + ' (GNU diffutils) 3.12\nCopyright (C) 2025 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Torbjorn Granlund and David MacKenzie.\n',
+    badOption(ctx, msg) { ctx.err('cmp: ' + msg + '\n' + CMP_USAGE_HINT); return 2; },
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, { short: 'bi:ln:sv', long: ['print-bytes', 'ignore-initial=', 'verbose', 'bytes=', 'quiet', 'silent'], alias: { 'print-bytes': 'b', 'ignore-initial': 'i', verbose: 'l', bytes: 'n', quiet: 's', silent: 's' } });
+      if (typeof g === 'number') return g;
+      const o = g.opts; const fail = (m) => { ctx.err('cmp: ' + m + '\n' + CMP_USAGE_HINT); return 2; };
+      if (!g.rest.length) return fail("missing operand after 'cmp'");
+      if (g.rest.length > 4) return fail('extra operand ' + q(g.rest[4]));
+      const num = (v, what) => (/^\d+$/.test(v) ? parseInt(v, 10) : null);
+      let skip1 = 0; let skip2 = 0;
+      if (o.i != null) {
+        const [a, b] = String(o.i).split(':');
+        skip1 = num(a); skip2 = b == null ? skip1 : num(b);
+        if (skip1 == null || skip2 == null) return fail('invalid --ignore-initial value ' + q(o.i));
+      }
+      const ops = g.rest.slice(); const [f1, f2 = '-'] = ops;
+      if (ops[2] != null) { skip1 = num(ops[2]); if (skip1 == null) return fail('invalid --ignore-initial value ' + q(ops[2])); skip2 = 0; if (ops[3] != null) { skip2 = num(ops[3]); if (skip2 == null) return fail('invalid --ignore-initial value ' + q(ops[3])); } }
+      let limit = Infinity;
+      if (o.n != null) { limit = num(o.n); if (limit == null) return fail('invalid --bytes value ' + q(o.n)); }
+      const load = async (f) => { try { return U.toBytes(await readOperand(ctx, f)); } catch (e) { if (!isFsError(e)) throw e; if (!o.s) ctx.err('cmp: ' + f + ': ' + e.message + '\n'); return null; } };
+      const a = await load(f1); const b = await load(f2);
+      if (!a || !b) return 2;
+      if (f1 === f2 && skip1 === skip2) return 0;
+      const A = a.slice(skip1); const B = b.slice(skip2);
+      const n = Math.min(A.length, B.length, limit);
+      const width = String(Math.min(A.length, B.length, limit)).length;
+      let line = 1; let status = 0; const sink = new Sink(ctx);
+      for (let i = 0; i < n; i++) {
+        if (A[i] !== B[i]) {
+          status = 1;
+          if (o.s) return 1;
+          if (!o.l) {
+            sink.flush();
+            ctx.out(f1 + ' ' + f2 + ' differ: byte ' + (i + 1) + ', line ' + line + (o.b ? ' is ' + A[i].toString(8).padStart(3) + ' ' + cmpControl(A[i]) + ' ' + B[i].toString(8).padStart(3) + ' ' + cmpControl(B[i]) : '') + '\n');
+            return 1;
+          }
+          sink.line(String(i + 1).padStart(width) + ' ' + A[i].toString(8).padStart(3) + (o.b ? ' ' + cmpControl(A[i]).padEnd(4) : '') + ' ' + B[i].toString(8).padStart(3) + (o.b ? ' ' + cmpControl(B[i]) : ''));
+        }
+        if (A[i] === 10) line++;
+      }
+      sink.flush();
+      if (A.length !== B.length && n < limit) {
+        if (!o.s) ctx.err('cmp: EOF on ' + (A.length < B.length ? f1 : f2) + ' after byte ' + n + (o.l ? '' : ', line ' + (line - (n > 0 && A[n - 1] === 10 ? 1 : 0))) + '\n');
+        return 1;
+      }
+      return status;
+    },
+  });
+
+  /* ====================================================================== diff */
+  /*
+   * The line-matching core follows GNU diff (analyze.c / diffseq.h): useless
+   * lines are discarded first, the rest is matched by a divide-and-conquer
+   * shortest edit script, and change runs are then slid to line up with
+   * their neighbours. Matching that procedure is what makes ambiguous
+   * diffs come out the same as the real tool.
+   */
+
+  /** Mark lines that cannot usefully take part in the match (1 = no match, 2 = provisional: very common). */
+  function discardConfusing(eq, otherCount) {
+    const n = eq.length; const discards = new Array(n).fill(0);
+    let many = 5; let tem = n >> 6;
+    while ((tem >>= 2) > 0) many *= 2;
+    for (let i = 0; i < n; i++) {
+      const nmatch = otherCount.get(eq[i]) || 0;
+      if (nmatch === 0) discards[i] = 1; else if (nmatch > many) discards[i] = 2;
+    }
+    for (let i = 0; i < n; i++) {
+      if (discards[i] === 2) { discards[i] = 0; continue; }
+      if (discards[i] === 0) continue;
+      let j = i; let provisional = 0;
+      for (; j < n; j++) { if (discards[j] === 0) break; if (discards[j] === 2) provisional++; }
+      while (j > i && discards[j - 1] === 2) { discards[--j] = 0; provisional--; }
+      const length = j - i;
+      if (provisional * 4 > length) { while (j > i) if (discards[--j] === 2) discards[j] = 0; continue; }
+      let minimum = 1; let t = length >> 2;
+      while ((t >>= 2) > 0) minimum *= 2;
+      minimum++;
+      let consec = 0;
+      for (j = 0; j < length; j++) {
+        if (discards[i + j] !== 2) consec = 0;
+        else if (minimum === ++consec) j -= consec;
+        else if (minimum < consec) discards[i + j] = 0;
+      }
+      for (j = 0, consec = 0; j < length; j++) {
+        if (j >= 8 && discards[i + j] === 1) break;
+        if (discards[i + j] === 2) { consec = 0; discards[i + j] = 0; } else if (discards[i + j] === 0) consec = 0; else consec++;
+        if (consec === 3) break;
+      }
+      i += length - 1;
+      for (j = 0, consec = 0; j < length; j++) {
+        if (j >= 8 && discards[i - j] === 1) break;
+        if (discards[i - j] === 2) { consec = 0; discards[i - j] = 0; } else if (discards[i - j] === 0) consec = 0; else consec++;
+        if (consec === 3) break;
+      }
+    }
+    return discards;
+  }
+
+  /** compareseq: mark the lines of x and y that are not part of a shortest common subsequence. */
+  function compareSeq(x, y, markX, markY) {
+    const size = x.length + y.length + 3;
+    const fd = new Int32Array(size); const bd = new Int32Array(size); const mid = y.length + 1;
+    const seq = (xoff, xlim, yoff, ylim) => {
+      while (xoff < xlim && yoff < ylim && x[xoff] === y[yoff]) { xoff++; yoff++; }
+      while (xoff < xlim && yoff < ylim && x[xlim - 1] === y[ylim - 1]) { xlim--; ylim--; }
+      if (xoff === xlim) { while (yoff < ylim) markY(yoff++); return; }
+      if (yoff === ylim) { while (xoff < xlim) markX(xoff++); return; }
+      const dmin = xoff - ylim; const dmax = xlim - yoff; const fmid = xoff - yoff; const bmid = xlim - ylim;
+      let fmin = fmid; let fmax = fmid; let bmin = bmid; let bmax = bmid;
+      const odd = ((fmid - bmid) & 1) !== 0;
+      fd[mid + fmid] = xoff; bd[mid + bmid] = xlim;
+      let xmid = 0; let ymid = 0;
+      search: for (;;) {
+        if (fmin > dmin) fd[mid + --fmin - 1] = -1; else ++fmin;
+        if (fmax < dmax) fd[mid + ++fmax + 1] = -1; else --fmax;
+        for (let d = fmax; d >= fmin; d -= 2) {
+          const tlo = fd[mid + d - 1]; const thi = fd[mid + d + 1];
+          const x0 = tlo < thi ? thi : tlo + 1;
+          let px = x0; let py = x0 - d;
+          while (px < xlim && py < ylim && x[px] === y[py]) { px++; py++; }
+          fd[mid + d] = px;
+          if (odd && bmin <= d && d <= bmax && bd[mid + d] <= px) { xmid = px; ymid = py; break search; }
+        }
+        if (bmin > dmin) bd[mid + --bmin - 1] = 0x7fffffff; else ++bmin;
+        if (bmax < dmax) bd[mid + ++bmax + 1] = 0x7fffffff; else --bmax;
+        for (let d = bmax; d >= bmin; d -= 2) {
+          const tlo = bd[mid + d - 1]; const thi = bd[mid + d + 1];
+          const x0 = tlo < thi ? tlo : thi - 1;
+          let px = x0; let py = x0 - d;
+          while (xoff < px && yoff < py && x[px - 1] === y[py - 1]) { px--; py--; }
+          bd[mid + d] = px;
+          if (!odd && fmin <= d && d <= fmax && px <= fd[mid + d]) { xmid = px; ymid = py; break search; }
+        }
+      }
+      seq(xoff, xmid, yoff, ymid);
+      seq(xmid, xlim, ymid, ylim);
+    };
+    seq(0, x.length, 0, y.length);
+  }
+
+  /** Slide each run of changed lines as GNU diff does so that it merges with, or lines up against, changes in the other file. */
+  function shiftBoundaries(eqs, changed) {
+    for (let f = 0; f < 2; f++) {
+      const ch = changed[f]; const other = changed[1 - f]; const equivs = eqs[f]; const end = equivs.length;
+      let i = 0; let j = 0;
+      for (;;) {
+        while (i < end && !ch[i + 1]) { while (other[j++ + 1]) { /* skip changed lines of the other file */ } i++; }
+        if (i === end) break;
+        let start = i; let runlength; let corresponding;
+        while (ch[++i + 1]) { /* find the end of the run */ }
+        while (other[j + 1]) j++;
+        do {
+          runlength = i - start;
+          while (start && equivs[start - 1] === equivs[i - 1]) {
+            ch[--start + 1] = 1; ch[--i + 1] = 0;
+            while (ch[start]) start--;
+            while (other[--j + 1]) { /* step back over the other file's changes */ }
+          }
+          corresponding = other[j] ? i : end;
+          while (i !== end && equivs[start] === equivs[i]) {
+            ch[start++ + 1] = 0; ch[i++ + 1] = 1;
+            while (ch[i + 1]) i++;
+            while (other[++j + 1]) corresponding = i;
+          }
+        } while (runlength !== i - start);
+        while (corresponding < i) {
+          ch[--start + 1] = 1; ch[--i + 1] = 0;
+          while (other[--j + 1]) { /* step back */ }
+        }
+      }
+    }
+  }
+
+  /**
+   * Hunks {a0, a1, b0, b1} turning key array a into key array b, as GNU diff would choose them.
+   * Identical lines at both ends are left out of the comparison except for `keep` lines of context.
+   */
+  function diffHunks(a, b, keep) {
+    let prefix = 0;
+    while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++;
+    let suffix = 0;
+    while (suffix < a.length - prefix && suffix < b.length - prefix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
+    const skipHead = Math.max(0, prefix - keep); const skipTail = Math.max(0, suffix - keep);
+    const sa = a.slice(skipHead, a.length - skipTail); const sb = b.slice(skipHead, b.length - skipTail);
+    const ids = new Map(); const id = (k) => { if (!ids.has(k)) ids.set(k, ids.size); return ids.get(k); };
+    const ea = sa.map(id); const eb = sb.map(id);
+    const count = (e) => { const m = new Map(); for (const v of e) m.set(v, (m.get(v) || 0) + 1); return m; };
+    const da = discardConfusing(ea, count(eb)); const db = discardConfusing(eb, count(ea));
+    const kept = (e, d) => { const idx = []; e.forEach((_, i) => { if (!d[i]) idx.push(i); }); return idx; };
+    const ia = kept(ea, da); const ib = kept(eb, db);
+    const changed = [new Int8Array(ea.length + 2), new Int8Array(eb.length + 2)];
+    da.forEach((v, i) => { if (v) changed[0][i + 1] = 1; });
+    db.forEach((v, i) => { if (v) changed[1][i + 1] = 1; });
+    compareSeq(ia.map((i) => ea[i]), ib.map((i) => eb[i]), (x) => { changed[0][ia[x] + 1] = 1; }, (y) => { changed[1][ib[y] + 1] = 1; });
+    shiftBoundaries([ea, eb], changed);
+    const hunks = []; let i = 0; let j = 0;
+    while (i < ea.length || j < eb.length) {
+      if (i < ea.length && j < eb.length && !changed[0][i + 1] && !changed[1][j + 1]) { i++; j++; continue; }
+      const a0 = i; const b0 = j;
+      while (i < ea.length && changed[0][i + 1]) i++;
+      while (j < eb.length && changed[1][j + 1]) j++;
+      hunks.push({ a0: a0 + skipHead, a1: i + skipHead, b0: b0 + skipHead, b1: j + skipHead });
+    }
+    return hunks;
+  }
+
+  const diffStamp = (ms, long) => {
+    const d = new Date(ms);
+    if (long) return d.toISOString().replace('T', ' ').replace(/\.(\d{3})Z$/, (m, f) => '.' + f + '000000 +0000');
+    const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()];
+    const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+    const p = (n) => String(n).padStart(2, '0');
+    return day + ' ' + mon + ' ' + String(d.getUTCDate()).padStart(2) + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()) + ' ' + d.getUTCFullYear();
+  };
+
+  /** Split file text into lines, remembering whether the last one lacks its newline. */
+  function diffLines(text) {
+    const lines = splitLines(text);
+    return { lines, noEol: text !== '' && !text.endsWith('\n') };
+  }
+
+  /** Group hunks that are close enough for their context lines to touch. */
+  function diffGroups(hunks, context) {
+    const groups = [];
+    for (const h of hunks) {
+      const g = groups[groups.length - 1];
+      if (g && h.a0 - g[g.length - 1].a1 <= 2 * context) g.push(h); else groups.push([h]);
+    }
+    return groups;
+  }
+
+  /** Render hunks in the requested style. fa/fb: {lines, noEol, label, stamp}. */
+  function diffRender(style, hunks, fa, fb, o) {
+    const colour = o.colour; const paint = (code, s) => (colour ? '\x1b[' + code + 'm' + s + '\x1b[0m' : s);
+    const text = (f, i) => f.lines[i] + '\n' + (f.noEol && i === f.lines.length - 1 ? '\\ No newline at end of file\n' : '');
+    const colorLine = (code, f, i, prefix) => {
+      const t = f.lines[i];
+      return paint(code, prefix + t) + '\n' + (f.noEol && i === f.lines.length - 1 ? '\\ No newline at end of file\n' : '');
+    };
+    const stamped = (f, long) => f.label + (f.stamped ? '\t' + diffStamp(f.stamp, long) : '');
+    const range = (x0, x1) => (x1 - x0 === 1 ? String(x0 + 1) : (x1 === x0 ? x0 : x0 + 1) + ',' + x1);
+    let out = '';
+    if (style === 'normal') {
+      for (const h of hunks) {
+        const kind = h.a1 === h.a0 ? 'a' : h.b1 === h.b0 ? 'd' : 'c';
+        out += paint('36', (kind === 'a' ? h.a0 : range(h.a0, h.a1)) + kind + (kind === 'd' ? h.b0 : range(h.b0, h.b1))) + '\n';
+        for (let i = h.a0; i < h.a1; i++) out += colorLine('31', fa, i, '< ');
+        if (kind === 'c') out += '---\n';
+        for (let j = h.b0; j < h.b1; j++) out += colorLine('32', fb, j, '> ');
+      }
+      return out;
+    }
+    const ctx = o.context;
+    if (style === 'unified') {
+      out += paint('1', '--- ' + stamped(fa, true)) + '\n' + paint('1', '+++ ' + stamped(fb, true)) + '\n';
+      const urange = (s, e) => (e - s === 1 ? String(s + 1) : (e === s ? s : s + 1) + ',' + (e - s));
+      for (const g of diffGroups(hunks, ctx)) {
+        const s = Math.max(0, g[0].a0 - ctx); const sb = g[0].b0 - (g[0].a0 - s);
+        const eA = Math.min(fa.lines.length, g[g.length - 1].a1 + ctx); const eB = g[g.length - 1].b1 + (eA - g[g.length - 1].a1);
+        out += paint('36', '@@ -' + urange(s, eA) + ' +' + urange(sb, eB) + ' @@') + '\n';
+        let i = s;
+        for (const h of g) {
+          for (; i < h.a0; i++) out += ' ' + text(fa, i);
+          for (let k = h.a0; k < h.a1; k++) out += colorLine('31', fa, k, '-');
+          for (let k = h.b0; k < h.b1; k++) out += colorLine('32', fb, k, '+');
+          i = h.a1;
+        }
+        for (; i < eA; i++) out += ' ' + text(fa, i);
+      }
+      return out;
+    }
+    // context style
+    out += paint('1', '*** ' + stamped(fa, o.isoStamps)) + '\n' + paint('1', '--- ' + stamped(fb, o.isoStamps)) + '\n';
+    const crange = (s, e) => (e - s === 0 ? String(s) : e - s === 1 ? String(s + 1) : (s + 1) + ',' + e);
+    for (const g of diffGroups(hunks, ctx)) {
+      const s = Math.max(0, g[0].a0 - ctx); const sb = g[0].b0 - (g[0].a0 - s);
+      const eA = Math.min(fa.lines.length, g[g.length - 1].a1 + ctx); const eB = g[g.length - 1].b1 + (eA - g[g.length - 1].a1);
+      out += '***************\n' + paint('36', '*** ' + crange(s, eA) + ' ****') + '\n';
+      const side = (f, from, to, own, other, markChange, markOwn, code) => {
+        let res = ''; let i = from;
+        for (const h of g) {
+          for (; i < h[own + '0']; i++) res += colorLine(code, f, i, '  ');
+          const changed = h[other + '1'] > h[other + '0'];
+          for (let k = h[own + '0']; k < h[own + '1']; k++) res += colorLine(code, f, k, (changed ? markChange : markOwn) + ' ');
+          i = h[own + '1'];
+        }
+        for (; i < to; i++) res += colorLine(code, f, i, '  ');
+        return res;
+      };
+      const hasOld = g.some((h) => h.a1 > h.a0); const hasNew = g.some((h) => h.b1 > h.b0);
+      if (hasOld) out += side(fa, s, eA, 'a', 'b', '!', '-', '31');
+      out += paint('36', '--- ' + crange(sb, eB) + ' ----') + '\n';
+      if (hasNew) out += side(fb, sb, eB, 'b', 'a', '!', '+', '32');
+    }
+    return out;
+  }
+
+  define({
+    name: 'diff', pkg: 'diffutils', summary: 'compare files line by line',
+    usage: ['[OPTION]... FILES'],
+    desc: 'Compare FILES line by line.\nIf a FILE is \'-\', read standard input. When comparing directories, each file in one is compared with the file of the same name in the other.\nExit status is 0 if inputs are the same, 1 if different, 2 if trouble.',
+    opts: [['    --normal', 'output a normal diff (the default)'], ['-q, --brief', 'report only when files differ'], ['-s, --report-identical-files', 'report when two files are the same'],
+      ['-c, -C NUM, --context[=NUM]', 'output NUM (default 3) lines of copied context'], ['-u, -U NUM, --unified[=NUM]', 'output NUM (default 3) lines of unified context'],
+      ['-L, --label LABEL', 'use LABEL instead of file name and timestamp'], ['-i, --ignore-case', 'ignore case differences in file contents'], ['-b, --ignore-space-change', 'ignore changes in the amount of white space'],
+      ['-w, --ignore-all-space', 'ignore all white space'], ['-B, --ignore-blank-lines', 'ignore changes where lines are all blank'], ['    --strip-trailing-cr', 'strip trailing carriage return on input'],
+      ['-a, --text', 'treat all files as text'], ['-r, --recursive', 'recursively compare any subdirectories found'], ['-N, --new-file', 'treat absent files as empty'],
+      ['-x, --exclude=PAT', 'exclude files that match PAT'], ['    --color[=WHEN]', 'colorize the output; WHEN can be never, always, or auto']],
+    examples: [['diff -u /etc/hosts.orig /etc/hosts', 'Show how a file changed, in unified format.'], ['diff -rq site_old site_new', 'List which files differ between two directory trees.']],
+    version: (name) => name + ' (GNU diffutils) 3.12\nCopyright (C) 2025 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Paul Eggert, Mike Haertel, David Hayes,\nRichard Stallman, and Len Tower.\n',
+    badOption(ctx, msg) { ctx.err('diff: ' + msg + "\ndiff: Try 'diff --help' for more information.\n"); return 2; },
+    async run(ctx, d) {
+      const g = parseArgs(ctx, d, {
+        short: 'abBcC:dEiL:NpqrsTtuU:wx:ZX:I:', long: ['normal', 'brief', 'report-identical-files', 'context=?', 'unified=?', 'label=', 'ignore-case', 'ignore-space-change', 'ignore-all-space', 'ignore-blank-lines', 'strip-trailing-cr',
+          'text', 'recursive', 'new-file', 'exclude=', 'color=?', 'colour=?', 'minimal', 'show-c-function', 'initial-tab', 'expand-tabs', 'ignore-tab-expansion', 'ignore-trailing-space', 'exclude-from=', 'unidirectional-new-file', 'ignore-matching-lines='],
+        alias: { brief: 'q', 'report-identical-files': 's', context: 'C', unified: 'U', label: 'L', 'ignore-case': 'i', 'ignore-space-change': 'b', 'ignore-all-space': 'w', 'ignore-blank-lines': 'B', text: 'a', recursive: 'r', 'new-file': 'N', exclude: 'x', colour: 'color', 'ignore-trailing-space': 'Z', 'show-c-function': 'p', 'ignore-matching-lines': 'I', minimal: 'd' },
+      });
+      if (typeof g === 'number') return g;
+      const o = g.opts;
+      const trouble = (m) => { ctx.err('diff: ' + m + '\n'); return 2; };
+      if (g.rest.length < 2) return trouble(g.rest.length ? "missing operand after '" + g.rest[0] + "'\ndiff: Try 'diff --help' for more information." : "missing operand after 'diff'\ndiff: Try 'diff --help' for more information.");
+      if (g.rest.length > 2) return trouble("extra operand '" + g.rest[2] + "'\ndiff: Try 'diff --help' for more information.");
+      let style = 'normal'; let context = 3;
+      const ctxArg = (v) => { if (v === true || v == null) return 3; const n = parseCount(v); return n == null ? NaN : n; };
+      if (o.U != null || o.u) { style = 'unified'; context = ctxArg(o.U); }
+      if (o.C != null || o.c) { style = o.C != null && o.u ? 'unified' : 'context'; context = ctxArg(o.C); }
+      if (isNaN(context)) return trouble('invalid context length ' + q(String(o.U != null ? o.U : o.C)));
+      let colour = false;
+      if (o.color != null) { const w = o.color === true ? 'auto' : o.color; colour = w === 'always' || w === 'yes' || w === 'force' || (/^(auto|tty|if-tty)$/.test(w) && ctx.isTTY); }
+      const excludes = (g.all.x || []).map((p) => U.globToRe(p));
+      const opts = { colour, context, isoStamps: !cLocale(ctx.env) };   // context headers use ctime format only in the C locale
+      const keyOf = (line, last) => {
+        let k = line;
+        if (o['strip-trailing-cr']) k = k.replace(/\r$/, '');
+        if (o.Z) k = k.replace(/[ \t]+$/, '');
+        if (o.w) k = k.replace(/[ \t\r\f\v]+/g, ''); else if (o.b) k = k.replace(/[ \t\r\f\v]+/g, ' ').replace(/ $/, '');
+        if (o.i) k = k.toLowerCase();
+        return k + (last ? '\0' : '');
+      };
+      const cmdOptions = ctx.args.filter((a, i) => { const at = ctx.args.lastIndexOf(g.rest[0]); const at2 = ctx.args.lastIndexOf(g.rest[1]); return i !== at && i !== at2; });
+      let differ = false; let trouble2 = false;
+      const out = new Sink(ctx);
+      const printHeader = (a, b) => out.write('diff' + (cmdOptions.length ? ' ' + cmdOptions.join(' ') : '') + ' ' + a + ' ' + b + '\n');
+
+      const readSide = async (path, label) => {
+        if (path === null) return { text: '', stamp: Date.now(), label };
+        if (path === '-') return { text: await stdinText(ctx), stamp: ctx.machine ? K.clock.now() : Date.now(), label };
+        const st = ctx.fs.stat(path);
+        return { text: ctx.fs.read(path), stamp: st.mtime, label };
+      };
+      const compareFiles = async (pa, pb, la, lb, header) => {
+        let A; let B;
+        let failing = la;
+        try { A = await readSide(pa, la); failing = lb; B = await readSide(pb, lb); }
+        catch (e) { if (!isFsError(e)) throw e; out.flush(); ctx.err('diff: ' + failing + ': ' + e.message + '\n'); trouble2 = true; return; }
+        const binary = !o.a && (A.text.includes('\0') || B.text.includes('\0'));
+        const labels = g.all.L || [];
+        const fa = Object.assign(diffLines(A.text), { label: labels[0] || A.label, stamped: !labels[0], stamp: A.stamp });
+        const fb = Object.assign(diffLines(B.text), { label: labels[1] || B.label, stamped: !labels[1], stamp: B.stamp });
+        if (A.text === B.text || (!binary && !o.i && !o.w && !o.b && !o.Z && !o['strip-trailing-cr'] && !o.B && false)) {
+          if (o.s) { out.write('Files ' + la + ' and ' + lb + ' are identical\n'); }
+          return;
+        }
+        const ka = fa.lines.map((l, i) => keyOf(l, fa.noEol && i === fa.lines.length - 1));
+        const kb = fb.lines.map((l, i) => keyOf(l, fb.noEol && i === fb.lines.length - 1));
+        let hunks = binary ? [{ a0: 0, a1: 1, b0: 0, b1: 1 }] : diffHunks(ka, kb, style === 'normal' ? 0 : context);
+        if (o.B && !binary) hunks = hunks.filter((h) => fa.lines.slice(h.a0, h.a1).some((l) => l !== '') || fb.lines.slice(h.b0, h.b1).some((l) => l !== ''));
+        if (!hunks.length) { if (o.s) out.write('Files ' + la + ' and ' + lb + ' are identical\n'); return; }
+        differ = true;
+        if (header) printHeader(la, lb);
+        if (o.q) { out.write('Files ' + la + ' and ' + lb + ' differ\n'); return; }
+        if (binary) { out.write('Binary files ' + la + ' and ' + lb + ' differ\n'); return; }
+        out.write(diffRender(style, hunks, fa, fb, opts));
+      };
+
+      const statOf = (p) => { if (p === '-') return { isFile: true }; return ctx.fs.stat(p); };
+      const joinPath = (dir, name) => (dir.endsWith('/') ? dir + name : dir + '/' + name);
+      const compareDirs = async (da, db) => {
+        let na; let nb;
+        try { na = ctx.fs.readdir(da); } catch (e) { if (!isFsError(e)) throw e; out.flush(); ctx.err('diff: ' + da + ': ' + e.message + '\n'); trouble2 = true; return; }
+        try { nb = ctx.fs.readdir(db); } catch (e) { if (!isFsError(e)) throw e; out.flush(); ctx.err('diff: ' + db + ': ' + e.message + '\n'); trouble2 = true; return; }
+        const coll = collation(ctx.env);
+        const names = Array.from(new Set(na.concat(nb))).filter((n) => !excludes.some((re) => re.test(n))).sort(coll);
+        for (const n of names) {
+          ctx.checkAbort();
+          const pa = joinPath(da, n); const pb = joinPath(db, n);
+          const ia = na.includes(n); const ib = nb.includes(n);
+          if (!ia || !ib) {
+            if (o.N) { await compareFiles(ia ? pa : null, ib ? pb : null, pa, pb, true); continue; }
+            differ = true; out.write('Only in ' + (ia ? da : db) + ': ' + n + '\n'); continue;
+          }
+          const sa = ctx.fs.stat(pa); const sb = ctx.fs.stat(pb);
+          if (sa.isDir && sb.isDir) {
+            if (o.r) { await compareDirs(pa, pb); } else out.write('Common subdirectories: ' + pa + ' and ' + pb + '\n');
+          } else if (sa.isDir !== sb.isDir) {
+            differ = true;
+            out.write('File ' + pa + ' is a ' + (sa.isDir ? 'directory' : 'regular file') + ' while file ' + pb + ' is a ' + (sb.isDir ? 'directory' : 'regular file') + '\n');
+          } else await compareFiles(pa, pb, pa, pb, !o.q);
+        }
+      };
+
+      let [fa, fb] = g.rest;
+      let sa; let sb;
+      try { sa = statOf(fa); } catch (e) { if (!isFsError(e)) throw e; if (!(o.N && sbExists(fb))) return trouble(fa + ': ' + e.message); sa = null; }
+      try { sb = statOf(fb); } catch (e) { if (!isFsError(e)) throw e; if (!(o.N && sa)) return trouble(fb + ': ' + e.message); sb = null; }
+      function sbExists(p) { try { statOf(p); return true; } catch (e) { return false; } }
+      if (sa && sb && sa.isDir && sb.isDir) await compareDirs(fa, fb);
+      else {
+        if (sa && sa.isDir && sb) fa = joinPath(fa, K.VFS.basename(fb));
+        else if (sb && sb.isDir && sa) fb = joinPath(fb, K.VFS.basename(fa));
+        if (fa === '-' && fb === '-') return 0;
+        await compareFiles(sa ? fa : null, sb ? fb : null, fa, fb, false);
+      }
+      out.flush();
+      return trouble2 ? 2 : differ ? 1 : 0;
     },
   });
 

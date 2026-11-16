@@ -16,6 +16,9 @@ const out = async (line) => (await run(line)).out;
  * printed by the real GNU tool on the same input (run in a fresh directory).
  */
 let tableDir = 0;
+// quotes, timestamps and the Kali `diff --color=auto` alias differ between machines but not in meaning
+const normalize = (s) => s.replace(/[‘’]/g, "'").replace(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{9} \+0000/g, 'TS')
+  .replace(/(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}/g, 'CT').replace(/diff --color=auto /g, 'diff ');
 function table(name, setup, locale, rows) {
   test(name, async () => {
     for (const [line, stdout, stderr, status] of rows) {
@@ -26,7 +29,7 @@ function table(name, setup, locale, rows) {
       await run('cd ' + dir + '; LC_ALL=' + locale + '; export LC_ALL');
       await run(setup.replace(/mkdir \w+;?/g, ''));
       const r = await run(line);
-      assert.deepEqual([r.out, r.err.replace(/[‘’]/g, "'"), r.code], [stdout, stderr.replace(/[‘’]/g, "'"), status], line);
+      assert.deepEqual([normalize(r.out), normalize(r.err), r.code], [normalize(stdout), normalize(stderr), status], line);
     }
   });
 }
@@ -607,4 +610,253 @@ test('xxd dumps and reverses', async () => {
   assert.equal(await out("echo 6b616c69 | xxd -r -p"), 'kali');
   assert.equal(await out("printf 'Hello, World! Kali' | xxd | xxd -r"), 'Hello, World! Kali');
   assert.equal((await run('xxd /nonexistent')).err, 'xxd: /nonexistent: No such file or directory\n');
+});
+
+table("cksum, comm, paste, nl and rev match GNU", "printf 'hello\\n' > a; printf 'b\\nc\\n' > c1; printf 'a\\nb\\n' > c2; printf 'b\\na\\n' > c3; printf 'one\\ntwo\\nthree\\n' > l3; printf 'x\\ny\\n' > l2; printf 'a\\n\\nb\\n\\n\\nc\\n' > bl; printf 'hé\\nabc\\nno newline' > r; : > empty; printf '1\\\\:\\\\:\\\\:\\nh\\n\\\\:\\\\:\\nb1\\nb2\\n\\\\:\\nf\\n' > pg", 'C.UTF-8', [
+  ["cksum a", "3015617425 6 a\n", "", 0],
+  ["cksum -a sysv a", "542 1 a\n", "", 0],
+  ["cksum -a bsd a", "36979     1 a\n", "", 0],
+  ["cksum -a md5 a", "MD5 (a) = b1946ac92492d2347c6235b4d2611184\n", "", 0],
+  ["cksum -a sha256 a", "SHA256 (a) = 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\n", "", 0],
+  ["cksum --untagged -a md5 a", "b1946ac92492d2347c6235b4d2611184  a\n", "", 0],
+  ["cksum -a bogus a", "", "cksum: invalid argument ‘bogus’ for ‘--algorithm’\nValid arguments are:\n  - ‘bsd’\n  - ‘sysv’\n  - ‘crc’\n  - ‘md5’\n  - ‘sha1’\n  - ‘sha224’\n  - ‘sha256’\n  - ‘sha384’\n  - ‘sha512’\n  - ‘blake2b’\n  - ‘sm3’\nTry 'cksum --help' for more information.\n", 1],
+  ["cksum nonex", "", "cksum: nonex: No such file or directory\n", 1],
+  ["cksum < a", "3015617425 6\n", "", 0],
+  ["cksum -a crc --tag a", "3015617425 6 a\n", "", 0],
+  ["cksum c1 c2", "1532194287 4 c1\n2174511615 4 c2\n", "", 0],
+  ["cksum empty", "4294967295 0 empty\n", "", 0],
+  ["cksum -z a", "3015617425 6 a\u0000", "", 0],
+  ["comm c1 c2", "\ta\n\t\tb\nc\n", "", 0],
+  ["comm -12 c1 c2", "b\n", "", 0],
+  ["comm -13 c1 c2", "a\n", "", 0],
+  ["comm -23 c1 c2", "c\n", "", 0],
+  ["comm -3 c1 c2", "\ta\nc\n", "", 0],
+  ["comm --total c1 c2", "\ta\n\t\tb\nc\n1\t1\t1\ttotal\n", "", 0],
+  ["comm --output-delimiter=: c1 c2", ":a\n::b\nc\n", "", 0],
+  ["comm c3 c2", "\ta\n\t\tb\na\n", "comm: file 1 is not in sorted order\ncomm: input is not in sorted order\n", 1],
+  ["comm --nocheck-order c3 c2", "\ta\n\t\tb\na\n", "", 0],
+  ["comm --check-order c3 c2", "\ta\n\t\tb\n", "comm: file 1 is not in sorted order\n", 1],
+  ["comm c1", "", "comm: missing operand after ‘c1’\nTry 'comm --help' for more information.\n", 1],
+  ["comm c1 c2 c1", "", "comm: extra operand ‘c1’\nTry 'comm --help' for more information.\n", 1],
+  ["comm c1 nonex", "", "comm: nonex: No such file or directory\n", 1],
+  ["comm - c2 < c1", "\ta\n\t\tb\nc\n", "", 0],
+  ["comm empty c1", "\tb\n\tc\n", "", 0],
+  ["comm c1 empty", "b\nc\n", "", 0],
+  ["paste l3 l2", "one\tx\ntwo\ty\nthree\t\n", "", 0],
+  ["paste -d, l3 l2", "one,x\ntwo,y\nthree,\n", "", 0],
+  ["paste -d ':,' l3 l2 l3", "one:x,one\ntwo:y,two\nthree:,three\n", "", 0],
+  ["paste -s l3", "one\ttwo\tthree\n", "", 0],
+  ["paste -sd, l3 l2", "one,two,three\nx,y\n", "", 0],
+  ["paste -sd '\\n' l3", "one\ntwo\nthree\n", "", 0],
+  ["paste - - < l3", "one\ttwo\nthree\t\n", "", 0],
+  ["paste -d '\\t\\0' l3 l3", "one\tone\ntwo\ttwo\nthree\tthree\n", "", 0],
+  ["paste l3 nonex", "", "paste: nonex: No such file or directory\n", 1],
+  ["paste -d '\\' l3", "", "paste: delimiter list ends with an unescaped backslash: \\\n", 1],
+  ["paste l2 l3", "x\tone\ny\ttwo\n\tthree\n", "", 0],
+  ["paste -z l3", "one\ntwo\nthree\n\u0000", "", 0],
+  ["paste", "", "", 0],
+  ["paste - l2 < l3", "one\tx\ntwo\ty\nthree\t\n", "", 0],
+  ["nl l3", "     1\tone\n     2\ttwo\n     3\tthree\n", "", 0],
+  ["nl bl", "     1\ta\n       \n     2\tb\n       \n       \n     3\tc\n", "", 0],
+  ["nl -ba bl", "     1\ta\n     2\t\n     3\tb\n     4\t\n     5\t\n     6\tc\n", "", 0],
+  ["nl -ba -nrz -w3 -s: -v5 -i2 l3", "005:one\n007:two\n009:three\n", "", 0],
+  ["nl -nln -w4 l3", "1   \tone\n2   \ttwo\n3   \tthree\n", "", 0],
+  ["nl -bpt l3", "       one\n     1\ttwo\n     2\tthree\n", "", 0],
+  ["nl -p pg", "     1\t1\\:\\:\\:\n     2\th\n\n     3\tb1\n     4\tb2\n\n       f\n", "", 0],
+  ["nl pg", "     1\t1\\:\\:\\:\n     2\th\n\n     1\tb1\n     2\tb2\n\n       f\n", "", 0],
+  ["nl -ba -l2 bl", "     1\ta\n       \n     2\tb\n       \n     3\t\n     4\tc\n", "", 0],
+  ["nl -n xx l3", "", "nl: invalid line numbering format: ‘xx’\nTry 'nl --help' for more information.\n", 1],
+  ["nl -b x l3", "", "nl: invalid body numbering style: ‘x’\nTry 'nl --help' for more information.\n", 1],
+  ["nl -w0 l3", "", "nl: invalid line number field width: ‘0’: Numerical result out of range\n", 1],
+  ["nl -s '' l3", "     1one\n     2two\n     3three\n", "", 0],
+  ["nl -s '--' -i0 l3", "     1--one\n     1--two\n     1--three\n", "", 0],
+  ["nl nonex", "", "nl: nonex: No such file or directory\n", 1],
+  ["nl -v -3 -nrz l3", "-00003\tone\n-00002\ttwo\n-00001\tthree\n", "", 0],
+  ["echo abc | rev", "cba\n", "", 0],
+  ["echo abc | rev", "cba\n", "", 0],
+  ["rev nonex", "", "rev: cannot open nonex: No such file or directory\n", 1],
+  ["printf 'a\\nb' | rev", "a\nb", "", 0],
+]);
+
+table("expr matches GNU", ":", 'C.UTF-8', [
+  ["expr 1 + 2", "3\n", "", 0],
+  ["expr 5 - 7", "-2\n", "", 0],
+  ["expr 2 '*' 3", "6\n", "", 0],
+  ["expr 7 / 2", "3\n", "", 0],
+  ["expr 7 % 0", "", "expr: division by zero\n", 2],
+  ["expr 7 / 0", "", "expr: division by zero\n", 2],
+  ["expr 1 = 1", "1\n", "", 0],
+  ["expr a = b", "0\n", "", 1],
+  ["expr 10 '>' 9", "1\n", "", 0],
+  ["expr abc '<' abd", "1\n", "", 0],
+  ["expr 10 '<' 9", "0\n", "", 1],
+  ["expr 5 '|' 0", "5\n", "", 0],
+  ["expr 0 '|' 0", "0\n", "", 1],
+  ["expr '' '|' x", "x\n", "", 0],
+  ["expr 3 '&' 4", "3\n", "", 0],
+  ["expr 0 '&' 4", "0\n", "", 1],
+  ["expr abc : 'a.*'", "3\n", "", 0],
+  ["expr abc : 'x'", "0\n", "", 1],
+  ["expr abc : '\\(a\\)b'", "a\n", "", 0],
+  ["expr abc : '\\(x\\)'", "\n", "", 1],
+  ["expr length hello", "5\n", "", 0],
+  ["expr substr hello 2 3", "ell\n", "", 0],
+  ["expr index hello lo", "3\n", "", 0],
+  ["expr match hello 'h.*o'", "5\n", "", 0],
+  ["expr", "", "expr: missing operand\nTry 'expr --help' for more information.\n", 2],
+  ["expr 1 +", "", "expr: syntax error: missing argument after ‘+’\n", 2],
+  ["expr 1 2", "", "expr: syntax error: unexpected argument ‘2’\n", 2],
+  ["expr a + 1", "", "expr: non-integer argument\n", 2],
+  ["expr '(' 1 + 2 ')' '*' 3", "9\n", "", 0],
+  ["expr '(' 1 + 2", "", "expr: syntax error: expecting ')' after ‘2’\n", 2],
+  ["expr 1 + 2 ')'", "", "expr: syntax error: unexpected argument ‘)’\n", 2],
+  ["expr + 5", "5\n", "", 0],
+  ["expr -5 + 3", "-2\n", "", 0],
+  ["expr 9223372036854775807 + 1", "9223372036854775808\n", "", 0],
+  ["expr 99999999999999999999 + 1", "100000000000000000000\n", "", 0],
+  ["expr 1 == 1", "1\n", "", 0],
+  ["expr 1 != 1", "0\n", "", 1],
+  ["expr abc : '.*'", "3\n", "", 0],
+  ["expr 'a' : '^a'", "1\n", "", 0],
+  ["expr 1 '|'", "", "expr: syntax error: missing argument after ‘|’\n", 2],
+  ["expr length", "", "expr: syntax error: missing argument after ‘length’\n", 2],
+  ["expr substr abc 0 2", "\n", "", 1],
+  ["expr substr abc 2 0", "\n", "", 1],
+  ["expr 1 + 2 + 3 '*' 4", "15\n", "", 0],
+  ["expr 2 '*' '(' 3 + 4 ')'", "14\n", "", 0],
+  ["expr 5 '>=' 5", "1\n", "", 0],
+  ["expr 5 '<=' 4", "0\n", "", 1],
+  ["expr x : '\\(\\)'", "\n", "", 1],
+  ["expr 00 '|' 0", "0\n", "", 1],
+  ["expr -- 1 + 1", "2\n", "", 0],
+  ["expr 3 - -2", "5\n", "", 0],
+  ["expr 1.5 + 1", "", "expr: non-integer argument\n", 2],
+  ["expr ' 3' + 1", "", "expr: non-integer argument\n", 2],
+  ["expr 0x10 + 1", "", "expr: non-integer argument\n", 2],
+  ["expr 07 + 1", "8\n", "", 0],
+  ["expr length '' + 1", "1\n", "", 0],
+  ["expr 5 : '\\(' ", "", "expr: Unmatched ( or \\(\n", 2],
+  ["expr hello : 'hel\\(.*\\)'", "lo\n", "", 0],
+  ["expr substr hello 4 10", "lo\n", "", 0],
+  ["expr index hello z", "0\n", "", 1],
+  ["expr 'a b' : 'a b'", "3\n", "", 0],
+  ["expr 3 '*'", "", "expr: syntax error: missing argument after ‘*’\n", 2],
+  ["expr 1 + 2 '|' 0", "3\n", "", 0],
+  ["expr 4 '&' 0 '|' 7", "7\n", "", 0],
+  ["expr + ", "", "expr: syntax error: missing argument after ‘+’\n", 2],
+  ["expr ')'", "", "expr: syntax error: unexpected ')'\n", 2],
+]);
+
+table("cmp matches GNU", "printf 'abc\\n' > p1; printf 'abd\\n' > p2; printf 'abc\\nx\\n' > p3; printf 'a\\nb\\nc\\0d' > p4; printf 'a\\nb\\nc\\0e' > p5", 'C.UTF-8', [
+  ["cmp p1 p2", "p1 p2 differ: byte 3, line 1\n", "", 1],
+  ["cmp -l p1 p2", "3 143 144\n", "", 1],
+  ["cmp -b p1 p2", "p1 p2 differ: byte 3, line 1 is 143 c 144 d\n", "", 1],
+  ["cmp -s p1 p2", "", "", 1],
+  ["cmp p1 p3", "", "cmp: EOF on p1 after byte 4, line 1\n", 1],
+  ["cmp p3 p1", "", "cmp: EOF on p1 after byte 4, line 1\n", 1],
+  ["cmp p1 p1", "", "", 0],
+  ["cmp p1 nonex", "", "cmp: nonex: No such file or directory\n", 2],
+  ["cmp -n 2 p1 p2", "", "", 0],
+  ["cmp -i 2 p1 p2", "p1 p2 differ: byte 1, line 1\n", "", 1],
+  ["cmp -i 1:2 p1 p2", "p1 p2 differ: byte 1, line 1\n", "", 1],
+  ["cmp -lb p1 p2", "3 143 c    144 d\n", "", 1],
+  ["cmp p1 p2 3", "p1 p2 differ: byte 1, line 1\n", "", 1],
+  ["cmp -n x p1 p2", "", "cmp: invalid --bytes value 'x'\ncmp: Try 'cmp --help' for more information.\n", 2],
+  ["cmp p1 p2 1 2 3", "", "cmp: extra operand '3'\ncmp: Try 'cmp --help' for more information.\n", 2],
+  ["cmp -x p1 p2", "", "cmp: invalid option -- 'x'\ncmp: Try 'cmp --help' for more information.\n", 2],
+  ["cmp", "", "cmp: missing operand after 'cmp'\ncmp: Try 'cmp --help' for more information.\n", 2],
+  ["cmp p1 p2 x", "", "cmp: invalid --ignore-initial value 'x'\ncmp: Try 'cmp --help' for more information.\n", 2],
+  ["cmp -l p1 p3", "", "cmp: EOF on p1 after byte 4\n", 1],
+  ["cmp -l p4 p5", "7 144 145\n", "", 1],
+  ["cmp -lb p4 p5", "7 144 d    145 e\n", "", 1],
+  ["cmp p4 p5", "p4 p5 differ: byte 7, line 3\n", "", 1],
+  ["cmp p1 p2 0 0", "p1 p2 differ: byte 3, line 1\n", "", 1],
+  ["cmp p1 p2 1 1", "p1 p2 differ: byte 2, line 1\n", "", 1],
+  ["cmp -s p1 nonex", "", "", 2],
+  ["cmp -s p1 p3", "", "", 1],
+  ["cmp -n 3 p3 p1", "", "", 0],
+  ["cmp -n 5 p1 p3", "", "cmp: EOF on p1 after byte 4, line 1\n", 1],
+]);
+
+table("diff matches GNU", "printf 'a\\nb\\nc\\n' > d1; printf 'a\\nB\\nc\\nd' > d2; printf '1\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\n10\\n11\\n12\\n13\\n14\\n15\\n16\\n17\\n18\\n19\\n20\\n' > n1; printf '1\\n2\\nX\\n4\\n5\\n6\\n7\\n8\\n9\\n10\\n11\\n12\\n13\\n14\\n15\\nY\\n17\\n18\\n19\\n20\\n21\\n' > n2; : > empty; printf 'x\\n\\ny\\n' > b1; printf 'x\\ny\\n\\n\\n' > b2; printf 'Hello  World\\nfoo\\n' > w1; printf 'hello world\\nFOO\\n' > w2; mkdir -p dd1/s dd2/s; echo x > dd1/only1; echo y > dd2/only2; echo 1 > dd1/s/f; echo 2 > dd2/s/f; echo same > dd1/same; echo same > dd2/same", 'C.UTF-8', [
+  ["diff d1 d2", "2c2\n< b\n---\n> B\n3a4\n> d\n\\ No newline at end of file\n", "", 1],
+  ["diff d2 d1", "2c2\n< B\n---\n> b\n4d3\n< d\n\\ No newline at end of file\n", "", 1],
+  ["diff -u d1 d2", "--- d1\t2026-11-16 23:57:02.314809727 +0000\n+++ d2\t2026-11-16 23:57:02.314809727 +0000\n@@ -1,3 +1,4 @@\n a\n-b\n+B\n c\n+d\n\\ No newline at end of file\n", "", 1],
+  ["diff -c d1 d2", "*** d1\t2026-11-16 23:57:02.322703546 +0000\n--- d2\t2026-11-16 23:57:02.322703546 +0000\n***************\n*** 1,3 ****\n  a\n! b\n  c\n--- 1,4 ----\n  a\n! B\n  c\n+ d\n\\ No newline at end of file\n", "", 1],
+  ["diff -q d1 d2", "Files d1 and d2 differ\n", "", 1],
+  ["diff -s d1 d1", "Files d1 and d1 are identical\n", "", 0],
+  ["diff -qs d1 d1", "Files d1 and d1 are identical\n", "", 0],
+  ["diff d1 d1", "", "", 0],
+  ["diff n1 n2", "3c3\n< 3\n---\n> X\n16c16\n< 16\n---\n> Y\n20a21\n> 21\n", "", 1],
+  ["diff -u n1 n2", "--- n1\t2026-11-16 23:57:02.371405683 +0000\n+++ n2\t2026-11-16 23:57:02.371405683 +0000\n@@ -1,6 +1,6 @@\n 1\n 2\n-3\n+X\n 4\n 5\n 6\n@@ -13,8 +13,9 @@\n 13\n 14\n 15\n-16\n+Y\n 17\n 18\n 19\n 20\n+21\n", "", 1],
+  ["diff -U1 n1 n2", "--- n1\t2026-11-16 23:57:02.380434506 +0000\n+++ n2\t2026-11-16 23:57:02.380434506 +0000\n@@ -2,3 +2,3 @@\n 2\n-3\n+X\n 4\n@@ -15,3 +15,3 @@\n 15\n-16\n+Y\n 17\n@@ -20 +20,2 @@\n 20\n+21\n", "", 1],
+  ["diff -U0 n1 n2", "--- n1\t2026-11-16 23:57:02.388060768 +0000\n+++ n2\t2026-11-16 23:57:02.388060768 +0000\n@@ -3 +3 @@\n-3\n+X\n@@ -16 +16 @@\n-16\n+Y\n@@ -20,0 +21 @@\n+21\n", "", 1],
+  ["diff -c n1 n2", "*** n1\t2026-11-16 23:57:02.396167689 +0000\n--- n2\t2026-11-16 23:57:02.396167689 +0000\n***************\n*** 1,6 ****\n  1\n  2\n! 3\n  4\n  5\n  6\n--- 1,6 ----\n  1\n  2\n! X\n  4\n  5\n  6\n***************\n*** 13,20 ****\n  13\n  14\n  15\n! 16\n  17\n  18\n  19\n  20\n--- 13,21 ----\n  13\n  14\n  15\n! Y\n  17\n  18\n  19\n  20\n+ 21\n", "", 1],
+  ["diff -C1 n1 n2", "*** n1\t2026-11-16 23:57:02.404424816 +0000\n--- n2\t2026-11-16 23:57:02.404424816 +0000\n***************\n*** 2,4 ****\n  2\n! 3\n  4\n--- 2,4 ----\n  2\n! X\n  4\n***************\n*** 15,17 ****\n  15\n! 16\n  17\n--- 15,17 ----\n  15\n! Y\n  17\n***************\n*** 20 ****\n--- 20,21 ----\n  20\n+ 21\n", "", 1],
+  ["diff -u empty n1", "--- empty\t2026-11-16 23:57:02.411777502 +0000\n+++ n1\t2026-11-16 23:57:02.411777502 +0000\n@@ -0,0 +1,20 @@\n+1\n+2\n+3\n+4\n+5\n+6\n+7\n+8\n+9\n+10\n+11\n+12\n+13\n+14\n+15\n+16\n+17\n+18\n+19\n+20\n", "", 1],
+  ["diff -u n1 empty", "--- n1\t2026-11-16 23:57:02.419355045 +0000\n+++ empty\t2026-11-16 23:57:02.419355045 +0000\n@@ -1,20 +0,0 @@\n-1\n-2\n-3\n-4\n-5\n-6\n-7\n-8\n-9\n-10\n-11\n-12\n-13\n-14\n-15\n-16\n-17\n-18\n-19\n-20\n", "", 1],
+  ["diff empty n1", "0a1,20\n> 1\n> 2\n> 3\n> 4\n> 5\n> 6\n> 7\n> 8\n> 9\n> 10\n> 11\n> 12\n> 13\n> 14\n> 15\n> 16\n> 17\n> 18\n> 19\n> 20\n", "", 1],
+  ["diff n1 empty", "1,20d0\n< 1\n< 2\n< 3\n< 4\n< 5\n< 6\n< 7\n< 8\n< 9\n< 10\n< 11\n< 12\n< 13\n< 14\n< 15\n< 16\n< 17\n< 18\n< 19\n< 20\n", "", 1],
+  ["diff -c empty n1", "*** empty\t2026-11-16 23:57:02.441424977 +0000\n--- n1\t2026-11-16 23:57:02.441424977 +0000\n***************\n*** 0 ****\n--- 1,20 ----\n+ 1\n+ 2\n+ 3\n+ 4\n+ 5\n+ 6\n+ 7\n+ 8\n+ 9\n+ 10\n+ 11\n+ 12\n+ 13\n+ 14\n+ 15\n+ 16\n+ 17\n+ 18\n+ 19\n+ 20\n", "", 1],
+  ["diff -c n1 empty", "*** n1\t2026-11-16 23:57:02.448352477 +0000\n--- empty\t2026-11-16 23:57:02.448352477 +0000\n***************\n*** 1,20 ****\n- 1\n- 2\n- 3\n- 4\n- 5\n- 6\n- 7\n- 8\n- 9\n- 10\n- 11\n- 12\n- 13\n- 14\n- 15\n- 16\n- 17\n- 18\n- 19\n- 20\n--- 0 ----\n", "", 1],
+  ["diff b1 b2", "2d1\n< \n3a3,4\n> \n> \n", "", 1],
+  ["diff -B b1 b2", "", "", 0],
+  ["diff -u b1 b2", "--- b1\t2026-11-16 23:57:02.470796394 +0000\n+++ b2\t2026-11-16 23:57:02.470796394 +0000\n@@ -1,3 +1,4 @@\n x\n-\n y\n+\n+\n", "", 1],
+  ["diff -i w1 w2", "1c1\n< Hello  World\n---\n> hello world\n", "", 1],
+  ["diff -w w1 w2", "1,2c1,2\n< Hello  World\n< foo\n---\n> hello world\n> FOO\n", "", 1],
+  ["diff -b w1 w2", "1,2c1,2\n< Hello  World\n< foo\n---\n> hello world\n> FOO\n", "", 1],
+  ["diff -iw w1 w2", "", "", 0],
+  ["diff w1 w2", "1,2c1,2\n< Hello  World\n< foo\n---\n> hello world\n> FOO\n", "", 1],
+  ["diff nonex d1", "", "diff: nonex: No such file or directory\n", 2],
+  ["diff d1 nonex", "", "diff: nonex: No such file or directory\n", 2],
+  ["diff d1", "", "diff: missing operand after 'd1'\ndiff: Try 'diff --help' for more information.\n", 2],
+  ["diff", "", "diff: missing operand after 'diff'\ndiff: Try 'diff --help' for more information.\n", 2],
+  ["diff d1 d2 d1", "", "diff: extra operand 'd1'\ndiff: Try 'diff --help' for more information.\n", 2],
+  ["diff -r dd1 dd2", "Only in dd1: only1\nOnly in dd2: only2\ndiff -r dd1/s/f dd2/s/f\n1c1\n< 1\n---\n> 2\n", "", 1],
+  ["diff dd1 dd2", "Only in dd1: only1\nOnly in dd2: only2\nCommon subdirectories: dd1/s and dd2/s\n", "", 1],
+  ["diff -rq dd1 dd2", "Only in dd1: only1\nOnly in dd2: only2\nFiles dd1/s/f and dd2/s/f differ\n", "", 1],
+  ["diff d1 dd1", "", "diff: dd1/d1: No such file or directory\n", 2],
+  ["diff -rN dd1 dd2", "diff -rN dd1/only1 dd2/only1\n1d0\n< x\ndiff -rN dd1/only2 dd2/only2\n0a1\n> y\ndiff -rN dd1/s/f dd2/s/f\n1c1\n< 1\n---\n> 2\n", "", 1],
+  ["diff -ru dd1 dd2 | head -3", "Only in dd1: only1\nOnly in dd2: only2\ndiff -ru dd1/s/f dd2/s/f\n", "", 0],
+  ["diff -x only1 -r dd1 dd2", "Only in dd2: only2\ndiff -x only1 -r dd1/s/f dd2/s/f\n1c1\n< 1\n---\n> 2\n", "", 1],
+  ["diff --normal d1 d2", "2c2\n< b\n---\n> B\n3a4\n> d\n\\ No newline at end of file\n", "", 1],
+  ["diff -Q d1 d2", "", "diff: invalid option -- 'Q'\ndiff: Try 'diff --help' for more information.\n", 2],
+  ["diff --color=always d1 d2", "\u001b[36m2c2\u001b[0m\n\u001b[31m< b\u001b[0m\n---\n\u001b[32m> B\u001b[0m\n\u001b[36m3a4\u001b[0m\n\u001b[32m> d\u001b[0m\n\\ No newline at end of file\n", "", 1],
+  ["diff -u --color=always d1 d2", "\u001b[1m--- d1\t2026-11-16 23:57:02.634747170 +0000\u001b[0m\n\u001b[1m+++ d2\t2026-11-16 23:57:02.634747170 +0000\u001b[0m\n\u001b[36m@@ -1,3 +1,4 @@\u001b[0m\n a\n\u001b[31m-b\u001b[0m\n\u001b[32m+B\u001b[0m\n c\n\u001b[32m+d\u001b[0m\n\\ No newline at end of file\n", "", 1],
+  ["diff -c --color=always d1 d2", "\u001b[1m*** d1\t2026-11-16 23:57:02.642447887 +0000\u001b[0m\n\u001b[1m--- d2\t2026-11-16 23:57:02.642447887 +0000\u001b[0m\n***************\n\u001b[36m*** 1,3 ****\u001b[0m\n\u001b[31m  a\u001b[0m\n\u001b[31m! b\u001b[0m\n\u001b[31m  c\u001b[0m\n\u001b[36m--- 1,4 ----\u001b[0m\n\u001b[32m  a\u001b[0m\n\u001b[32m! B\u001b[0m\n\u001b[32m  c\u001b[0m\n\u001b[32m+ d\u001b[0m\n\\ No newline at end of file\n", "", 1],
+  ["diff -u --label A --label B d1 d2", "--- A\n+++ B\n@@ -1,3 +1,4 @@\n a\n-b\n+B\n c\n+d\n\\ No newline at end of file\n", "", 1],
+  ["diff -u -L A d1 d2", "--- A\n+++ d2\t2026-11-16 23:57:02.657925245 +0000\n@@ -1,3 +1,4 @@\n a\n-b\n+B\n c\n+d\n\\ No newline at end of file\n", "", 1],
+  ["diff --unified=1 n1 n2", "--- n1\t2026-11-16 23:57:02.665680016 +0000\n+++ n2\t2026-11-16 23:57:02.665680016 +0000\n@@ -2,3 +2,3 @@\n 2\n-3\n+X\n 4\n@@ -15,3 +15,3 @@\n 15\n-16\n+Y\n 17\n@@ -20 +20,2 @@\n 20\n+21\n", "", 1],
+  ["diff --context=1 n1 n2", "*** n1\t2026-11-16 23:57:02.673186092 +0000\n--- n2\t2026-11-16 23:57:02.673186092 +0000\n***************\n*** 2,4 ****\n  2\n! 3\n  4\n--- 2,4 ----\n  2\n! X\n  4\n***************\n*** 15,17 ****\n  15\n! 16\n  17\n--- 15,17 ----\n  15\n! Y\n  17\n***************\n*** 20 ****\n--- 20,21 ----\n  20\n+ 21\n", "", 1],
+  ["diff -u d1 d2 --strip-trailing-cr", "--- d1\t2026-11-16 23:57:02.680426780 +0000\n+++ d2\t2026-11-16 23:57:02.680426780 +0000\n@@ -1,3 +1,4 @@\n a\n-b\n+B\n c\n+d\n\\ No newline at end of file\n", "", 1],
+  ["printf 'a\\r\\nb\\r\\n' > crlf; printf 'a\\nb\\n' > lf; diff crlf lf; diff --strip-trailing-cr crlf lf", "1,2c1,2\n< a\r\n< b\r\n---\n> a\n> b\n", "", 0],
+  ["printf 'a\\0b\\n' > bin1; printf 'a\\0c\\n' > bin2; diff bin1 bin2; diff -a bin1 bin2 | head -3; diff -q bin1 bin2", "Binary files bin1 and bin2 differ\n1c1\n< a\u0000b\n---\nFiles bin1 and bin2 differ\n", "", 1],
+  ["printf 'x\\n' > one; printf 'x' > onenonl; diff one onenonl; diff -u one onenonl", "1c1\n< x\n---\n> x\n\\ No newline at end of file\n--- one\t2026-11-16 23:57:02.710742878 +0000\n+++ onenonl\t2026-11-16 23:57:02.710742878 +0000\n@@ -1 +1 @@\n-x\n+x\n\\ No newline at end of file\n", "", 1],
+]);
+
+
+test('column builds tables and columnates lists', async () => {
+  assert.equal(await out("printf 'a b\\ncc ddd\\n' | column -t"), 'a   b\ncc  ddd\n');
+  assert.equal(await out("printf 'x:y:z\\nlonger:b:c\\n' | column -t -s:"), 'x       y  z\nlonger  b  c\n');
+  assert.equal(await out("printf 'a\\nb\\nc\\n' | column"), 'a\tb\tc\n');
+  assert.equal(await out("printf 'a b\\ncc ddd\\n' | column -t -o ' | '"), 'a  | b\ncc | ddd\n');
+  assert.equal((await run('column /nonexistent')).code, 1);
+});
+
+test('rev and nl in pipelines', async () => {
+  assert.equal(await out("echo 'a:b:c' | rev | cut -d: -f1 | rev"), 'c\n');
+  assert.equal(await out("printf 'x\\n\\ny\\n' | nl"), '     1\tx\n       \n     2\ty\n');
+});
+
+test('man pages exist for every command in the pack', async () => {
+  const names = ['grep', 'wc', 'sort', 'uniq', 'cut', 'tr', 'tee', 'xargs', 'seq', 'yes', 'md5sum', 'sha1sum', 'sha224sum', 'sha256sum', 'sha384sum', 'sha512sum',
+    'base64', 'base32', 'xxd', 'strings', 'diff', 'cmp', 'comm', 'paste', 'nl', 'rev', 'column', 'expr', 'cksum'];
+  for (const n of names) {
+    const def = sim.K.cmd.get(n);
+    assert.ok(def, n + ' is registered');
+    assert.ok(def.summary && def.synopsis, n + ' has a summary and synopsis');
+    const man = typeof def.man === 'function' ? def.man() : def.man;
+    assert.match(man, /DESCRIPTION/, n + ' has a man page');
+    assert.match(man, /EXAMPLES/, n + ' has an example');
+  }
 });
