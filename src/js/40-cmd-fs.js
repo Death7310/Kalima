@@ -67,9 +67,9 @@
     }
   }
 
-  function splitLines(text) {
+  function splitLines(text, sep) {
     if (text === '') return [];
-    const a = text.split('\n');
+    const a = text.split(sep || '\n');
     if (a[a.length - 1] === '') a.pop();
     return a;
   }
@@ -164,7 +164,7 @@
         widths.push(w);
       }
       const total = widths.reduce((a, b) => a + b, 0) + 2 * (used - 1);
-      if (total > width && cols > 1) continue;
+      if (total >= width && cols > 1) continue;
       let out = '';
       for (let r = 0; r < rows; r++) {
         let line = '';
@@ -460,12 +460,11 @@
     alias: { lines: 'n', bytes: 'c', quiet: 'q', silent: 'q', verbose: 'v', 'zero-terminated': 'z' },
   };
 
-  const headLines = (text, c) => {
-    const lines = splitLines(text);
+  const headLines = (text, c, sep) => {
+    const lines = splitLines(text, sep);
     const keep = c.sign === '-' ? lines.slice(0, Math.max(0, lines.length - c.n)) : lines.slice(0, c.n);
     if (!keep.length) return '';
-    const endsNl = text.endsWith('\n');
-    return keep.join('\n') + (keep.length === lines.length && !endsNl ? '' : '\n');
+    return keep.join(sep) + (keep.length === lines.length && !text.endsWith(sep) ? '' : sep);
   };
   const headBytes = (text, c) => {
     const b = U.toBytes(text);
@@ -491,17 +490,17 @@
         if (headers) ctx.out((printed ? '\n' : '') + '==> ' + r.name + ' <==\n');
         printed = true;
         if (r.dir) { ctx.eprintln('head: error reading ' + q(f) + ': Is a directory'); status = 1; continue; }
-        ctx.out(byBytes ? headBytes(r.text, c) : headLines(r.text, c));
+        ctx.out(byBytes ? headBytes(r.text, c) : headLines(r.text, c, g.opts.z ? '\0' : '\n'));
       }
       return status;
     },
   });
 
-  const tailLines = (text, c) => {
-    const lines = splitLines(text);
+  const tailLines = (text, c, sep) => {
+    const lines = splitLines(text, sep);
     const keep = c.sign === '+' ? lines.slice(Math.max(0, c.n - 1)) : c.n === 0 ? [] : lines.slice(-c.n);
     if (!keep.length) return '';
-    return keep.join('\n') + (text.endsWith('\n') ? '\n' : '');
+    return keep.join(sep) + (text.endsWith(sep) ? sep : '');
   };
   const tailBytes = (text, c) => {
     const b = U.toBytes(text);
@@ -538,7 +537,7 @@
         if (headers) ctx.out((printed ? '\n' : '') + '==> ' + r.name + ' <==\n');
         printed = true;
         if (r.dir) { ctx.eprintln('tail: error reading ' + q(f) + ': Is a directory'); status = 1; continue; }
-        ctx.out(byBytes ? tailBytes(r.text, c) : tailLines(r.text, c));
+        ctx.out(byBytes ? tailBytes(r.text, c) : tailLines(r.text, c, g.opts.z ? '\0' : '\n'));
         if (f !== '-') live.push({ name: f, text: r.text });
       }
       if (!follow || (ctx.stdin != null && files.length === 1 && files[0] === '-')) return status;
@@ -617,7 +616,12 @@
         if (implicit) bits &= ~umask;
         if (op[1] === '+') mode |= bits;
         else if (op[1] === '-') mode &= ~bits;
-        else mode = (mode & ~affected) | bits;
+        else {
+          // "=" also clears the sticky bit with "o"; directories keep setuid/setgid unless the clause says "s"
+          const cleared = affected | (classes.indexOf('o') >= 0 ? 0o1000 : 0);
+          const kept = isDir && perm.indexOf('s') < 0 ? mode & 0o6000 : 0;
+          mode = ((mode & ~cleared) | bits | kept);
+        }
       }
     }
     return mode & 0o7777;

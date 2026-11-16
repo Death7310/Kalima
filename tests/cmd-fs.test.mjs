@@ -608,3 +608,18 @@ test('tree draws the directory structure and counts', async () => {
   await sh('mkdir /tmp/tr/priv; chmod 000 /tmp/tr/priv');
   assert.match(await out('tree -L 1 -d'), /priv {2}\[error opening dir\]/);
 });
+
+test('regressions found by comparing with GNU tools', async () => {
+  const { sim, sh, out } = await setup();
+  // ls columns never use the last terminal column
+  const names = Array.from({ length: 14 }, (_, i) => 'file-name-number-' + String(i).padStart(2, '0'));
+  await sh('mkdir /tmp/cols; cd /tmp/cols; touch ' + names.join(' '));
+  const t = await sim.type('cd /tmp/cols; ls');
+  for (const l of t.output.split('\n')) assert.ok(l.length < 80);
+  // chmod "=" keeps setuid on directories, clears sticky with o
+  await sh('mkdir /tmp/sd; chmod 4755 /tmp/sd; chmod a=r /tmp/sd');
+  assert.equal(await out('stat -c %a /tmp/sd'), '4444\n');
+  await sh('touch /tmp/sf; chmod 1777 /tmp/sf; chmod o=g /tmp/sf');
+  assert.equal(await out('stat -c %a /tmp/sf'), '777\n');
+  assert.equal(await out('printf "a\\0b\\0" | head -z -n 1 | od -c | head -1'), (await out('printf "a\\0" | od -c | head -1')));
+});
