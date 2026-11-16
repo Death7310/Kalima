@@ -63,9 +63,9 @@ test('ls with several operands prints headers; errors exit 2', async () => {
 
 test('ls rejects unknown options like GNU ls', async () => {
   const { sh } = await setup();
-  const r = await sh('ls -Z');
+  const r = await sh('ls -y');
   assert.equal(r.code, 2);
-  assert.equal(r.err, "ls: invalid option -- 'Z'\nTry 'ls --help' for more information.\n");
+  assert.equal(r.err, "ls: invalid option -- 'y'\nTry 'ls --help' for more information.\n");
   assert.match((await sh('ls --version')).out, /^ls \(GNU coreutils\)/);
   assert.match((await sh('ls --help')).out, /^Usage: ls \[OPTION\]\.\.\. \[FILE\]\.\.\./);
 });
@@ -189,7 +189,7 @@ test('rmdir: empty only, -p, errors', async () => {
   assert.equal((await sh('rmdir /tmp/r/none')).err, "rmdir: failed to remove '/tmp/r/none': No such file or directory\n");
   assert.equal((await sh('rmdir -p /tmp/r/a/b')).code, 1, 'stops at non-empty /tmp/r');
   assert.equal(await out('ls /tmp/r'), 'f\n');
-  assert.equal(await out('rmdir -v /tmp/p1 2>&1; mkdir /tmp/p1; rmdir -v /tmp/p1'), "rmdir: failed to remove '/tmp/p1': No such file or directory\nrmdir: removing directory, '/tmp/p1'\n");
+  assert.equal(await out('rmdir -v /tmp/p1 2>&1; mkdir /tmp/p1; rmdir -v /tmp/p1'), "rmdir: removing directory, '/tmp/p1'\nrmdir: failed to remove '/tmp/p1': No such file or directory\nrmdir: removing directory, '/tmp/p1'\n");
 });
 
 test('touch creates files, sets dates, honours -c and -r', async () => {
@@ -222,7 +222,7 @@ test('cp copies files, directories and several sources', async () => {
   r = await sh('cp nope dst');
   assert.equal(r.err, "cp: cannot stat 'nope': No such file or directory\n");
   r = await sh('cp f1 f2 f1x');
-  assert.equal(r.err, "cp: target 'f1x' is not a directory\n");
+  assert.equal(r.err, "cp: target 'f1x': No such file or directory\n");
   r = await sh('cp f1 f1');
   assert.equal(r.err, "cp: 'f1' and 'f1' are the same file\n");
   assert.equal((await sh('cp f1')).err, "cp: missing destination file operand after 'f1'\nTry 'cp --help' for more information.\n");
@@ -257,7 +257,7 @@ test('mv renames, moves into directories and reports errors', async () => {
   assert.equal(await out('cat y'), '1\n');
   assert.equal((await sh('mv d d/e')).err, "mv: cannot move 'd' to a subdirectory of itself, 'd/e'\n");
   assert.equal((await sh('mv y')).err, "mv: missing destination file operand after 'y'\nTry 'mv --help' for more information.\n");
-  assert.equal((await sh('mv y z w')).err, "mv: target 'w' is not a directory\n");
+  assert.equal((await sh('mv y z w')).err, "mv: target 'w': No such file or directory\n");
 });
 
 test('rm removes files, refuses directories and /', async () => {
@@ -622,4 +622,47 @@ test('regressions found by comparing with GNU tools', async () => {
   await sh('touch /tmp/sf; chmod 1777 /tmp/sf; chmod o=g /tmp/sf');
   assert.equal(await out('stat -c %a /tmp/sf'), '777\n');
   assert.equal(await out('printf "a\\0b\\0" | head -z -n 1 | od -c | head -1'), (await out('printf "a\\0" | od -c | head -1')));
+});
+
+test('ls formats: -x, -m, -g, -o, -H, trailing slash, --sort and --color validation', async () => {
+  const { sim, sh, out } = await setup();
+  await sh('mkdir -p /tmp/lf/d; cd /tmp/lf; touch a b c; ln -s d ld');
+  assert.equal(await out('cd /tmp/lf; ls -x'), 'a  b  c  d  ld\n');
+  assert.equal(await out('cd /tmp/lf; ls -m'), 'a, b, c, d, ld\n');
+  assert.equal(await out('cd /tmp/lf; ls -C'), 'a  b  c  d  ld\n');
+  assert.equal((await out('cd /tmp/lf; ls -lg a')).trim().split(/\s+/).slice(2, 3)[0], 'kali');
+  assert.match(await out('cd /tmp/lf; ls -lg a'), /^-rw-r--r-- 1 kali 0 /);
+  assert.match(await out('cd /tmp/lf; ls -lo a'), /^-rw-r--r-- 1 kali 0 /);
+  assert.equal(await out('cd /tmp/lf; ls -d */'), 'd/\nld/\n');
+  assert.equal(await out('cd /tmp/lf; echo */'), 'd/ ld/\n');
+  assert.equal(await out('cd /tmp/lf; ls ld/'), '', 'link with trailing slash lists the directory (empty)');
+  assert.match(await out('cd /tmp/lf; ls -l ld'), /ld -> d$/m);
+  assert.equal(await out('cd /tmp/lf; ls -lH ld'), 'total 0\n');
+  assert.equal(await out('cd /tmp/lf; ls --group-directories-first'), 'd\nld\na\nb\nc\n');
+  const r = await sh('ls --color=bogus');
+  assert.equal(r.err, "ls: invalid argument 'bogus' for '--color'\nValid arguments are:\n  - 'always', 'yes', 'force'\n  - 'never', 'no', 'none'\n  - 'auto', 'tty', 'if-tty'\nTry 'ls --help' for more information.\n");
+  assert.match((await sh('ls --sort=bogus')).err, /^ls: invalid argument 'bogus' for '--sort'\nValid arguments are:\n  - 'none'\n/);
+  assert.equal(await out('cd /tmp/lf; ls -lF ld | cut -d" " -f9-'), 'ld -> d\n');
+});
+
+test('cp, mv, ln, rm messages match coreutils 9', async () => {
+  const { sh, out } = await setup();
+  await sh('cd /tmp; mkdir cm; cd cm; echo x > f; echo y > g; mkdir d');
+  assert.equal((await sh('cd /tmp/cm; cp f g nope')).err, "cp: target 'nope': No such file or directory\n");
+  assert.equal((await sh('cd /tmp/cm; cp f g f')).err, "cp: target 'f': Not a directory\n");
+  assert.equal((await sh('cd /tmp/cm; cp -n f g')).err, 'cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead\n');
+  const r = await sh('cd /tmp/cm; mv -n f g');
+  assert.equal(r.err, "mv: not replacing 'g'\n");
+  assert.equal(r.code, 1);
+  assert.equal((await sh('cd /tmp/cm; rm .')).err, "rm: cannot remove '.': Is a directory\n");
+  assert.equal((await sh('cd /tmp/cm; ln')).err, "ln: missing file operand\nTry 'ln --help' for more information.\n");
+  assert.equal((await sh('cd /tmp/cm; ln f g')).err, "ln: failed to create hard link 'g': File exists\n");
+  assert.equal((await sh('cd /tmp/cm; ln d dd')).err, 'ln: d: hard link not allowed for directory\n');
+  assert.equal((await sh('cd /tmp/cm; mkdir -p f/x')).err, "mkdir: cannot create directory 'f': Not a directory\n");
+  assert.equal((await sh('cd /tmp/cm; rmdir nope')).err, "rmdir: failed to remove 'nope': No such file or directory\n");
+  assert.equal((await sh('cd /tmp/cm; chmod -- -x f')).code, 0);
+  assert.equal((await sh('du -s -d 1 /tmp')).err, "du: warning: summarizing conflicts with --max-depth=1\nTry 'du --help' for more information.\n");
+  await sh('cd /tmp/cm; ln -s nowhere bad; ln -s d dl');
+  assert.equal(await out('cd /tmp/cm; realpath bad; readlink -f bad'), '/tmp/cm/nowhere\n/tmp/cm/nowhere\n');
+  assert.equal(await out('cd /tmp/cm; du dl/'), '4\tdl/\n');
 });

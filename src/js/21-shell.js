@@ -508,7 +508,10 @@
         bases = next;
         if (!bases.length) break;
       }
-      return bases.filter((b) => b !== '' ).sort();
+      const found = bases.filter((b) => b !== '' ).sort();
+      // a pattern ending in "/" matches directories only and keeps the slash
+      if (segs.map((x) => x.s).join('').endsWith('/')) return found.filter((p) => this._isDir(VFS.abs(p, this.cwd))).map((p) => p + '/');
+      return found;
     }
 
     /* ------------------------------------------------------------- execution */

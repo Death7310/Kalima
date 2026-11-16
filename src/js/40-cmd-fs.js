@@ -150,17 +150,18 @@
   }
 
   /** Arrange cells in columns the way GNU ls does: column-major, per-column widths, 2-space gaps. */
-  function lsColumns(cells, width) {
+  function lsColumns(cells, width, across) {
     const n = cells.length;
     if (!n) return '';
     const maxCols = Math.max(1, Math.min(n, Math.floor(width / 3)));
     for (let cols = maxCols; cols >= 1; cols--) {
       const rows = Math.ceil(n / cols);
-      const used = Math.ceil(n / rows);
+      const used = across ? Math.min(cols, n) : Math.ceil(n / rows);
+      const at = (r, c) => cells[across ? r * cols + c : c * rows + r];
       const widths = [];
       for (let c = 0; c < used; c++) {
         let w = 0;
-        for (let r = 0; r < rows && c * rows + r < n; r++) w = Math.max(w, cells[c * rows + r].w);
+        for (let r = 0; r < rows; r++) { const cell = at(r, c); if (cell) w = Math.max(w, cell.w); }
         widths.push(w);
       }
       const total = widths.reduce((a, b) => a + b, 0) + 2 * (used - 1);
@@ -169,9 +170,9 @@
       for (let r = 0; r < rows; r++) {
         let line = '';
         for (let c = 0; c < used; c++) {
-          const cell = cells[c * rows + r];
+          const cell = at(r, c);
           if (!cell) continue;
-          const last = (c + 1) * rows + r >= n;
+          const last = !at(r, c + 1) || c === used - 1;
           line += last ? cell.text : cell.text + ' '.repeat(widths[c] - cell.w + 2);
         }
         out += line + '\n';
@@ -181,8 +182,20 @@
     return '';
   }
 
+  /** ls -m: names separated by ", ", wrapped at the terminal width. */
+  function lsCommas(cells, width) {
+    let out = ''; let pos = 0;
+    cells.forEach((c, i) => {
+      if (i > 0) {
+        if (pos + c.w + 2 > width) { out += ',\n'; pos = 0; } else { out += ', '; pos += 2; }
+      }
+      out += c.text; pos += c.w;
+    });
+    return cells.length ? out + '\n' : '';
+  }
+
   const LS_SPEC = {
-    short: 'laAhRtrSdF1inCpsUxfgoGvXcuL',
+    short: 'laAhRtrSdF1inCpsUxfgoGvXcuLZmH',
     long: ['color=?', 'all', 'almost-all', 'human-readable', 'recursive', 'reverse', 'directory', 'classify', 'numeric-uid-gid',
       'inode', 'group-directories-first', 'si', 'time-style=', 'sort=', 'indicator-style=', 'dereference', 'literal', 'hide-control-chars', 'quote-name', 'full-time'],
     alias: { all: 'a', 'almost-all': 'A', 'human-readable': 'h', recursive: 'R', reverse: 'r', directory: 'd', classify: 'F', 'numeric-uid-gid': 'n', inode: 'i', dereference: 'L', 'quote-name': 'Q' },
@@ -192,9 +205,12 @@
     const o = g.opts;
     const color = o.color === undefined ? false : (o.color === true || o.color === 'always' || o.color === 'yes' || o.color === 'force') ? true
       : (o.color === 'auto' || o.color === 'tty' || o.color === 'if-tty') ? ctx.isTTY : false;
-    const sortBy = o.sort ? o.sort : o.t ? 'time' : o.S ? 'size' : o.U || o.f ? 'none' : o.X ? 'extension' : 'name';
+    const isLong = !!(o.l || o.n || o.g || o.o || o['full-time']);
+    const timeKey = o.t || ((o.c || o.u) && !isLong);
+    const sortBy = o.sort && o.sort !== 'version' ? o.sort : o.S ? 'size' : timeKey ? 'time' : o.U || o.f ? 'none' : o.X ? 'extension' : 'name';
     return {
-      long: !!(o.l || o.n || o.g || o.o || o.full), numeric: !!o.n, all: !!(o.a || o.f), almost: !!o.A, human: !!o.h,
+      context: !!o.Z, across: !!o.x, commas: !!o.m, columns: !!(o.C || o.x), noOwner: !!o.g, noGroup: !!(o.o || o.G), followCmd: !!o.H,
+      long: isLong, numeric: !!o.n, all: !!(o.a || o.f), almost: !!o.A, human: !!o.h,
       recursive: !!o.R, reverse: !!o.r, dirOnly: !!o.d, classify: !!o.F, indicator: !!(o.F || o.p), inode: !!o.i, blocks: !!o.s,
       color, sortBy, dirsFirst: !!o['group-directories-first'], follow: !!o.L, oneColumn: !!o[1], fullTime: o['full-time'] != null,
       tty: ctx.isTTY, width: ctx.cols || 80, collate: collator(ctx.env),
@@ -223,7 +239,8 @@
       if (o.follow) { try { st = ctx.fs.stat(full); } catch (e) { orphan = true; } }
       else orphan = !ctx.fs.exists(full) || !(() => { try { ctx.fs.stat(full); return true; } catch (e) { return false; } })();
     }
-    return { name, full, st, orphan };
+    const dirLike = st.isDir || (st.isLink && !orphan && !!tryStat(ctx, full) && tryStat(ctx, full).isDir);
+    return { name, full, st, orphan, dirLike };
   }
 
   function sortEntries(list, o) {
@@ -234,18 +251,18 @@
     else if (o.sortBy === 'extension') cmp = (a, b) => byteCompare(a.name.replace(/^.*\./, ''), b.name.replace(/^.*\./, '')) || cmpName(a, b);
     if (o.sortBy !== 'none') list.sort(cmp);
     if (o.reverse) list.reverse();
-    if (o.dirsFirst) { const d = list.filter((e) => e.st.isDir); const f = list.filter((e) => !e.st.isDir); list.length = 0; list.push(...d, ...f); }
+    if (o.dirsFirst) { const d = list.filter((e) => e.dirLike); const f = list.filter((e) => !e.dirLike); list.length = 0; list.push(...d, ...f); }
     return list;
   }
 
   function lsRender(ctx, o, entries, withTotal) {
     const needQuote = o.tty && entries.some((e) => quoteName(e.name) !== e.name);
     const cell = (e) => {
-      let text = o.tty ? quoteName(e.name) : e.name;
+      let text = (o.context ? '? ' : '') + (o.tty ? quoteName(e.name) : e.name);
       const plainLen = text.length;
       const key = o.color ? colorKey(e.st, e.orphan) : null;
       if (key) text = e.orphan && key === 'or' ? '\x1b[0m' + paint(LS_COLOR.ln, text) : paint(LS_COLOR[key], text);
-      const ind = indicator(e.st, o);
+      const ind = o.long && e.st.isLink ? '' : indicator(e.st, o);
       if (needQuote && quoteName(e.name) === e.name) { text = ' ' + text; return { text: text + ind, w: plainLen + 1 + ind.length }; }
       return { text: text + ind, w: plainLen + ind.length };
     };
@@ -272,7 +289,7 @@
       }
       for (const r of rows) {
         out += (o.inode ? U.padStart(r.ino, wi) + ' ' : '') + (o.blocks ? U.padStart(r.blk, wb) + ' ' : '') + r.mode + ' ' + U.padStart(r.nlink, wl) + ' ' +
-          U.padEnd(r.owner, wo) + ' ' + U.padEnd(r.group, wg) + ' ' + U.padStart(r.size, ws) + ' ' + r.date + ' ' + r.name + '\n';
+          (o.noOwner ? '' : U.padEnd(r.owner, wo) + ' ') + (o.noGroup ? '' : U.padEnd(r.group, wg) + ' ') + U.padStart(r.size, ws) + ' ' + r.date + ' ' + r.name + '\n';
       }
       return out;
     }
@@ -281,11 +298,31 @@
       const wp = Math.max.apply(null, px.map((s) => s.length - 1));
       cells.forEach((c, i) => { const p = U.padStart(px[i].trimEnd(), wp) + ' '; c.text = p + c.text; c.w += p.length; });
     }
-    if (!o.tty || o.oneColumn) return cells.map((c) => c.text + '\n').join('');
-    return lsColumns(cells, o.width);
+    if (o.oneColumn) return cells.map((c) => c.text + '\n').join('');
+    if (o.commas) return lsCommas(cells, o.width);
+    if (!o.tty && !o.columns) return cells.map((c) => c.text + '\n').join('');
+    return lsColumns(cells, o.width, o.across);
+  }
+
+  const LS_ARGS = {
+    color: [['always', 'yes', 'force'], ['never', 'no', 'none'], ['auto', 'tty', 'if-tty']],
+    sort: [['none'], ['time'], ['size'], ['extension'], ['version'], ['width']],
+  };
+
+  /** GNU "invalid argument" report for --color and --sort, or null when both are fine. */
+  function lsBadArgument(opts) {
+    for (const key of Object.keys(LS_ARGS)) {
+      const v = opts[key];
+      if (typeof v !== 'string' || LS_ARGS[key].some((g) => g.indexOf(v) >= 0) || (key === 'sort' && v === 'name')) continue;
+      return 'ls: invalid argument ' + q(v) + ' for ' + q('--' + key) + '\nValid arguments are:\n' +
+        LS_ARGS[key].map((g) => '  - ' + g.map(q).join(', ')).join('\n') + "\nTry 'ls --help' for more information.\n";
+    }
+    return null;
   }
 
   async function lsMain(ctx, g) {
+    const bad = lsBadArgument(g.opts);
+    if (bad) { ctx.err(bad); return 1; }
     const o = lsOptions(ctx, g);
     const operands = g.rest.length ? g.rest : ['.'];
     let status = 0; let first = true;
@@ -294,8 +331,9 @@
       let e;
       try {
         e = makeEntry(ctx, o, arg, arg);
-        const followDir = e.st.isLink && !o.long && !o.classify && !o.dirOnly;
-        if (followDir) { const t = ctx.fs.stat(arg); if (t.isDir) e = { name: arg, full: arg, st: t, orphan: false }; }
+        const slash = arg.length > 1 && arg.endsWith('/');
+        const followDir = e.st.isLink && !o.dirOnly && (slash || o.followCmd || (!o.long && !o.classify));
+        if (followDir) { const t = ctx.fs.stat(arg); if (t.isDir) e = { name: arg, full: arg, st: t, orphan: false, dirLike: true }; }
       } catch (err) {
         if (!isFsError(err)) throw err;
         ctx.err('ls: cannot access ' + q(arg) + ': ' + err.message + '\n'); status = 2; continue;
@@ -698,24 +736,21 @@
         try {
           if (g.opts.p) {
             const parts = dir.replace(/\/+$/, '').split('/');
-            let cur = dir[0] === '/' ? '' : '.';
-            if (dir[0] === '/') parts.shift();
-            const shown = [];
+            let cur = '';
             for (let i = 0; i < parts.length; i++) {
               if (parts[i] === '') continue;
-              cur = cur === '' ? '/' + parts[i] : cur + '/' + parts[i];
-              shown.push(parts[i]);
+              cur = cur === '' && dir[0] !== '/' ? parts[i] : cur + '/' + parts[i];
               const last = i === parts.length - 1;
               if (ctx.fs.exists(cur)) {
-                if (last && !ctx.fs.isDir(cur)) throw new K.FsError('EEXIST', dir);
+                if (!ctx.fs.isDir(cur)) throw new K.FsError(last ? 'EEXIST' : 'ENOTDIR', last ? dir : cur);
                 continue;
               }
-              make(dir[0] === '/' ? cur : cur.replace(/^\.\//, ''), last);
+              make(cur, last);
             }
           } else make(dir, true);
         } catch (e) {
           if (!isFsError(e)) throw e;
-          ctx.eprintln('mkdir: cannot create directory ' + q(dir) + ': ' + e.message); status = 1;
+          ctx.eprintln('mkdir: cannot create directory ' + q(e.code === 'ENOTDIR' && e.path ? e.path : dir) + ': ' + e.message); status = 1;
         }
       }
       return status;
@@ -731,13 +766,15 @@
     main(ctx, g) {
       if (!g.rest.length) return missingOperand(ctx);
       let status = 0;
-      const remove = (path) => {
-        if (g.opts.v) ctx.println('rmdir: removing directory, ' + q(path));
-        ctx.fs.rmdir(path);
-      };
       for (const dir of g.rest) {
+        let current = dir;
+        const remove = (path) => {
+          current = path;
+          if (g.opts.v) ctx.println('rmdir: removing directory, ' + q(path));
+          if (!ctx.fs.lstat(path).isDir) throw new K.FsError('ENOTDIR', path);
+          ctx.fs.rmdir(path);
+        };
         try {
-          if (!ctx.fs.lstat(dir).isDir) throw new K.FsError('ENOTDIR', dir);
           remove(dir);
           if (g.opts.p) {
             let p = dir.replace(/\/+$/, '');
@@ -746,7 +783,7 @@
         } catch (e) {
           if (!isFsError(e)) throw e;
           if (e.code === 'ENOTEMPTY' && g.opts['ignore-fail-on-non-empty']) continue;
-          ctx.eprintln('rmdir: failed to remove ' + q(e.path || dir) + ': ' + e.message); status = 1;
+          ctx.eprintln('rmdir: failed to remove ' + q(current) + ': ' + e.message); status = 1;
         }
       }
       return status;
@@ -859,7 +896,7 @@
 
       for (const f of g.rest) {
         const base = VFS.basename(f.replace(/\/+$/, '') || f);
-        if (base === '.' || base === '..') { ctx.eprintln('rm: refusing to remove ' + q('.') + ' or ' + q('..') + ' directory: skipping ' + q(f)); status = 1; continue; }
+        if (recursive && (base === '.' || base === '..')) { ctx.eprintln('rm: refusing to remove ' + q('.') + ' or ' + q('..') + ' directory: skipping ' + q(f)); status = 1; continue; }
         if (!o['no-preserve-root'] && ctx.fs.abs(f) === '/') {
           ctx.eprintln('rm: it is dangerous to operate recursively on ' + q('/'));
           ctx.eprintln('rm: use --no-preserve-root to override this failsafe');
@@ -891,11 +928,11 @@
     spec: { short: 'sfvnTi', long: ['symbolic', 'force', 'verbose', 'no-dereference', 'no-target-directory', 'interactive'], alias: { symbolic: 's', force: 'f', verbose: 'v', 'no-dereference': 'n', 'no-target-directory': 'T' } },
     main(ctx, g) {
       const o = g.opts; const args = g.rest.slice();
-      if (!args.length) return missingOperand(ctx);
+      if (!args.length) return missingOperand(ctx, 'file operand');
       let dest;
       if (args.length === 1) { dest = '.'; } else dest = args.pop();
       const destIsDir = !o.T && (o.n ? (tryLstat(ctx, dest) && tryLstat(ctx, dest).isDir) : ctx.fs.isDir(dest));
-      if (args.length > 1 && !destIsDir) { ctx.eprintln('ln: target ' + q(dest) + ' is not a directory'); return 1; }
+      if (args.length > 1 && !destIsDir) { ctx.eprintln('ln: target ' + q(dest) + ': ' + notDirReason(ctx, dest)); return 1; }
       if (args.length === 1 && g.rest.length === 1 && !destIsDir) return 1;
       let status = 0;
       for (const src of args) {
@@ -912,8 +949,8 @@
           if (o.v) ctx.println(q(name) + (o.s ? ' -> ' : ' => ') + q(src));
         } catch (e) {
           if (!isFsError(e)) throw e;
-          if (e.hardDir) ctx.eprintln('ln: ' + q(src) + ': hard link not allowed for directory');
-          else ctx.eprintln('ln: failed to create ' + (o.s ? 'symbolic' : 'hard') + ' link ' + q(name) + (o.s ? '' : ' => ' + q(src)) + ': ' + e.message);
+          if (e.hardDir) ctx.eprintln('ln: ' + src + ': hard link not allowed for directory');
+          else ctx.eprintln('ln: failed to create ' + (o.s ? 'symbolic' : 'hard') + ' link ' + q(name) + ': ' + e.message);
           status = 1;
         }
       }
@@ -982,6 +1019,8 @@
     } catch (e) { if (!isFsError(e)) throw e; }
   }
 
+  const notDirReason = (ctx, path) => (tryLstat(ctx, path) ? 'Not a directory' : 'No such file or directory');
+
   /** Common driver for cp and mv: SOURCE... DEST handling, -t, -T. Returns the exit status. */
   async function transfer(ctx, g, op, o, verb) {
     let args = g.rest.slice();
@@ -994,7 +1033,7 @@
     }
     if (!args.length) return missingOperand(ctx, 'file operand');
     const destIsDir = !g.opts.T && ctx.fs.isDir(dest);
-    if ((args.length > 1 || g.opts.t != null) && !destIsDir) { ctx.eprintln(ctx.name + ': target ' + q(dest) + ' is not a directory'); return 1; }
+    if ((args.length > 1 || g.opts.t != null) && !destIsDir) { ctx.eprintln(ctx.name + ': target ' + q(dest) + ': ' + notDirReason(ctx, dest)); return 1; }
     let status = 0;
     for (const src of args) {
       const target = destIsDir ? joinPath(dest, VFS.basename(src.replace(/\/+$/, '') || src)) : dest;
@@ -1016,6 +1055,7 @@
     async main(ctx, g) {
       const p = g.opts;
       const recursive = !!(p.r || p.a);
+      if (p.n) ctx.eprintln('cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead');
       const o = {
         recursive, f: !!p.f, i: !!p.i, n: !!p.n, u: !!p.u, v: !!p.v,
         preserve: !!(p.p || p.a || p.preserve), owner: !!(p.a || (p.p && ctx.isRoot)) && ctx.isRoot,
@@ -1044,7 +1084,7 @@
           if (sameFile(ctx, src, dst) && ctx.fs.abs(src) === ctx.fs.abs(dst)) { ctx.eprintln('mv: ' + q(src) + ' and ' + q(dst) + ' are the same file'); return false; }
           if (sst.isDir && !dstat.isDir) { ctx.eprintln('mv: cannot overwrite non-directory ' + q(dst) + ' with directory ' + q(src)); return false; }
           if (!sst.isDir && dstat.isDir) { ctx.eprintln('mv: cannot overwrite directory ' + q(dst) + ' with non-directory'); return false; }
-          if (p.n) return true;
+          if (p.n) { ctx.eprintln('mv: not replacing ' + q(dst)); return false; }
           if (p.u && dstat.mtime >= sst.mtime) return true;
           if (p.i && !p.f && !(await confirm(ctx, 'mv: overwrite ' + q(dst) + '? '))) return true;
         }
@@ -1107,7 +1147,7 @@
     authors: 'David MacKenzie and Jim Meyering',
     spec: { short: 'cfvR', long: ['changes', 'silent', 'quiet', 'verbose', 'recursive', 'reference=', 'preserve-root', 'no-preserve-root'], alias: { changes: 'c', silent: 'f', quiet: 'f', verbose: 'v', recursive: 'R' } },
     // "-x" and "u-w" style modes must not be mistaken for options
-    prep: (args) => { const i = args.findIndex((a) => /^-[rwxXstugoa,=+-]+$/.test(a)); return i < 0 ? args : args.slice(0, i).concat('--', args.slice(i)); },
+    prep: (args) => { const i = args.findIndex((a) => /^-[rwxXstugoa,=+-]+$/.test(a) || a === '--'); return i < 0 || args[i] === '--' ? args : args.slice(0, i).concat('--', args.slice(i)); },
     async main(ctx, g) {
       const files = g.rest.slice();
       const ref = g.opts.reference;
@@ -1333,20 +1373,27 @@
    * `symlinks` false resolves only . and .. (realpath -s). Throws K.FsError.
    */
   function canonical(ctx, path, mode, symlinks) {
-    const abs = ctx.fs.abs(path);
-    if (!symlinks) return abs;
-    const parts = abs.split('/').filter(Boolean);
-    for (let i = parts.length; i >= 0; i--) {
-      const head = '/' + parts.slice(0, i).join('/');
-      let real;
-      try { real = ctx.fs.realpath(head); } catch (e) { if (!isFsError(e) || e.code !== 'ENOENT') throw e; continue; }
-      const rest = parts.slice(i);
-      if (!rest.length) return real;
-      if (mode === 'e' || (mode === 'f' && rest.length > 1)) throw new K.FsError('ENOENT', path);
-      if (!ctx.fs.isDir(real)) throw new K.FsError('ENOTDIR', path);
-      return (real === '/' ? '' : real) + '/' + rest.join('/');
+    if (!symlinks) return ctx.fs.abs(path);
+    let pending = ctx.fs.abs(path).split('/').filter(Boolean);
+    let done = []; let hops = 0;
+    while (pending.length) {
+      const name = pending.shift();
+      if (name === '.') continue;
+      if (name === '..') { done.pop(); continue; }
+      const last = pending.length === 0;
+      let st = null;
+      try { st = ctx.fs.lstat('/' + done.concat(name).join('/')); } catch (e) { if (!isFsError(e) || e.code !== 'ENOENT') throw e; }
+      if (!st) {
+        if (mode === 'e' || (mode === 'f' && !last)) throw new K.FsError('ENOENT', path);
+        done.push(name);
+      } else if (st.isLink) {
+        if (++hops > 40) throw new K.FsError('ELOOP', path);
+        if (st.target[0] === '/') done = [];
+        pending = st.target.split('/').filter(Boolean).concat(pending);
+      } else if (!last && !st.isDir) throw new K.FsError('ENOTDIR', path);
+      else done.push(name);
     }
-    return abs;
+    return '/' + done.join('/');
   }
 
   function relativePath(from, to) {
@@ -1470,7 +1517,8 @@
   const hexHash = (name) => { let h = ''; for (let i = 0; h.length < 40; i++) h += U.hash32(name + ':' + i).toString(16).padStart(8, '0'); return h.slice(0, 40); };
 
   /** Describe text content as `file` does: charset plus line-terminator modifiers. */
-  function textDescription(text) {
+  function textDescription(whole) {
+    const text = whole.slice(0, 65536); // file(1) only examines the start of the data
     const ascii = !/[^\x00-\x7f]/.test(text);
     const bom = text.charCodeAt(0) === 0xfeff;
     let d = bom ? 'Unicode text, UTF-8 (with BOM) text' : ascii ? 'ASCII text' : 'Unicode text, UTF-8 text';
@@ -1694,7 +1742,7 @@
     if (g.opts.N) {
       for (const c of chunks) { let n = 0; c.text = splitLines(c.text).map((l) => U.padStart(++n, 6) + ' ' + l).join('\n') + (c.text.endsWith('\n') ? '\n' : ''); }
     }
-    if (!chunks.length) return status;
+    if (!chunks.length) return 0;
     const text = chunks.map((c, i) => (chunks.length > 1 && opts.headers ? (i ? '\n' : '') + '::::::::::::::\n' + c.name + '\n::::::::::::::\n' : '') + c.text).join('');
     if (ctx.isTTY && ctx.term && ctx.term.pager) await ctx.term.pager(text, { title: chunks[0].name || '(standard input)' });
     else ctx.out(text);
@@ -1798,7 +1846,7 @@
     spec: { short: 'abchkmsd:xSDLP0', long: ['all', 'bytes', 'total', 'human-readable', 'summarize', 'max-depth=', 'apparent-size', 'block-size=', 'si', 'one-file-system', 'null'], alias: { all: 'a', bytes: 'b', total: 'c', 'human-readable': 'h', summarize: 's', 'max-depth': 'd' } },
     main(ctx, g) {
       const o = g.opts;
-      if (o.s && o.d != null) { ctx.eprintln('du: summarizing conflicts with --max-depth=' + o.d); ctx.eprintln("Try 'du --help' for more information."); return 1; }
+      if (o.s && o.d != null) { ctx.eprintln('du: warning: summarizing conflicts with --max-depth=' + o.d); ctx.eprintln("Try 'du --help' for more information."); return 1; }
       const maxDepth = o.s ? 0 : o.d == null ? Infinity : parseInt(o.d, 10);
       if (o.d != null && !/^\d+$/.test(o.d)) { ctx.eprintln('du: invalid maximum depth ' + q(o.d)); ctx.eprintln("Try 'du --help' for more information."); return 1; }
       const unit = duUnit(g);
@@ -1809,7 +1857,7 @@
       const walk = (path, name, depth) => {
         ctx.checkAbort();
         let st;
-        try { st = ctx.fs.lstat(path); } catch (e) {
+        try { st = path.length > 1 && path.endsWith('/') ? ctx.fs.stat(path) : ctx.fs.lstat(path); } catch (e) {
           if (!isFsError(e)) throw e;
           ctx.eprintln('du: cannot access ' + q(name) + ': ' + e.message); status = 1; return 0;
         }
