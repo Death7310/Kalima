@@ -287,6 +287,7 @@
   /** Translate the bracket expression starting at pat[i] ('['). Returns {src, end}. */
   function bracketToJs(pat, i, awk) {
     const unmatched = () => new RegexError('Unmatched [, [^, [:, [., or [=');
+    if (i + 1 >= pat.length) throw new RegexError('Invalid regular expression');
     let j = i + 1; let body = '';
     const negate = pat[j] === '^';
     if (negate) j++;
@@ -758,7 +759,7 @@
         }
         // trailing context once --max-count stopped the search
         for (let i = lastShown + 1; after > 0 && i < lines.length && count >= maxCount && !listing && lastShown >= 0; i++, after--) out.line(prefix(i + 1, offsets[i], '-') + lines[i]);
-        if (o.c) out.line((names ? C.file(label) + C.sep(':') : '') + count);
+        if (o.c && !o.l && !o.L && !o.q) out.line((names ? C.file(label) + C.sep(':') : '') + count);
         if ((o.l && count > 0) || (o.L && count === 0)) out.line(C.file(label));
       };
 
