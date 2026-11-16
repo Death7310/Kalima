@@ -471,3 +471,140 @@ test('xargs runs commands through the shell and tee passes data on', async () =>
   assert.equal(await out("printf 'a\\nb\\n' | tee /tmp/tee1.txt | grep -c ."), '2\n');
   assert.equal(await out('grep -c . /tmp/tee1.txt'), '2\n');
 });
+
+table("checksum tools match GNU", "printf 'hello\\n' > a; printf 'héllo wörld\\n' > u; : > empty; mkdir dd; printf 'two\\n' > 'sp ace'", 'C.UTF-8', [
+  ["md5sum a", "b1946ac92492d2347c6235b4d2611184  a\n", "", 0],
+  ["md5sum a u empty", "b1946ac92492d2347c6235b4d2611184  a\ne51a0dabd365a5b1533d3f4b0e097fb3  u\nd41d8cd98f00b204e9800998ecf8427e  empty\n", "", 0],
+  ["md5sum < a", "b1946ac92492d2347c6235b4d2611184  -\n", "", 0],
+  ["md5sum - < a", "b1946ac92492d2347c6235b4d2611184  -\n", "", 0],
+  ["md5sum --tag a u", "MD5 (a) = b1946ac92492d2347c6235b4d2611184\nMD5 (u) = e51a0dabd365a5b1533d3f4b0e097fb3\n", "", 0],
+  ["md5sum -b a", "b1946ac92492d2347c6235b4d2611184 *a\n", "", 0],
+  ["md5sum -t a", "b1946ac92492d2347c6235b4d2611184  a\n", "", 0],
+  ["md5sum nonex", "", "md5sum: nonex: No such file or directory\n", 1],
+  ["md5sum a nonex; echo $?", "b1946ac92492d2347c6235b4d2611184  a\n1\n", "md5sum: nonex: No such file or directory\n", 0],
+  ["md5sum dd", "", "md5sum: dd: Is a directory\n", 1],
+  ["md5sum 'sp ace'", "c193497a1a06b2c72230e6146ff47080  sp ace\n", "", 0],
+  ["sha1sum a", "f572d396fae9206628714fb2ce00f72e94f2258f  a\n", "", 0],
+  ["sha224sum a", "2d6d67d91d0badcdd06cbbba1fe11538a68a37ec9c2e26457ceff12b  a\n", "", 0],
+  ["sha256sum a u", "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  a\n3828eeee974aa7486e7acc258e5c73a0115e168444d6688deb8d5d1306d1f57d  u\n", "", 0],
+  ["sha384sum a", "1d0f284efe3edea4b9ca3bd514fa134b17eae361ccc7a1eefeff801b9bd6604e01f21f6bf249ef030599f0c218f2ba8c  a\n", "", 0],
+  ["sha512sum a", "e7c22b994c59d9cf2b48e549b1e24666636045930d3da7c1acb299d1c3b7f931f94aae41edda2c2b207a36e10f8bcb8d45223e54878f5b316e7ce3b6bc019629  a\n", "", 0],
+  ["sha256sum --tag a", "SHA256 (a) = 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\n", "", 0],
+  ["sha256sum -z a", "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  a\u0000", "", 0],
+  ["sha256sum a > sums; sha256sum -c sums", "a: OK\n", "", 0],
+  ["sha256sum a u > sums; sha256sum -c sums; echo $?", "a: OK\nu: OK\n0\n", "", 0],
+  ["sha256sum a u > sums; echo changed >> a; sha256sum -c sums; echo $?", "a: FAILED\nu: OK\n1\n", "sha256sum: WARNING: 1 computed checksum did NOT match\n", 0],
+  ["sha256sum a u > sums; echo changed >> a; sha256sum -c --quiet sums; echo $?", "a: FAILED\n1\n", "sha256sum: WARNING: 1 computed checksum did NOT match\n", 0],
+  ["sha256sum a u > sums; echo changed >> a; sha256sum -c --status sums; echo $?", "1\n", "", 0],
+  ["sha256sum a nonex > sums; sha256sum -c sums; echo $?", "a: OK\n0\n", "sha256sum: nonex: No such file or directory\n", 0],
+  ["sha256sum --tag a u > sums; sha256sum -c sums; echo $?", "a: OK\nu: OK\n0\n", "", 0],
+  ["printf 'garbage\\n' > sums; sha256sum -c sums; echo $?", "1\n", "sha256sum: sums: no properly formatted checksum lines found\n", 0],
+  ["printf 'garbage\\n' > sums; md5sum -c sums; echo $?", "1\n", "md5sum: sums: no properly formatted checksum lines found\n", 0],
+  ["sha1sum a > sums; printf 'bad line\\n' >> sums; sha1sum -c sums; echo $?", "a: OK\n0\n", "sha1sum: WARNING: 1 line is improperly formatted\n", 0],
+  ["sha1sum a > sums; printf 'bad line\\n' >> sums; sha1sum -c --warn sums; echo $?", "a: OK\n0\n", "sha1sum: sums: 2: improperly formatted SHA1 checksum line\nsha1sum: WARNING: 1 line is improperly formatted\n", 0],
+  ["sha1sum a > sums; printf 'bad line\\n' >> sums; sha1sum -c --strict sums; echo $?", "a: OK\n1\n", "sha1sum: WARNING: 1 line is improperly formatted\n", 0],
+  ["sha1sum a nonex > sums; sha1sum -c --ignore-missing sums; echo $?", "a: OK\n0\n", "sha1sum: nonex: No such file or directory\n", 0],
+  ["sha1sum nonex > sums; sha1sum -c --ignore-missing sums; echo $?", "1\n", "sha1sum: nonex: No such file or directory\nsha1sum: sums: no properly formatted checksum lines found\n", 0],
+  ["sha1sum -c nonexlist; echo $?", "1\n", "sha1sum: nonexlist: No such file or directory\n", 0],
+  ["sha1sum a | sha1sum -c; echo $?", "a: OK\n0\n", "", 0],
+  ["sha1sum --quiet a", "", "sha1sum: the --quiet option is meaningful only when verifying checksums\nTry 'sha1sum --help' for more information.\n", 1],
+  ["sha1sum --check --tag a", "", "sha1sum: the --tag option is meaningless when verifying checksums\nTry 'sha1sum --help' for more information.\n", 1],
+  ["md5sum --bogus a", "", "md5sum: unrecognized option '--bogus'\nTry 'md5sum --help' for more information.\n", 1],
+  ["sha256sum a a", "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  a\n5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  a\n", "", 0],
+  ["sha512sum empty", "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e  empty\n", "", 0],
+  ["md5sum --warn a", "", "md5sum: the --warn option is meaningful only when verifying checksums\nTry 'md5sum --help' for more information.\n", 1],
+  ["md5sum --status a", "", "md5sum: the --status option is meaningful only when verifying checksums\nTry 'md5sum --help' for more information.\n", 1],
+  ["sha256sum a | md5sum", "622e62086ae2bdb9520066b88bc2ae45  -\n", "", 0],
+]);
+
+table("base64, base32 and strings match GNU", "printf 'hello\\n' > a; printf 'abcdefgh' > b8; printf 'hi\\0there\\1\\2 and more text\\n\\0\\0x\\0longer string here\\n' > bin; printf 'aGVsbG8K' > enc; printf '\\xff\\xfe' > raw", 'C.UTF-8', [
+  ["echo hello | base64", "aGVsbG8K\n", "", 0],
+  ["echo hello | base64 -w 4", "aGVs\nbG8K\n", "", 0],
+  ["echo hello | base64 -w0", "aGVsbG8K", "", 0],
+  ["echo aGVsbG8K | base64 -d", "hello\n", "", 0],
+  ["echo aGVsbG8 | base64 -d", "hello", "base64: invalid input\n", 1],
+  ["echo 'aGVs bG8K' | base64 -d", "hel", "base64: invalid input\n", 1],
+  ["echo '!!!' | base64 -d", "", "base64: invalid input\n", 1],
+  ["echo 'aGVs!bG8K' | base64 -d", "hel", "base64: invalid input\n", 1],
+  ["echo 'aGVs!bG8K' | base64 -di", "hello\n", "", 0],
+  ["echo hello | base32", "NBSWY3DPBI======\n", "", 0],
+  ["echo NBSWY3DPBI====== | base32 -d", "hello\n", "", 0],
+  ["echo hello | base64 -w x", "", "base64: invalid wrap size: ‘x’\n", 1],
+  ["base64 a b", "", "base64: extra operand ‘b’\nTry 'base64 --help' for more information.\n", 1],
+  ["base64 nonex", "", "base64: nonex: No such file or directory\n", 1],
+  ["base64 -d nonex", "", "base64: nonex: No such file or directory\n", 1],
+  ["printf '' | base64", "", "", 0],
+  ["printf 'a' | base64", "YQ==\n", "", 0],
+  ["printf 'ab' | base64", "YWI=\n", "", 0],
+  ["echo 'YQ' | base64 -d", "a", "base64: invalid input\n", 1],
+  ["echo 'YQ=' | base64 -d", "a", "base64: invalid input\n", 1],
+  ["echo 'YQ==YQ==' | base64 -d", "aa", "", 0],
+  ["printf 'abcdefgh' | base32 -w 8", "MFRGGZDF\nMZTWQ===\n", "", 0],
+  ["echo x | base32 -w0", "PAFA====", "", 0],
+  ["base64 --wrap", "", "base64: option '--wrap' requires an argument\nTry 'base64 --help' for more information.\n", 1],
+  ["echo hello | base64 -w -1", "", "base64: invalid wrap size: ‘-1’\n", 1],
+  ["echo hello | base64 --wrap=3", "aGV\nsbG\n8K\n", "", 0],
+  ["echo hello | base64 -x", "", "base64: invalid option -- 'x'\nTry 'base64 --help' for more information.\n", 1],
+  ["echo 'YWJj' | base64 --decode --ignore-garbage", "abc", "", 0],
+  ["base64 a", "aGVsbG8K\n", "", 0],
+  ["base64 -d enc", "hello\n", "", 0],
+  ["base64 < a", "aGVsbG8K\n", "", 0],
+  ["base32 b8", "MFRGGZDFMZTWQ===\n", "", 0],
+  ["base32 -d b8; echo $?", "1\n", "base32: invalid input\n", 0],
+  ["echo 'MFRGG===' | base32 -d", "abc", "", 0],
+  ["echo 'MFRGGZDF' | base32 -d", "abcde", "", 0],
+  ["echo 'MFRGGZ' | base32 -d", "", "base32: invalid input\n", 1],
+  ["echo 'M' | base32 -d", "", "base32: invalid input\n", 1],
+  ["base64 -w 0 b8", "YWJjZGVmZ2g=", "", 0],
+  ["base64 -i a", "aGVsbG8K\n", "", 0],
+  ["echo 'YQ==' | base64 -d -w 3", "a", "", 0],
+  ["strings bin", "there\n and more text\nlonger string here\n", "", 0],
+  ["strings -n 8 bin", " and more text\nlonger string here\n", "", 0],
+  ["strings -n 2 bin", "hi\nthere\n and more text\nlonger string here\n", "", 0],
+  ["strings -3 bin", "there\n and more text\nlonger string here\n", "", 0],
+  ["strings -t x bin", "      3 there\n      a  and more text\n     1d longer string here\n", "", 0],
+  ["strings -t d bin", "      3 there\n     10  and more text\n     29 longer string here\n", "", 0],
+  ["strings -o bin", "      3 there\n     12  and more text\n     35 longer string here\n", "", 0],
+  ["strings -f bin", "bin: there\nbin:  and more text\nbin: longer string here\n", "", 0],
+  ["strings a bin", "hello\nthere\n and more text\nlonger string here\n", "", 0],
+  ["strings nonex", "", "strings: 'nonex': No such file\n", 1],
+  ["strings -n 0 bin", "", "strings: minimum string length is too small: 0\n", 1],
+  ["strings -n x bin", "", "strings: invalid integer argument x\n", 1],
+  ["strings -t z bin", "", "Usage: strings [option(s)] [file(s)]\n Display printable strings in [file(s)] (stdin by default)\n The options are:\n  -a - --all                Scan the entire file, not just the data section [default]\n  -d --data                 Only scan the data sections in the file\n  -f --print-file-name      Print the name of the file before each string\n  -n <number>               Locate & print any sequence of at least <number>\n    --bytes=<number>         displayable characters.  (The default is 4).\n  -t --radix={o,d,x}        Print the location of the string in base 8, 10 or 16\n  -w --include-all-whitespace Include all whitespace as valid string characters\n  -o                        An alias for --radix=o\n  -T --target=<BFDNAME>     Specify the binary file format\n  -e --encoding={s,S,b,l,B,L} Select character size and endianness:\n                            s = 7-bit, S = 8-bit, {b,l} = 16-bit, {B,L} = 32-bit\n  --unicode={default|show|invalid|hex|escape|highlight}\n  -U {d|s|i|x|e|h}          Specify how to treat UTF-8 encoded unicode characters\n  -s --output-separator=<string> String used to separate strings in output.\n  @<file>                   Read options from <file>\n  -h --help                 Display this information\n  -v -V --version           Print the program's version number\nstrings: supported targets: elf64-x86-64 elf32-i386 elf32-iamcu elf32-x86-64 pei-i386 pe-x86-64 pei-x86-64 elf64-little elf64-big elf32-little elf32-big pe-bigobj-x86-64 pe-i386 pdb srec symbolsrec verilog tekhex binary ihex plugin\n", 1],
+  ["strings < bin", "there\n and more text\nlonger string here\n", "", 0],
+  ["strings -s, bin", "there, and more text,longer string here,", "", 0],
+  ["strings -w bin", "there\n and more text\n\nlonger string here\n\n", "", 0],
+  ["strings --bytes=6 bin", " and more text\nlonger string here\n", "", 0],
+  ["strings -z bin", "", "strings: invalid option -- 'z'\nUsage: strings [option(s)] [file(s)]\n Display printable strings in [file(s)] (stdin by default)\n The options are:\n  -a - --all                Scan the entire file, not just the data section [default]\n  -d --data                 Only scan the data sections in the file\n  -f --print-file-name      Print the name of the file before each string\n  -n <number>               Locate & print any sequence of at least <number>\n    --bytes=<number>         displayable characters.  (The default is 4).\n  -t --radix={o,d,x}        Print the location of the string in base 8, 10 or 16\n  -w --include-all-whitespace Include all whitespace as valid string characters\n  -o                        An alias for --radix=o\n  -T --target=<BFDNAME>     Specify the binary file format\n  -e --encoding={s,S,b,l,B,L} Select character size and endianness:\n                            s = 7-bit, S = 8-bit, {b,l} = 16-bit, {B,L} = 32-bit\n  --unicode={default|show|invalid|hex|escape|highlight}\n  -U {d|s|i|x|e|h}          Specify how to treat UTF-8 encoded unicode characters\n  -s --output-separator=<string> String used to separate strings in output.\n  @<file>                   Read options from <file>\n  -h --help                 Display this information\n  -v -V --version           Print the program's version number\nstrings: supported targets: elf64-x86-64 elf32-i386 elf32-iamcu elf32-x86-64 pei-i386 pe-x86-64 pei-x86-64 elf64-little elf64-big elf32-little elf32-big pe-bigobj-x86-64 pe-i386 pdb srec symbolsrec verilog tekhex binary ihex plugin\n", 1],
+]);
+
+
+test('digests equal the platform implementation for awkward lengths', async () => {
+  const { createHash } = await import('node:crypto');
+  const samples = ['', 'a', 'héllo wörld €😀', 'x'.repeat(55), 'x'.repeat(56), 'x'.repeat(64), 'x'.repeat(111), 'x'.repeat(112), 'x'.repeat(128), 'The quick brown fox\n'.repeat(100)];
+  for (const algo of ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512']) {
+    for (const text of samples) assert.equal(sim.K.digest(algo, text), createHash(algo).update(text, 'utf8').digest('hex'), algo + ' ' + text.length);
+  }
+});
+
+test('md5sum in a pipeline and known digests', async () => {
+  assert.equal(await out("printf abc | md5sum"), '900150983cd24fb0d6963f7d28e17f72  -\n');
+  assert.equal(await out("printf abc | sha256sum"), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  -\n');
+  assert.equal(await out("printf abc | sha1sum --tag"), 'SHA1 (-) = a9993e364706816aba3e25717850c26c9cd0d89d\n');
+});
+
+test('xxd dumps and reverses', async () => {
+  // the ASCII column starts one blank after the hex area, which is padded to full width
+  const row = (offset, hex, ascii, width) => (offset + ': ' + hex).padEnd(width) + ascii + '\n';
+  assert.equal(await out("printf 'Hello, World! Kali' | xxd"),
+    row('00000000', '4865 6c6c 6f2c 2057 6f72 6c64 2120 4b61', 'Hello, World! Ka', 51) + row('00000010', '6c69', 'li', 51));
+  assert.equal(await out("printf 'Hello' | xxd -p"), '48656c6c6f\n');
+  assert.equal(await out("printf 'Hello' | xxd -u -g1"), row('00000000', '48 65 6C 6C 6F', 'Hello', 59));
+  assert.equal(await out("printf 'Hello, World' | xxd -s 7 -l 3"), row('00000007', '576f 72', 'Wor', 51));
+  assert.equal(await out("printf 'abcdef' | xxd -c 4"), row('00000000', '6162 6364', 'abcd', 21) + row('00000004', '6566', 'ef', 21));
+  assert.equal(await out("printf 'Hi' | xxd -b"), row('00000000', '01001000 01101001', 'Hi', 65));
+  assert.equal(await out("printf 'Hi\\n' | xxd -i"), '  0x48, 0x69, 0x0a\n');
+  assert.equal(await out("echo 6b616c69 | xxd -r -p"), 'kali');
+  assert.equal(await out("printf 'Hello, World! Kali' | xxd | xxd -r"), 'Hello, World! Kali');
+  assert.equal((await run('xxd /nonexistent')).err, 'xxd: /nonexistent: No such file or directory\n');
+});

@@ -1721,5 +1721,499 @@
     },
   });
 
+  /* ===================================================== message digests
+   * Pure JavaScript MD5 and SHA-1/2 over byte arrays. The SHA-2 round
+   * constants are derived from the primes (cube/square roots) at first use.
+   */
+  const rotl = (x, n) => ((x << n) | (x >>> (32 - n))) >>> 0;
+  const rotr = (x, n) => ((x >>> n) | (x << (32 - n))) >>> 0;
+  const toHex = (words, bytesEach, le) => {
+    let s = '';
+    for (const w of words) for (let i = 0; i < bytesEach; i++) s += (((le ? w >>> (8 * i) : w >>> (8 * (bytesEach - 1 - i))) & 255)).toString(16).padStart(2, '0');
+    return s;
+  };
+
+  /** Message padded with 0x80, zeros and the bit length (`lenBytes` wide) to a multiple of `block`. */
+  function padMessage(bytes, block, lenBytes, littleEndian) {
+    const total = Math.ceil((bytes.length + 1 + lenBytes) / block) * block;
+    const out = new Uint8Array(total);
+    out.set(bytes); out[bytes.length] = 0x80;
+    let bits = BigInt(bytes.length) * 8n;
+    for (let i = 0; i < lenBytes; i++) {
+      out[littleEndian ? total - lenBytes + i : total - 1 - i] = Number(bits & 255n); bits >>= 8n;
+    }
+    return out;
+  }
+
+  let md5Table = null;
+  function md5Digest(bytes) {
+    md5Table = md5Table || Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0);
+    const shifts = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+    const m = padMessage(bytes, 64, 8, true);
+    let a0 = 0x67452301; let b0 = 0xefcdab89; let c0 = 0x98badcfe; let d0 = 0x10325476;
+    const w = new Array(16);
+    for (let off = 0; off < m.length; off += 64) {
+      for (let i = 0; i < 16; i++) w[i] = (m[off + 4 * i] | (m[off + 4 * i + 1] << 8) | (m[off + 4 * i + 2] << 16) | (m[off + 4 * i + 3] << 24)) >>> 0;
+      let a = a0; let b = b0; let c = c0; let d = d0;
+      for (let i = 0; i < 64; i++) {
+        let f; let g;
+        if (i < 16) { f = (b & c) | (~b & d); g = i; }
+        else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) % 16; }
+        else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; }
+        else { f = c ^ (b | ~d); g = (7 * i) % 16; }
+        f = (f + a + md5Table[i] + w[g]) >>> 0;
+        a = d; d = c; c = b;
+        b = (b + rotl(f, shifts[(i >> 4) * 4 + (i % 4)])) >>> 0;
+      }
+      a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + d) >>> 0;
+    }
+    return toHex([a0, b0, c0, d0], 4, true);
+  }
+
+  function sha1Digest(bytes) {
+    const m = padMessage(bytes, 64, 8, false);
+    const h = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
+    const w = new Array(80);
+    for (let off = 0; off < m.length; off += 64) {
+      for (let i = 0; i < 16; i++) w[i] = ((m[off + 4 * i] << 24) | (m[off + 4 * i + 1] << 16) | (m[off + 4 * i + 2] << 8) | m[off + 4 * i + 3]) >>> 0;
+      for (let i = 16; i < 80; i++) w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+      let [a, b, c, d, e] = h;
+      for (let i = 0; i < 80; i++) {
+        let f; let k;
+        if (i < 20) { f = (b & c) | (~b & d); k = 0x5a827999; }
+        else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+        else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc; }
+        else { f = b ^ c ^ d; k = 0xca62c1d6; }
+        const t = (rotl(a, 5) + (f >>> 0) + e + k + w[i]) >>> 0;
+        e = d; d = c; c = rotl(b, 30); b = a; a = t;
+      }
+      h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0; h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0; h[4] = (h[4] + e) >>> 0;
+    }
+    return toHex(h, 4);
+  }
+
+  let sha2Constants = null;
+  /** First 64 bits of the fractional part of the n-th root of each of the first 80 primes. */
+  function rootFraction(p, root) {
+    const scaled = BigInt(p) << BigInt(64 * root);
+    let x = 1n << BigInt(Math.ceil(scaled.toString(2).length / root) + 1);
+    for (;;) {   // Newton iteration for the integer root
+      const y = (BigInt(root - 1) * x + scaled / x ** BigInt(root - 1)) / BigInt(root);
+      if (y >= x) break;
+      x = y;
+    }
+    return x & ((1n << 64n) - 1n);
+  }
+  function sha2Setup() {
+    if (sha2Constants) return sha2Constants;
+    const primes = [];
+    for (let n = 2; primes.length < 80; n++) if (primes.every((p) => n % p)) primes.push(n);
+    const sq = primes.slice(0, 16).map((p) => rootFraction(p, 2));
+    sha2Constants = { k: primes.map((p) => rootFraction(p, 3)), h512: sq.slice(0, 8), h384: sq.slice(8, 16) };
+    return sha2Constants;
+  }
+
+  function sha256Digest(bytes, is224) {
+    const c = sha2Setup();
+    const k = c.k.slice(0, 64).map((v) => Number(v >> 32n));
+    const h = (is224 ? c.h384 : c.h512).map((v) => (is224 ? Number(v & 0xffffffffn) : Number(v >> 32n)));
+    const m = padMessage(bytes, 64, 8, false); const w = new Array(64);
+    for (let off = 0; off < m.length; off += 64) {
+      for (let i = 0; i < 16; i++) w[i] = ((m[off + 4 * i] << 24) | (m[off + 4 * i + 1] << 16) | (m[off + 4 * i + 2] << 8) | m[off + 4 * i + 3]) >>> 0;
+      for (let i = 16; i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + (s0 >>> 0) + w[i - 7] + (s1 >>> 0)) >>> 0;
+      }
+      let [a, b, cc, d, e, f, g, hh] = h;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (hh + ((rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) >>> 0) + (((e & f) ^ (~e & g)) >>> 0) + k[i] + w[i]) >>> 0;
+        const t2 = (((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) >>> 0) + (((a & b) ^ (a & cc) ^ (b & cc)) >>> 0)) >>> 0;
+        hh = g; g = f; f = e; e = (d + t1) >>> 0; d = cc; cc = b; b = a; a = (t1 + t2) >>> 0;
+      }
+      const add = [a, b, cc, d, e, f, g, hh];
+      for (let i = 0; i < 8; i++) h[i] = (h[i] + add[i]) >>> 0;
+    }
+    return toHex(is224 ? h.slice(0, 7) : h, 4);
+  }
+
+  function sha512Digest(bytes, is384) {
+    const c = sha2Setup(); const mask = (1n << 64n) - 1n;
+    const r = (x, n) => ((x >> BigInt(n)) | (x << BigInt(64 - n))) & mask;
+    const h = (is384 ? c.h384 : c.h512).slice();
+    const m = padMessage(bytes, 128, 16, false); const w = new Array(80);
+    for (let off = 0; off < m.length; off += 128) {
+      for (let i = 0; i < 16; i++) {
+        let v = 0n;
+        for (let j = 0; j < 8; j++) v = (v << 8n) | BigInt(m[off + 8 * i + j]);
+        w[i] = v;
+      }
+      for (let i = 16; i < 80; i++) {
+        const s0 = r(w[i - 15], 1) ^ r(w[i - 15], 8) ^ (w[i - 15] >> 7n);
+        const s1 = r(w[i - 2], 19) ^ r(w[i - 2], 61) ^ (w[i - 2] >> 6n);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & mask;
+      }
+      let [a, b, cc, d, e, f, g, hh] = h;
+      for (let i = 0; i < 80; i++) {
+        const t1 = (hh + (r(e, 14) ^ r(e, 18) ^ r(e, 41)) + ((e & f) ^ (~e & mask & g)) + c.k[i] + w[i]) & mask;
+        const t2 = ((r(a, 28) ^ r(a, 34) ^ r(a, 39)) + ((a & b) ^ (a & cc) ^ (b & cc))) & mask;
+        hh = g; g = f; f = e; e = (d + t1) & mask; d = cc; cc = b; b = a; a = (t1 + t2) & mask;
+      }
+      [a, b, cc, d, e, f, g, hh].forEach((v, i) => { h[i] = (h[i] + v) & mask; });
+    }
+    return h.slice(0, is384 ? 6 : 8).map((v) => v.toString(16).padStart(16, '0')).join('');
+  }
+
+  const DIGESTS = {
+    md5: { label: 'MD5', hex: 32, fn: md5Digest, authors: 'Ulrich Drepper, Scott Miller, and David Madore' },
+    sha1: { label: 'SHA1', hex: 40, fn: sha1Digest, authors: 'Ulrich Drepper, Scott Miller, and David Madore' },
+    sha224: { label: 'SHA224', hex: 56, fn: (b) => sha256Digest(b, true), authors: 'Ulrich Drepper, Scott Miller, and David Madore' },
+    sha256: { label: 'SHA256', hex: 64, fn: (b) => sha256Digest(b, false), authors: 'Ulrich Drepper, Scott Miller, and David Madore' },
+    sha384: { label: 'SHA384', hex: 96, fn: (b) => sha512Digest(b, true), authors: 'Ulrich Drepper, Scott Miller, and David Madore' },
+    sha512: { label: 'SHA512', hex: 128, fn: (b) => sha512Digest(b, false), authors: 'Ulrich Drepper, Scott Miller, and David Madore' },
+  };
+  K.digest = (algo, text) => DIGESTS[algo].fn(Uint8Array.from(U.toBytes(text)));
+
+  const plural = (n, one, many) => (n === 1 ? one : many);
+
+  function defineDigestTool(algo) {
+    const dg = DIGESTS[algo]; const name = algo + 'sum';
+    define({
+      name, pkg: 'coreutils', summary: 'compute and check ' + dg.label + ' message digest',
+      usage: ['[OPTION]... [FILE]...'],
+      desc: 'Print or check ' + dg.label + ' (' + dg.hex * 4 + '-bit) checksums.\nWith no FILE, or when FILE is -, read standard input.',
+      opts: [
+        ['-b, --binary', 'read in binary mode'], ['-c, --check', 'read checksums from the FILEs and check them'], ['    --tag', 'create a BSD-style checksum'], ['-t, --text', 'read in text mode (default)'],
+        ['-z, --zero', 'end each output line with NUL, not newline, and disable file name escaping'],
+        'The following five options are useful only when verifying checksums:',
+        ['    --ignore-missing', "don't fail or report status for missing files"], ['    --quiet', "don't print OK for each successfully verified file"],
+        ['    --status', "don't output anything, status code shows success"], ['    --strict', 'exit non-zero for improperly formatted checksum lines'], ['-w, --warn', 'warn about improperly formatted checksum lines'],
+      ],
+      notes: 'The sums are computed as described in FIPS-180-4 (or RFC 1321 for md5sum). When checking, the input should be a former output of this program. The default mode is to print a line with: checksum, a space, a character indicating input mode (\'*\' for binary, \' \' for text or where binary is insignificant), and name for each FILE.',
+      examples: [[name + ' report.txt > report.' + algo, 'Record the digest of a file.'], [name + ' -c report.' + algo, 'Verify the file against the recorded digest.']],
+      version: coreutils(dg.authors),
+      async run(ctx, d) {
+        const g = parseArgs(ctx, d, { short: 'bctwz', long: ['binary', 'check', 'tag', 'text', 'zero', 'ignore-missing', 'quiet', 'status', 'strict', 'warn'], alias: { binary: 'b', check: 'c', text: 't', warn: 'w', zero: 'z' } });
+        if (typeof g === 'number') return g;
+        const o = g.opts;
+        if (o.tag && o.c) return usageError(ctx, 'the --tag option is meaningless when verifying checksums');
+        if (o.c) return checkDigests(ctx, name, dg, g);
+        for (const [flag, label] of [['ignore-missing', '--ignore-missing'], ['quiet', '--quiet'], ['status', '--status'], ['strict', '--strict'], ['w', '--warn']]) {
+          if (o[flag]) return usageError(ctx, 'the ' + label + ' option is meaningful only when verifying checksums');
+        }
+        const eol = o.z ? '\0' : '\n'; let status = 0;
+        for (const f of g.rest.length ? g.rest : ['-']) {
+          let text;
+          try {
+            if (f !== '-' && ctx.fs.stat(f).isDir) { ctx.err(name + ': ' + f + ': Is a directory\n'); status = 1; continue; }
+            text = await readOperand(ctx, f);
+          } catch (e) { if (!isFsError(e)) throw e; ctx.err(name + ': ' + f + ': ' + e.message + '\n'); status = 1; continue; }
+          const sum = dg.fn(Uint8Array.from(U.toBytes(text)));
+          const esc = !o.z && /[\\\n]/.test(f); const shown = esc ? f.replace(/\\/g, '\\\\').replace(/\n/g, '\\n') : f;
+          ctx.out((esc ? '\\' : '') + (o.tag ? dg.label + ' (' + shown + ') = ' + sum : sum + ' ' + (o.b ? '*' : ' ') + shown) + eol);
+          await breathe(ctx);
+        }
+        return status;
+      },
+    });
+  }
+
+  /** `<tool> -c`: verify the checksums listed in the given files. */
+  async function checkDigests(ctx, name, dg, g) {
+    const o = g.opts; let status = 0;
+    const word = (n, a, b) => n + ' ' + plural(n, a, b);
+    for (const list of g.rest.length ? g.rest : ['-']) {
+      let text;
+      try { text = await readOperand(ctx, list); } catch (e) { if (!isFsError(e)) throw e; ctx.err(name + ': ' + list + ': ' + e.message + '\n'); status = 1; continue; }
+      const shownList = list === '-' ? 'standard input' : list;
+      const stats = { ok: 0, bad: 0, format: 0, unread: 0, missing: 0 }; let lineNo = 0; let proper = 0;
+      const tagRe = new RegExp('^' + dg.label + ' \\((.*)\\) = ([0-9a-fA-F]{' + dg.hex + '})$');
+      const plainRe = new RegExp('^(\\\\?)([0-9a-fA-F]{' + dg.hex + '}) [ *](.*)$');
+      for (const line of splitLines(text)) {
+        lineNo++;
+        let file; let sum; let m;
+        if ((m = tagRe.exec(line))) { file = m[1]; sum = m[2]; }
+        else if ((m = plainRe.exec(line))) { file = m[1] ? m[3].replace(/\\n/g, '\n').replace(/\\\\/g, '\\') : m[3]; sum = m[2]; }
+        else {
+          stats.format++;
+          if (o.w) ctx.err(name + ': ' + shownList + ': ' + lineNo + ': improperly formatted ' + dg.label + ' checksum line\n');
+          continue;
+        }
+        proper++;
+        let content;
+        try { content = await readOperand(ctx, file); if (file !== '-' && ctx.fs.stat(file).isDir) throw new K.FsError('EISDIR', file); }
+        catch (e) {
+          if (!isFsError(e)) throw e;
+          if (o['ignore-missing'] && e.code === 'ENOENT') { stats.missing++; continue; }
+          ctx.err(name + ': ' + file + ': ' + e.message + '\n');
+          stats.unread++;
+          if (!o.status) ctx.out(file + ': FAILED open or read\n');
+          continue;
+        }
+        if (dg.fn(Uint8Array.from(U.toBytes(content))) === sum.toLowerCase()) { stats.ok++; if (!o.status && !o.quiet) ctx.out(file + ': OK\n'); }
+        else { stats.bad++; if (!o.status) ctx.out(file + ': FAILED\n'); }
+        await breathe(ctx);
+      }
+      if (!proper) { ctx.err(name + ': ' + shownList + ': no properly formatted checksum lines found\n'); status = 1; continue; }
+      if (o['ignore-missing'] && !stats.ok && !stats.bad && !stats.unread) { ctx.err(name + ': ' + shownList + ': no file was verified\n'); status = 1; }
+      if (!o.status) {
+        if (stats.format) ctx.err(name + ': WARNING: ' + word(stats.format, 'line is', 'lines are') + ' improperly formatted\n');
+        if (stats.unread) ctx.err(name + ': WARNING: ' + word(stats.unread, 'listed file', 'listed files') + ' could not be read\n');
+        if (stats.bad) ctx.err(name + ': WARNING: ' + word(stats.bad, 'computed checksum', 'computed checksums') + ' did NOT match\n');
+      }
+      if (stats.bad || stats.unread || (o.strict && stats.format)) status = 1;
+    }
+    return status;
+  }
+  for (const algo of Object.keys(DIGESTS)) defineDigestTool(algo);
+
+  /* ====================================================== base64 and base32 */
+  const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const BASES = {
+    base64: { alphabet: B64, bits: 6, block: 4, label: 'Base64', authors: 'Simon Josefsson' },
+    base32: { alphabet: B32, bits: 5, block: 8, label: 'Base32', authors: 'Simon Josefsson' },
+  };
+
+  function baseEncode(bytes, b) {
+    let out = ''; let acc = 0; let n = 0;
+    for (const x of bytes) {
+      acc = (acc << 8) | x; n += 8;
+      while (n >= b.bits) { out += b.alphabet[(acc >> (n - b.bits)) & ((1 << b.bits) - 1)]; n -= b.bits; }
+      acc &= (1 << n) - 1;
+    }
+    if (n) out += b.alphabet[(acc << (b.bits - n)) & ((1 << b.bits) - 1)];
+    while (out.length % b.block) out += '=';
+    return out;
+  }
+  /** Decode like GNU basenc: whole blocks first, then the decodable part of a damaged or short block. Returns {bytes, ok}. */
+  function baseDecode(text, b, ignoreGarbage) {
+    let s = text.replace(/\n/g, '');
+    if (ignoreGarbage) s = s.replace(new RegExp('[^' + b.alphabet.replace('+', '\\+') + '=]', 'g'), '');
+    const bytes = []; const index = (c) => b.alphabet.indexOf(c);
+    const emit = (chars) => {
+      let acc = 0; let n = 0;
+      for (const c of chars) { acc = (acc << b.bits) | index(c); n += b.bits; if (n >= 8) { bytes.push((acc >> (n - 8)) & 255); n -= 8; acc &= (1 << n) - 1; } }
+    };
+    for (let i = 0; i < s.length; i += b.block) {
+      const blk = s.slice(i, i + b.block);
+      const data = /^[^=]*/.exec(blk)[0];
+      const pad = blk.slice(data.length);
+      const valid = [...data].every((c) => index(c) >= 0) && /^=*$/.test(pad);
+      const minimal = b.block === 4 ? [2, 3, 4] : [2, 4, 5, 7, 8];
+      if (valid && blk.length === b.block && minimal.includes(data.length)) { emit(data); continue; }
+      const prefix = [...data].findIndex((c) => index(c) < 0);
+      if (b.block === 4) emit(blk.length < b.block || pad ? data.slice(0, prefix < 0 ? data.length : prefix) : '');
+      return { bytes, ok: false };
+    }
+    return { bytes, ok: true };
+  }
+
+  for (const [name, b] of Object.entries(BASES)) {
+    define({
+      name, pkg: 'coreutils', summary: name + ' encode/decode data and print to standard output',
+      usage: ['[OPTION]... [FILE]'],
+      desc: b.label + ' encode or decode FILE, or standard input, to standard output.\nWith no FILE, or when FILE is -, read standard input.',
+      opts: [['-d, --decode', 'decode data'], ['-i, --ignore-garbage', 'when decoding, ignore non-alphabet characters'], ['-w, --wrap=COLS', 'wrap encoded lines after COLS character (default 76).\nUse 0 to disable line wrapping']],
+      notes: 'The data are encoded as described for the ' + name + ' alphabet in RFC 4648. When decoding, the input may contain newlines in addition to the bytes of the formal ' + name + ' alphabet. Use --ignore-garbage to attempt to recover from any other non-alphabet bytes in the encoded stream.',
+      examples: [["echo -n 'admin:Passw0rd' | " + name, 'Encode a string.'], ["echo 'YWRtaW46UGFzc3cwcmQ=' | base64 -d", 'Decode a captured Basic-auth header value.']],
+      version: coreutils(b.authors),
+      async run(ctx, d) {
+        const g = parseArgs(ctx, d, { short: 'diw:', long: ['decode', 'ignore-garbage', 'wrap='], alias: { decode: 'd', 'ignore-garbage': 'i', wrap: 'w' } });
+        if (typeof g === 'number') return g;
+        const o = g.opts;
+        let wrap = 76;
+        if (o.w != null) { wrap = parseCount(o.w); if (wrap == null) { ctx.err(name + ': invalid wrap size: ' + q(o.w) + '\n'); return 1; } }
+        if (g.rest.length > 1) return usageError(ctx, 'extra operand ' + q(g.rest[1]));
+        let text;
+        try { text = await readOperand(ctx, g.rest[0] || '-'); }
+        catch (e) { if (!isFsError(e)) throw e; ctx.err(name + ': ' + g.rest[0] + ': ' + e.message + '\n'); return 1; }
+        if (o.d) {
+          const r = baseDecode(text, b, o.i);
+          ctx.out(U.fromBytes(r.bytes));
+          if (!r.ok) { ctx.err(name + ': invalid input\n'); return 1; }
+          return 0;
+        }
+        const enc = baseEncode(U.toBytes(text), b);
+        if (!enc) return 0;
+        if (!wrap) ctx.out(enc);
+        else for (let i = 0; i < enc.length; i += wrap) ctx.out(enc.slice(i, i + wrap) + '\n');
+        return 0;
+      },
+    });
+  }
+
+  /* ======================================================================= xxd */
+  const printableByte = (b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '.');
+  const XXD_USAGE = 'Usage:\n       xxd [options] [infile [outfile]]\n    or\n       xxd -r [-s [-]offset] [-c cols] [-ps] [infile [outfile]]\nOptions:\n' +
+    '    -a          toggle autoskip: A single \'*\' replaces nul-lines.  Default off.\n    -b          bitdump: binary digits instead of hex.  Default hex.\n' +
+    '    -c cols     format <cols> octets per line. Default 16 (-i: 12, -ps: 30, -b: 6).  Max 256.\n    -E          show characters in EBCDIC. Default ASCII.\n' +
+    '    -e          little-endian dump (incompatible with -ps,-i,-r).\n    -g          number of octets per group in normal output. Default 2 (-e: 4).\n' +
+    '    -h          print this summary.\n    -i          output in C include file style.\n    -l len      stop after <len> octets.\n    -n name     set the variable name used in C include output (-i).\n' +
+    '    -o off      add <off> to the displayed file position.\n    -ps         output in postscript plain hexdump style.\n    -r          reverse operation: convert (or patch) hexdump into binary.\n' +
+    '    -r -s off   revert with <off> added to file positions found in hexdump.\n    -d          show offset in decimal instead of hex.\n    -s [+][-]seek  start at <seek> bytes abs. (or +: rel.) infile offset.\n' +
+    '    -u          use upper case hex letters.\n    -v          show version: "xxd 2025-01-01 by Juergen Weigert et al.".\n';
+
+  K.cmd.register({
+    name: 'xxd', pkg: 'xxd', section: 1, summary: 'make a hex dump or do the reverse',
+    synopsis: 'xxd [options] [infile [outfile]]',
+    man: () => manBody({
+      desc: 'xxd creates a hex dump of a given file or standard input. It can also convert a hex dump back to its original binary form.',
+      opts: [['-p, -ps, -postscript, -plain', 'continuous hexdump style, 30 bytes per line'], ['-r, -revert', 'reverse operation: convert a hex dump (or, with -p, plain hex) back to binary'], ['-l len', 'stop after len octets'], ['-s [+][-]seek', 'start at seek bytes in the input; with -r, add the offset to positions'], ['-c cols', 'format cols octets per line (default 16)'], ['-g bytes', 'octets per group (default 2, 0 for none)'], ['-u', 'use upper case hex letters'], ['-b', 'binary digit dump'], ['-i', 'output as a C include file']],
+      examples: [['echo -n "kali" | xxd', 'Show the bytes of a string.'], ['echo 6b616c69 | xxd -r -p', 'Turn plain hex back into text.']],
+    }),
+    async run(ctx) {
+      const args = ctx.args.map((a) => (/^-?-?(ps|postscript|plain)$/.test(a) ? '-p' : a === '-revert' || a === '-r' ? '-r' : a));
+      const g = K.getopt(args, { short: 'abc:dEeg:hil:n:o:prs:uv', long: [] });
+      if (g.err) { ctx.err('xxd: ' + g.err + '\n' + XXD_USAGE); return 1; }
+      const o = g.opts;
+      if (o.v) { ctx.err('xxd 2025-01-01 by Juergen Weigert et al.\n'); return 0; }
+      if (o.h) { ctx.out(XXD_USAGE); return 0; }
+      const num = (v, dflt) => (v == null ? dflt : /^\+?-?(0x[0-9a-f]+|\d+)$/i.test(v) ? Number(v.replace('+', '')) : NaN);
+      const cols = num(o.c, o.p ? 30 : o.i ? 12 : o.b ? 6 : 16);
+      if (isNaN(cols) || cols < 1 || cols > 256) { ctx.err('xxd: invalid number of columns (max. 256).\n'); return 1; }
+      const group = o.b ? 1 : num(o.g, 2);
+      const input = g.rest[0] && g.rest[0] !== '-' ? g.rest[0] : '-';
+      let text;
+      try { text = await readOperand(ctx, input); }
+      catch (e) { if (!isFsError(e)) throw e; ctx.err('xxd: ' + input + ': ' + e.message + '\n'); return 2; }
+      let result;
+      if (o.r) result = U.fromBytes(xxdRevert(text, !!o.p, num(o.s, 0)));
+      else {
+        let bytes = U.toBytes(text);
+        const seekText = o.s == null ? '0' : String(o.s);
+        let seek = num(seekText.replace(/^\+/, ''), 0);
+        if (seek < 0) seek = Math.max(0, bytes.length + seek);
+        bytes = bytes.slice(seek);
+        if (o.l != null) bytes = bytes.slice(0, num(o.l, 0));
+        result = xxdDump(bytes, { cols, group, plain: !!o.p, upper: !!o.u, bits: !!o.b, include: !!o.i, base: seek + num(o.o, 0), name: input, varName: o.n });
+      }
+      if (g.rest[1] && g.rest[1] !== '-') {
+        try { ctx.fs.write(g.rest[1], result); } catch (e) { if (!isFsError(e)) throw e; ctx.err('xxd: ' + g.rest[1] + ': ' + e.message + '\n'); return 3; }
+      } else ctx.out(result);
+      return 0;
+    },
+  });
+
+  function xxdDump(bytes, o) {
+    const hex = (b) => (o.bits ? b.toString(2).padStart(8, '0') : o.upper ? b.toString(16).toUpperCase().padStart(2, '0') : b.toString(16).padStart(2, '0'));
+    let out = '';
+    if (o.include) {
+      const id = o.varName || o.name.replace(/[^A-Za-z0-9]/g, '_');
+      if (o.name !== '-' || o.varName) out += 'unsigned char ' + id + '[] = {\n';
+      for (let i = 0; i < bytes.length; i += o.cols) {
+        out += '  ' + bytes.slice(i, i + o.cols).map((b) => '0x' + (o.upper ? b.toString(16).toUpperCase().padStart(2, '0') : b.toString(16).padStart(2, '0'))).join(', ') + (i + o.cols < bytes.length ? ',' : '') + '\n';
+      }
+      if (o.name !== '-' || o.varName) out += '};\nunsigned int ' + id + '_len = ' + bytes.length + ';\n';
+      return out;
+    }
+    if (o.plain) {
+      for (let i = 0; i < bytes.length; i += o.cols) out += bytes.slice(i, i + o.cols).map(hex).join('') + '\n';
+      return out;
+    }
+    for (let i = 0; i < bytes.length; i += o.cols) {
+      const chunk = bytes.slice(i, i + o.cols);
+      let line = (o.base + i).toString(16).padStart(8, '0') + ': ';
+      for (let k = 0; k < o.cols; k++) {
+        line += k < chunk.length ? hex(chunk[k]) : ' '.repeat(o.bits ? 8 : 2);
+        if (o.group && (k + 1) % o.group === 0) line += ' ';
+      }
+      out += line + ' ' + chunk.map(printableByte).join('') + '\n';
+    }
+    return out;
+  }
+  function xxdRevert(text, plain, offset) {
+    const bytes = [];
+    if (plain) {
+      const digits = text.replace(/[^0-9a-fA-F]/g, '');
+      for (let i = 0; i + 1 < digits.length; i += 2) bytes.push(parseInt(digits.substr(i, 2), 16));
+      return bytes;
+    }
+    for (const line of text.split('\n')) {
+      const m = /^\s*([0-9a-fA-F]+):\s?(.*)$/.exec(line);
+      if (!m) continue;
+      const hexPart = m[2].split(/ {2}/)[0].replace(/\s/g, '');
+      const at = parseInt(m[1], 16) + offset;
+      while (bytes.length < at && offset) bytes.push(0);
+      for (let i = 0; i + 1 < hexPart.length; i += 2) bytes.push(parseInt(hexPart.substr(i, 2), 16));
+    }
+    return bytes;
+  }
+
+  /* =================================================================== strings */
+  const STRINGS_HELP = [
+    "Usage: strings [option(s)] [file(s)]",
+    " Display printable strings in [file(s)] (stdin by default)",
+    " The options are:",
+    "  -a - --all                Scan the entire file, not just the data section [default]",
+    "  -d --data                 Only scan the data sections in the file",
+    "  -f --print-file-name      Print the name of the file before each string",
+    "  -n <number>               Locate & print any sequence of at least <number>",
+    "    --bytes=<number>         displayable characters.  (The default is 4).",
+    "  -t --radix={o,d,x}        Print the location of the string in base 8, 10 or 16",
+    "  -w --include-all-whitespace Include all whitespace as valid string characters",
+    "  -o                        An alias for --radix=o",
+    "  -T --target=<BFDNAME>     Specify the binary file format",
+    "  -e --encoding={s,S,b,l,B,L} Select character size and endianness:",
+    "                            s = 7-bit, S = 8-bit, {b,l} = 16-bit, {B,L} = 32-bit",
+    "  --unicode={default|show|invalid|hex|escape|highlight}",
+    "  -U {d|s|i|x|e|h}          Specify how to treat UTF-8 encoded unicode characters",
+    "  -s --output-separator=<string> String used to separate strings in output.",
+    "  @<file>                   Read options from <file>",
+    "  -h --help                 Display this information",
+    "  -v -V --version           Print the program's version number",
+    "strings: supported targets: elf64-x86-64 elf32-i386 elf32-iamcu elf32-x86-64 pei-i386 pe-x86-64 pei-x86-64 elf64-little elf64-big elf32-little elf32-big pe-bigobj-x86-64 pe-i386 pdb srec symbolsrec verilog tekhex binary ihex plugin",
+  ].join('\n') + '\n';
+
+  K.cmd.register({
+    name: 'strings', pkg: 'binutils', section: 1, summary: 'print the sequences of printable characters in files',
+    synopsis: 'strings [option(s)] [file(s)]',
+    man: () => manBody({
+      desc: 'For each file given, GNU strings prints the printable character sequences that are at least 4 characters long (or the number given with -n) and are followed by an unprintable character.\nstrings is mainly useful for determining the contents of non-text files.',
+      opts: [['-a, --all', 'scan the whole file (the default)'], ['-n min-len, -min-len, --bytes=min-len', 'print sequences of at least min-len characters (default 4)'], ['-f, --print-file-name', 'print the name of the file before each string'], ['-t {o,d,x}, --radix={o,d,x}', 'print the offset within the file before each string, in octal, decimal or hex'], ['-o', 'like -t o'], ['-s, --output-separator=string', 'print string instead of a newline between sequences']],
+      examples: [['strings -n 8 /bin/ls | head', 'Show longer strings from a binary.'], ['strings -t x capture.bin | grep -i pass', 'Look for interesting strings with their offsets.']],
+    }),
+    async run(ctx) {
+      const args = ctx.args.map((a) => (/^-\d+$/.test(a) ? '-n' + a.slice(1) : a));
+      const g = K.getopt(args, { short: 'afhn:ot:s:eHvVw', long: ['all', 'print-file-name', 'bytes=', 'radix=', 'output-separator=', 'help', 'version', 'data', 'include-all-whitespace', 'encoding=', 'unicode='], alias: { all: 'a', 'print-file-name': 'f', bytes: 'n', radix: 't', 'output-separator': 's', help: 'h', version: 'v' } });
+      if (g.err) { ctx.err('strings: ' + g.err + '\n' + STRINGS_HELP); return 1; }
+      const o = g.opts;
+      if (o.h) { ctx.out(STRINGS_HELP + 'Report bugs to <https://sourceware.org/bugzilla/>\n'); return 0; }
+      if (o.v) { ctx.out('GNU strings (GNU Binutils for Debian) 2.45\nCopyright (C) 2025 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) any later version.\nThis program has absolutely no warranty.\n'); return 0; }
+      let min = 4;
+      if (o.n != null) {
+        min = parseCount(o.n);
+        if (min == null) { ctx.err('strings: invalid integer argument ' + o.n + '\n'); return 1; }
+        if (min < 1) { ctx.err('strings: minimum string length is too small: ' + o.n + '\n'); return 1; }
+      }
+      const radix = o.o ? 'o' : o.t;
+      if (radix != null && !/^[odx]$/.test(radix)) { ctx.err(STRINGS_HELP); return 1; }
+      const sep = o.s == null ? '\n' : o.s;
+      const operands = g.rest.length ? g.rest : ['-'];
+      let status = 0; const sink = new Sink(ctx);
+      for (const file of operands) {
+        let text;
+        try { text = await readOperand(ctx, file); }
+        catch (e) {
+          if (!isFsError(e)) throw e;
+          ctx.err('strings: ' + (e.code === 'ENOENT' ? "'" + file + "': No such file" : file + ': ' + e.message) + '\n'); status = 1; continue;
+        }
+        const bytes = U.toBytes(text); let start = -1;
+        const isStr = (b) => (b >= 0x20 && b < 0x7f) || b === 9 || (o.w && (b === 10 || b === 13 || b === 11 || b === 12));
+        const flush = (end) => {
+          if (start < 0 || end - start < min) return;
+          const s = String.fromCharCode.apply(null, bytes.slice(start, end));
+          const off = radix ? (start).toString(radix === 'o' ? 8 : radix === 'd' ? 10 : 16).padStart(7) + ' ' : '';
+          sink.write((operands.length > 1 || o.f ? (o.f ? file + ': ' : '') : '') + off + s + sep);
+        };
+        for (let i = 0; i <= bytes.length; i++) {
+          if (i < bytes.length && isStr(bytes[i])) { if (start < 0) start = i; } else { flush(i); start = -1; }
+        }
+      }
+      sink.flush();
+      return status;
+    },
+  });
+
   /* @@INSERT@@ */
 })(typeof globalThis !== 'undefined' ? globalThis : this);
