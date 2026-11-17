@@ -1222,7 +1222,7 @@
       const opt = copyIdArgs(ctx.args);
       if (!opt) { ctx.err(COPY_ID_USAGE); return 1; }
       const note = (level, msg) => ctx.err(COPY_ID + ': ' + level + ': ' + msg + '\n');
-      let pubFile = opt.i ? (/\.pub$/.test(opt.i) ? opt.i : opt.i + '.pub') : newestPublicKey(ctx);
+      const pubFile = opt.i ? (/\.pub$/.test(opt.i) ? opt.i : opt.i + '.pub') : newestPublicKey(ctx);
       if (!pubFile) { note('ERROR', 'No identities found'); return 1; }
       const privFile = pubFile.replace(/\.pub$/, '');
       let text;
@@ -1716,7 +1716,7 @@
     }
   }
 
-  async function ftpStatusReport(c) {
+  function ftpStatusReport(c) {
     const connected = c.session && c.session.open;
     c.ctx.out([
       connected ? 'Connected ' + (c.loggedIn ? 'and logged in' : '') + 'to ' + c.host + '.' : 'Not connected.', 'No proxy connection.', 'Gate ftp: off, server (none), port ftpgate.',
@@ -1728,12 +1728,6 @@
     ].join('\n'));
   }
 
-  /** Commands that are one protocol command each: name -> how to build the line sent to the server. */
-  const FTP_SIMPLE = {
-    cd: (a) => 'CWD ' + a[0], cdup: () => 'CDUP', system: () => 'SYST', mkdir: (a) => 'MKD ' + a[0], rmdir: (a) => 'RMD ' + a[0], delete: (a) => 'DELE ' + a[0],
-    size: (a) => 'SIZE ' + a[0], quote: (a) => a.join(' '), rhelp: (a) => ('HELP ' + a.join(' ')).trim(), rstatus: () => 'STAT', features: () => 'FEAT',
-  };
-  const FTP_NEEDS_ARG = { cd: 'remote-directory', mkdir: 'directory-name', rmdir: 'directory-name', delete: 'remote-file', size: 'remote-file', quote: 'line to send' };
   const FTP_HELP_TEXT = {
     ascii: 'set ascii transfer type', binary: 'set binary transfer type', bye: 'terminate ftp session and exit', cd: 'change remote working directory', cdup: 'change remote working directory to parent directory',
     close: 'terminate ftp session', dir: 'list contents of remote path', disconnect: 'terminate ftp session', exit: 'terminate ftp session and exit', get: 'receive file', help: 'print local help information',
@@ -1741,6 +1735,62 @@
     passive: 'toggle use of passive transfer mode', pwd: 'print working directory on remote machine', quit: 'terminate ftp session and exit', status: 'show current status',
     system: 'show remote system type', user: 'send new user information', '?': 'print local help information',
   };
+
+  /** Commands that work with or without a connection: name -> (c, args). */
+  const FTP_LOCAL_COMMANDS = {
+    help(c, args) {
+      const out = c.ctx.out;
+      if (!args.length) out('Commands may be abbreviated.  Commands are:\n\n' + listVertical(FTP_COMMANDS, c.ctx.cols));
+      for (const a of args) out(FTP_COMMANDS.includes(a) ? U.padEnd(a, 11) + '\t' + (FTP_HELP_TEXT[a] || 'not part of this simulator') + '\n' : "?Invalid help command `" + a + "'\n");
+    },
+    status: ftpStatusReport,
+    passive(c) {
+      c.passive = !c.passive;
+      c.ctx.out('Passive mode: ' + onOff(c.passive) + '; fallback to active mode: ' + onOff(c.passive) + '.\n');
+    },
+    verbose(c) { c.verbose = !c.verbose; c.ctx.out('Verbose mode ' + onOff(c.verbose) + '.\n'); },
+    lpwd(c) { c.ctx.out('Local directory: ' + c.lcwd + '\n'); },
+    lcd(c, args) {
+      const ctx = c.ctx;
+      const dir = K.VFS.abs(args[0] || ctx.user.home, c.lcwd);
+      if (ctx.fs.isDir(dir)) { c.lcwd = dir; ctx.out('Local directory now: ' + dir + '\n'); }
+      else ctx.err("ftp: Can't chdir `" + dir + "': " + (ctx.fs.exists(dir) ? 'Not a directory' : 'No such file or directory') + '\n');
+    },
+    async open(c, args) {
+      if (!args.length) c.ctx.out('usage: open host-name [port]\n'); else await ftpOpen(c, args[0], args[1]);
+    },
+  };
+  FTP_LOCAL_COMMANDS['?'] = FTP_LOCAL_COMMANDS.help;
+
+  /** A command that is a single protocol command; `needs` names its argument for the usage line. */
+  const ftpPlain = (build, needs) => async (c, args, name) => {
+    if (needs && !args.length) c.ctx.out('usage: ' + name + ' ' + needs + '\n'); else await ftpSay(c, build(args));
+  };
+  async function ftpSetType(c, binary) {
+    const r = await ftpSay(c, binary ? 'TYPE I' : 'TYPE A');
+    if (r.code === 200) c.binary = binary;
+  }
+
+  /** Commands for an open connection: name -> (c, args, name). */
+  const FTP_REMOTE_COMMANDS = {
+    cd: ftpPlain((a) => 'CWD ' + a[0], 'remote-directory'), cdup: ftpPlain(() => 'CDUP'), system: ftpPlain(() => 'SYST'), features: ftpPlain(() => 'FEAT'), rstatus: ftpPlain(() => 'STAT'),
+    mkdir: ftpPlain((a) => 'MKD ' + a[0], 'directory-name'), rmdir: ftpPlain((a) => 'RMD ' + a[0], 'directory-name'), delete: ftpPlain((a) => 'DELE ' + a[0], 'remote-file'),
+    size: ftpPlain((a) => 'SIZE ' + a[0], 'remote-file'), quote: ftpPlain((a) => a.join(' '), 'line to send'), rhelp: ftpPlain((a) => ['HELP'].concat(a).join(' ')),
+    ascii: (c) => ftpSetType(c, false), binary: (c) => ftpSetType(c, true), image: (c) => ftpSetType(c, true),
+    ls: (c, args) => ftpListing(c, 'LIST', args), dir: (c, args) => ftpListing(c, 'LIST', args), nlist: (c, args) => ftpListing(c, 'NLST', args),
+    get: ftpGet, recv: ftpGet,
+    async close(c) { await ftpSay(c, 'QUIT'); c.session = null; },
+    async user(c, args) {
+      if (!args.length) c.ctx.out('usage: user username [password [account]]\n');
+      else if (!(await ftpLogin(c, args[0], args[1]))) c.ctx.out('Login failed.\n');
+    },
+    async pwd(c) {
+      const r = await ftpSay(c, 'PWD', true);
+      const m = /^257 "(.*)"/.exec(r.lines[0] || '');
+      c.ctx.out(m ? 'Remote directory: ' + m[1] + '\n' : 'Unable to determine remote directory\n');
+    },
+  };
+  FTP_REMOTE_COMMANDS.disconnect = FTP_REMOTE_COMMANDS.close;
 
   /** Run one line typed at the ftp> prompt. Resolves false when the client should exit. */
   async function ftpDispatch(c, line) {
@@ -1751,50 +1801,13 @@
     if (matches.length !== 1) { ctx.out(matches.length ? '?Ambiguous command.\n' : '?Invalid command.\n'); return true; }
     const name = matches[0]; const args = words.slice(1);
     const online = c.session && c.session.open;
-    switch (name) {
-      case 'bye': case 'quit': case 'exit':
-        if (online) await ftpSay(c, 'QUIT');
-        return false;
-      case 'help': case '?':
-        if (!args.length) ctx.out('Commands may be abbreviated.  Commands are:\n\n' + listVertical(FTP_COMMANDS, ctx.cols));
-        for (const a of args) ctx.out(FTP_COMMANDS.includes(a) ? U.padEnd(a, 11) + '\t' + (FTP_HELP_TEXT[a] || 'not part of this simulator') + '\n' : "?Invalid help command `" + a + "'\n");
-        return true;
-      case 'status': await ftpStatusReport(c); return true;
-      case 'passive':
-        c.passive = !c.passive;
-        ctx.out('Passive mode: ' + onOff(c.passive) + '; fallback to active mode: ' + onOff(c.passive) + '.\n');
-        return true;
-      case 'verbose': c.verbose = !c.verbose; ctx.out('Verbose mode ' + onOff(c.verbose) + '.\n'); return true;
-      case 'lpwd': ctx.out('Local directory: ' + c.lcwd + '\n'); return true;
-      case 'lcd': {
-        const dir = K.VFS.abs(args[0] || ctx.user.home, c.lcwd);
-        if (ctx.fs.isDir(dir)) { c.lcwd = dir; ctx.out('Local directory now: ' + dir + '\n'); } else ctx.err('ftp: Can\'t chdir `' + dir + "': " + (ctx.fs.exists(dir) ? 'Not a directory' : 'No such file or directory') + '\n');
-        return true;
-      }
-      case 'open':
-        if (!args.length) ctx.out('usage: open host-name [port]\n'); else await ftpOpen(c, args[0], args[1]);
-        return true;
-      default:
+    if (name === 'bye' || name === 'quit' || name === 'exit') {
+      if (online) await ftpSay(c, 'QUIT');
+      return false;
     }
-    if (!online) { ctx.out('Not connected.\n'); return true; }
-    if (FTP_SIMPLE[name]) {
-      if (FTP_NEEDS_ARG[name] && !args.length) ctx.out('usage: ' + name + ' ' + FTP_NEEDS_ARG[name] + '\n'); else await ftpSay(c, FTP_SIMPLE[name](args));
-    } else if (name === 'close' || name === 'disconnect') {
-      await ftpSay(c, 'QUIT');
-      c.session = null;
-    } else if (name === 'user') {
-      if (!args.length) ctx.out('usage: user username [password [account]]\n');
-      else if (!(await ftpLogin(c, args[0], args[1]))) ctx.out('Login failed.\n');
-    } else if (name === 'pwd') {
-      const r = await ftpSay(c, 'PWD', true);
-      const m = /^257 "(.*)"/.exec(r.lines[0] || '');
-      ctx.out(m ? 'Remote directory: ' + m[1] + '\n' : (r.lines.length ? r.lines.join('\n') + '\n' : '') + 'Unable to determine remote directory\n');
-    } else if (name === 'ascii' || name === 'binary' || name === 'image') {
-      const r = await ftpSay(c, name === 'ascii' ? 'TYPE A' : 'TYPE I');
-      if (r.code === 200) c.binary = name !== 'ascii';
-    } else if (name === 'ls' || name === 'dir') await ftpListing(c, 'LIST', args);
-    else if (name === 'nlist') await ftpListing(c, 'NLST', args);
-    else if (name === 'get' || name === 'recv') await ftpGet(c, args);
+    if (FTP_LOCAL_COMMANDS[name]) await FTP_LOCAL_COMMANDS[name](c, args);
+    else if (!online) ctx.out('Not connected.\n');
+    else if (FTP_REMOTE_COMMANDS[name]) await FTP_REMOTE_COMMANDS[name](c, args, name);
     else ctx.out('ftp: ' + name + ' is not part of this simulator\n');
     return true;
   }
