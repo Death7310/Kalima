@@ -207,11 +207,212 @@
     refs: ['whoami(1)', 'pwd(1)', 'ls(1)', 'Kali Linux Revealed, ch. 3 (Linux Fundamentals)'],
   };
 
+  /* -------------------------------------------------------- shell-navigate */
+  const navigateLesson = {
+    id: 'shell-navigate',
+    title: 'Moving around the filesystem',
+    minutes: 11,
+    objectives: [
+      'Change directory with absolute and relative paths, and with `~`, `..` and `cd -`',
+      'Show hidden files with `ls -a` and read a long listing of them',
+      'Say what `/etc`, `/var/log`, `/home`, `/usr/bin`, `/tmp` and `/root` are for',
+    ],
+    intro: T(
+      'Every file on a Linux system hangs from a single tree that starts at `/`. Tools, configuration, logs and your own notes each have a customary place in it, and the layout is nearly the same on the servers you will examine as on your own workstation.',
+      '',
+      'If you can move through that tree without thinking, you can find a service\'s configuration or its log on a machine you have never seen before. In this lesson you travel the tree with `cd`, uncover hidden files, and take a short tour of the directories that matter most. You only look; nothing is changed.'
+    ),
+    steps: [
+      {
+        id: 'absolute',
+        prompt: T(
+          '`cd` changes the working directory. Give it a path that starts with `/` and it goes there from anywhere:',
+          '',
+          '```',
+          'cd ' + DATA,
+          '```',
+          '',
+          'A path that starts at `/` is an **absolute path**. It means the same thing wherever you are.',
+          '',
+          '`cd` prints nothing when it works. Look at the prompt instead: the brackets now show the new directory.'
+        ),
+        hint: 'Type `cd`, a space, then the path beginning with `/`.',
+        solution: 'cd ' + DATA,
+        check: { cwd: DATA },
+      },
+      {
+        id: 'relative',
+        prompt: T(
+          'A path that does not start with `/` is a **relative path**. It is followed from the directory you are in.',
+          '',
+          'You are in `' + DATA + '`, which contains a directory called `logs`. Go into it:',
+          '',
+          '```',
+          'cd logs',
+          '```',
+          '',
+          'The prompt now reads `' + DATA + '/logs`. The same command typed in another directory would fail, because there would be no `logs` there to enter.'
+        ),
+        hint: 'Just the name, with no `/` in front: `cd logs`. If it says `no such file or directory`, run `cd ' + DATA + '` first.',
+        solution: 'cd logs',
+        check: { cwd: DATA + '/logs' },
+      },
+      {
+        id: 'parent',
+        prompt: T(
+          'Every directory contains two special names: `.` is the directory itself and `..` is its parent, one level up.',
+          '',
+          'Go back up to `' + DATA + '` using the parent name.'
+        ),
+        hint: 'Give `cd` the two-dot name as its argument.',
+        solution: 'cd ..',
+        check: { cwd: DATA, line: /\.\./ },
+      },
+      {
+        id: 'tilde',
+        prompt: T(
+          'The shell replaces `~` with the path of your home directory, so `~` gives you a short path that works from anywhere.',
+          '',
+          'Your home contains the directory `engagement`. Go to it with one command, using `~`.'
+        ),
+        hint: 'A path can start with `~` the way an absolute path starts with `/`: `~/` followed by the name of the directory.',
+        solution: 'cd ~/engagement',
+        check: { cwd: '/home/kali/engagement' },
+      },
+      {
+        id: 'back',
+        prompt: T(
+          'You often need to hop between two directories, for example a log directory and your notes. A dash means "the directory I was in before":',
+          '',
+          '```',
+          'cd -',
+          '```',
+          '',
+          'This time `cd` does print something: the directory it took you back to. Run it again later and it returns you here. Plain `cd`, with no argument at all, always takes you home.'
+        ),
+        hint: 'Type `cd`, a space and a single dash.',
+        solution: 'cd -',
+        check: { cmd: 'cd', args: ['-'], exit: 0 },
+      },
+      {
+        id: 'hidden',
+        prompt: T(
+          'Names that begin with a dot are hidden from a plain `ls`. Most of them are settings that programs keep in your home directory. The option `-a` (*all*) shows them:',
+          '',
+          '```',
+          'ls -a ~',
+          '```',
+          '',
+          'Because you gave `~` as the argument, this lists your home directory without your leaving the directory you are in. Look for `.zshrc`, the settings of your shell, and for `.` and `..` at the start of the list.'
+        ),
+        hint: 'The option is `-a` and the argument is `~`.',
+        solution: 'ls -a ~',
+        check: { cmd: 'ls', out: /\.zshrc/ },
+      },
+      {
+        id: 'long-hidden',
+        prompt: T(
+          'Options can be combined after a single dash: `-la` means `-l` and `-a` together.',
+          '',
+          'List your home directory again, hidden files included, this time in the long format.'
+        ),
+        hint: 'Add the letter `l` to the option you used in the last command.',
+        solution: 'ls -la ~',
+        check: { cmd: 'ls', args: ['-l'], out: /\.zshrc/ },
+      },
+      {
+        id: 'private',
+        prompt: T(
+          'Read the first column of that listing. A line that starts with `d` is a directory, and `drwx------` marks a directory that only its owner may open.',
+          '',
+          'Apart from `.` (your home directory itself), which hidden directory is marked `drwx------`?'
+        ),
+        hint: 'Look down the first column for the pattern `drwx------`, then read the name at the end of that line. It begins with a dot.',
+        solution: '.ssh',
+        answer: ['.ssh', '.ssh/', '~/.ssh', '~/.ssh/', 'ssh', '/home/kali/.ssh'],
+      },
+      {
+        id: 'root-dir',
+        prompt: T(
+          'Now look at the top of the tree:',
+          '',
+          '```',
+          'ls /',
+          '```',
+          '',
+          'These directories are found on nearly every Linux system. The ones you will visit most often:',
+          '',
+          '- `/etc` holds system-wide configuration, almost all of it plain text.',
+          '- `/var/log` holds the logs that the system and its services write.',
+          '- `/home` holds one directory for each ordinary user. Yours is `/home/kali`.',
+          '- `/usr/bin` holds the programs you run as commands. `ls` itself is the file `/usr/bin/ls`.',
+          '- `/tmp` is scratch space that any user may write to. It is emptied when the machine restarts, so keep nothing there that you need.',
+          '- `/root` is the home directory of the administrator, `root`.'
+        ),
+        hint: 'The argument is a single slash: `ls /`.',
+        solution: 'ls /',
+        check: { cmd: 'ls', all: [{ out: /\betc\b/ }, { out: /\bvar\b/ }, { out: /\broot\b/ }, { out: /\busr\b/ }] },
+      },
+      {
+        id: 'closed',
+        prompt: T(
+          'Not every directory is open to you. Try to enter the administrator\'s home:',
+          '',
+          '```',
+          'cd /root',
+          '```',
+          '',
+          'The shell refuses with `permission denied`, and the prompt shows that you have not moved. This is ordinary and useful: the system is protecting one user\'s files from another. On a server you assess, what an account can and cannot open is one of the first things worth noting.'
+        ),
+        hint: 'Type the command exactly. This step wants the refusal.',
+        solution: 'cd /root',
+        check: { line: /\/root/, out: /permission denied/i },
+      },
+    ],
+    quiz: [
+      {
+        q: 'You are in `' + DATA + '/logs`. Where does `cd ../text` take you?',
+        choices: ['`/text`', '`' + DATA + '/logs/text`', '`/usr/share/text`', '`' + DATA + '/text`'],
+        answer: 3,
+        why: '`..` climbs one level, to `' + DATA + '`, and `text` is then followed from there. A relative path is always read from the directory you are in.',
+      },
+      {
+        q: 'You are in `/var/log` and type `cd engagement`. What happens?',
+        choices: [
+          'You arrive in `/home/kali/engagement`, because `cd` searches your home directory',
+          'The shell reports that there is no such directory, because `/var/log` contains no `engagement`',
+          'You arrive in `/engagement`',
+          'The shell creates `/var/log/engagement` and enters it',
+        ],
+        answer: 1,
+        why: '`engagement` is a relative path, so the shell looks for it inside `/var/log`. From there you would type `cd ~/engagement`.',
+      },
+      {
+        q: 'You need to read how the SSH service on a machine is configured. Which directory do you look in first?',
+        choices: ['`/etc`', '`/var/log`', '`/usr/bin`', '`/tmp`'],
+        answer: 0,
+        why: 'System-wide configuration lives under `/etc`. `/var/log` would tell you what the service did, and `/usr/bin` holds programs, not their settings.',
+      },
+      {
+        q: 'A plain `ls` in a directory prints nothing, yet `ls -a` prints `.`, `..` and `.config`. Why?',
+        choices: [
+          'The directory is closed to you unless you use `-a`',
+          '`.config` was created between the two commands',
+          'Names that begin with a dot are hidden unless you ask for all entries',
+          '`-a` also lists the contents of the parent directory',
+        ],
+        answer: 2,
+        why: 'A leading dot hides a name from a plain listing. It is a convention for keeping settings out of the way, not a security measure: `-a` shows them to anyone who may read the directory.',
+      },
+    ],
+    refs: ['zshbuiltins(1), for `cd`', 'ls(1)', 'hier(7)', 'Filesystem Hierarchy Standard 3.0', 'Kali Linux Revealed, ch. 3 (The File System)'],
+  };
+
   K.lessons.register({
     id: 'shell',
     title: 'The shell and the filesystem',
     order: 10,
     summary: 'Read the Kali prompt, run commands, find your way around the filesystem, and work faster with completion, history, aliases, wildcards and quoting.',
-    lessons: [firstLesson],
+    lessons: [firstLesson, navigateLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
