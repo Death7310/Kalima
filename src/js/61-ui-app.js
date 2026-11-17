@@ -193,6 +193,7 @@
       this.state.view = view;
       this._saveState(); this._applyLayout();
       if (view === 'terminal') this.focusTerminal();
+      if (view === 'lesson') this._resume();
     }
     togglePanel(key) {
       this.state[key] = !this.state[key];
@@ -209,9 +210,9 @@
     _listen() {
       K.events.on('command', (ev) => this._onCommand(ev));
       K.events.on('power', (ev) => this._onPower(ev));
-      K.net.bus.on('packet', (p) => { this._sawPacket(p); });
-      K.net.bus.on('conn', (c) => { this._sawService(c.host, c.proto, c.port); });
-      K.net.bus.on('http', (x) => { this._sawService(x.host, 'tcp', x.svc && x.svc.port); });
+      K.net.bus.on('packet', (p) => this._sawPacket(p));
+      K.net.bus.on('conn', (c) => this._sawService(c.host, c.proto, c.port));
+      K.net.bus.on('http', (x) => this._sawService(x.host, 'tcp', x.svc && x.svc.port));
 
       this.lessonEl.addEventListener('click', (e) => this._lessonClick(e));
       this.lessonEl.addEventListener('submit', (e) => { e.preventDefault(); this._answer(); });
@@ -451,7 +452,7 @@
       this._saveState();
       this.renderLesson();
       this.lessonBody.scrollTop = 0;
-      this._showCurrent();
+      this._resume();
     }
     openBrowser() {
       this.state.lesson = null; this.stepUi = {}; this.celebrating = null;
@@ -476,6 +477,11 @@
       if (this._currentIndex(lesson) >= lesson.steps.length && !this._quizLeft(lesson)) K.lessons.progress.complete(lesson.id);
     }
 
+    /** Returning to a lesson that is under way: go to where the learner is. A new lesson starts at its introduction. */
+    _resume() {
+      const entry = this._entry();
+      if (entry && this._currentIndex(entry.lesson) > 0) this._showCurrent();
+    }
     /** Scroll the lesson to whatever needs attention next: the open step, the quiz or the end. */
     _showCurrent() {
       const target = this.lessonBody.querySelector('.k-step.is-current, .k-q:not(.is-answered), .k-complete');
@@ -497,8 +503,8 @@
       switch (act) {
         case 'open': this.openLesson(b.getAttribute('data-id')); break;
         case 'back': this.openBrowser(); break;
-        case 'hint': this.stepUi.hint = true; this.renderLesson(); break;
-        case 'solution': this.stepUi.solution = true; this.renderLesson(); break;
+        case 'hint': this.stepUi.hint = true; this.renderLesson(); this._showCurrent(); break;
+        case 'solution': this.stepUi.solution = true; this.renderLesson(); this._showCurrent(); break;
         case 'continue': if (step && this._kind(step) === 'info') this._stepDone(lesson, step); break;
         case 'terminal': this.setView('terminal'); break;
         case 'insert':
@@ -789,43 +795,61 @@
 
     showSettings() {
       if (this._dialogOpen()) return;
-      const choice = (legend, name, options, current, onPick) => {
-        const note = h('p', { class: 'k-field-note' });
-        const describe = (value) => { const o = options.find((x) => x.value === value); note.textContent = (o && o.note) || ''; note.hidden = !note.textContent; };
-        const box = h('div', { class: 'k-seg' });
-        for (const o of options) {
-          const input = h('input', { type: 'radio', name, value: String(o.value), checked: o.value === current, onchange: () => { describe(o.value); onPick(o.value); } });
-          box.appendChild(h('label', null, input, h('span', null, o.label)));
-        }
-        describe(current);
-        return h('fieldset', { class: 'k-field' }, h('legend', null, legend), box, note);
-      };
-      const sizeOut = h('output', { class: 'k-size-value' }, this.settings.fontSize + ' px');
-      const resize = (d) => { this.setFontSize(this.settings.fontSize + d); sizeOut.textContent = this.settings.fontSize + ' px'; };
-      const confirm = h('div', { class: 'k-confirm', hidden: true },
+      const body = h('div', { class: 'k-settings' });
+      const dlg = this._dialog('Settings', body);
+      const close = () => dlg.close();
+      const fields = [
+        this._choiceField('Simulated time', 'k-speed', SPEEDS, this.settings.timeScale, (v) => this.setTimeScale(v)),
+        this._fontField(),
+        this._choiceField('On-screen terminal keys', 'k-keybar', KEYBARS, this.settings.keybar, (v) => this.setKeybar(v)),
+        document.documentElement.requestFullscreen ? this._shortcutField(close) : null,
+        this._simulatorField(close),
+        h('p', { class: 'k-about' }, 'Kalima ' + K.version + ', a simulator of ' + K.distro.name + ' ' + K.distro.release +
+          '. Everything is simulated and offline. In real work, use these tools only on systems you are authorized to test.'),
+      ];
+      for (const f of fields) if (f) body.appendChild(f);
+    }
+    _field(legend) {
+      const field = h('fieldset', { class: 'k-field' }, h('legend', null, legend));
+      for (let i = 1; i < arguments.length; i++) field.appendChild(arguments[i]);
+      return field;
+    }
+    _note(text) { return h('p', { class: 'k-field-note' }, text); }
+    /** A row of radio buttons; an option's `note` is shown under the row while it is selected. */
+    _choiceField(legend, name, options, current, onPick) {
+      const note = this._note('');
+      const describe = (value) => { note.textContent = options.find((o) => o.value === value).note || ''; note.hidden = !note.textContent; };
+      const row = h('div', { class: 'k-seg' });
+      for (const o of options) {
+        const input = h('input', { type: 'radio', name, value: String(o.value), checked: o.value === current, onchange: () => { describe(o.value); onPick(o.value); } });
+        row.appendChild(h('label', null, input, h('span', null, o.label)));
+      }
+      describe(current);
+      return this._field(legend, row, note);
+    }
+    _fontField() {
+      const value = h('output', { class: 'k-size-value' }, this.settings.fontSize + ' px');
+      const step = (label, name, d) => h('button', {
+        type: 'button', class: 'k-btn', 'aria-label': name, onclick: () => { this.setFontSize(this.settings.fontSize + d); value.textContent = this.settings.fontSize + ' px'; },
+      }, label);
+      return this._field('Terminal font size', h('div', { class: 'k-size' }, step('A−', 'Smaller text', -1), value, step('A+', 'Larger text', 1)));
+    }
+    _shortcutField(close) {
+      return this._field('Browser shortcuts',
+        h('button', { type: 'button', class: 'k-btn', onclick: () => { close(); this.toggleFullscreen(); } }, document.fullscreenElement ? 'Leave full screen' : 'Full screen'),
+        this._note('The browser keeps a few keys for itself: Ctrl+W closes this page before the terminal sees it. In full screen, Chromium browsers pass these keys to the terminal. Hold Esc to leave full screen.'));
+    }
+    _simulatorField(close) {
+      const ask = h('div', { class: 'k-confirm', hidden: true },
         h('p', null, 'Erase lesson progress, the files in your simulated home directory and the lab map from this browser?'),
         h('div', { class: 'k-confirm-row' },
-          h('button', { type: 'button', class: 'k-btn is-danger', onclick: () => { dlg.close(); this.erase(); } }, 'Erase'),
-          h('button', { type: 'button', class: 'k-btn', onclick: () => { confirm.hidden = true; eraseBtn.hidden = false; eraseBtn.focus(); } }, 'Cancel')));
-      const eraseBtn = h('button', { type: 'button', class: 'k-btn is-danger', onclick: () => { confirm.hidden = false; eraseBtn.hidden = true; confirm.querySelector('button').focus(); } }, 'Erase saved progress');
-      const body = h('div', { class: 'k-settings' },
-        choice('Simulated time', 'k-speed', SPEEDS, this.settings.timeScale, (v) => this.setTimeScale(v)),
-        h('fieldset', { class: 'k-field' }, h('legend', null, 'Terminal font size'),
-          h('div', { class: 'k-size' },
-            h('button', { type: 'button', class: 'k-btn', 'aria-label': 'Smaller text', onclick: () => resize(-1) }, 'A−'), sizeOut,
-            h('button', { type: 'button', class: 'k-btn', 'aria-label': 'Larger text', onclick: () => resize(1) }, 'A+'))),
-        choice('On-screen terminal keys', 'k-keybar', KEYBARS, this.settings.keybar, (v) => this.setKeybar(v)),
-        document.documentElement.requestFullscreen && h('fieldset', { class: 'k-field' }, h('legend', null, 'Browser shortcuts'),
-          h('button', { type: 'button', class: 'k-btn', onclick: () => { dlg.close(); this.toggleFullscreen(); } }, document.fullscreenElement ? 'Leave full screen' : 'Full screen'),
-          h('p', { class: 'k-field-note' }, 'The browser keeps a few keys for itself: Ctrl+W closes this page before the terminal sees it. In full screen, Chromium browsers pass these keys to the terminal. Hold Esc to leave full screen.')),
-        h('fieldset', { class: 'k-field' }, h('legend', null, 'Simulator'),
-          h('div', { class: 'k-action' }, h('button', { type: 'button', class: 'k-btn', onclick: () => { dlg.close(); this.restart({ notice: 'The simulator restarted. Your files and progress were kept.' }); } }, 'Restart simulator'),
-            h('p', { class: 'k-field-note' }, 'Reboots the simulated Kali machine and the lab network. Files and lesson progress are kept.')),
-          h('div', { class: 'k-action' }, eraseBtn, confirm,
-            h('p', { class: 'k-field-note' }, 'Everything Kalima remembers is stored in this browser only.'))),
-        h('p', { class: 'k-about' }, 'Kalima ' + K.version + ', a simulator of ' + K.distro.name + ' ' + K.distro.release +
-          '. Everything is simulated and offline. In real work, use these tools only on systems you are authorized to test.'));
-      const dlg = this._dialog('Settings', body);
+          h('button', { type: 'button', class: 'k-btn is-danger', onclick: () => { close(); this.erase(); } }, 'Erase'),
+          h('button', { type: 'button', class: 'k-btn', onclick: () => { ask.hidden = true; erase.hidden = false; erase.focus(); } }, 'Cancel')));
+      const erase = h('button', { type: 'button', class: 'k-btn is-danger', onclick: () => { ask.hidden = false; erase.hidden = true; ask.querySelector('button').focus(); } }, 'Erase saved progress');
+      const restart = h('button', { type: 'button', class: 'k-btn', onclick: () => { close(); this.restart({ notice: 'The simulator restarted. Your files and progress were kept.' }); } }, 'Restart simulator');
+      return this._field('Simulator',
+        h('div', { class: 'k-action' }, restart, this._note('Reboots the simulated Kali machine and the lab network. Files and lesson progress are kept.')),
+        h('div', { class: 'k-action' }, erase, ask, this._note('Everything Kalima remembers is stored in this browser only.')));
     }
 
     /** In full screen, Chromium browsers let the page have Ctrl+W, Ctrl+T, Ctrl+N and Esc, which otherwise act on the browser. */
