@@ -61,7 +61,8 @@
 .k-back { margin-left: -8px; padding: 0 8px 0 4px; }
 
 @media (min-width: 900px) {
-  .k-lesson { width: var(--k-side-w, 420px); }
+  /* the terminal always keeps at least 380px, whatever width was chosen for the lesson panel */
+  .k-lesson { width: min(var(--k-side-w, 420px), calc(100vw - 380px)); }
   .k-lab { width: 300px; border-left: 1px solid var(--k-line); display: none; }
   .is-lab-open .k-lab { display: flex; }
   .is-lesson-closed .k-lesson, .is-lesson-closed .k-split { display: none; }
@@ -70,6 +71,14 @@
   .k-split:hover::after, .k-split:focus-visible::after, .is-resizing .k-split::after { left: 2px; width: 3px; background: var(--k-accent); }
   .k-split:focus-visible { outline: none; }
   .is-resizing, .is-resizing * { cursor: col-resize !important; user-select: none; -webkit-user-select: none; }
+}
+@media (min-width: 1180px) {
+  .is-lab-open .k-lesson { width: min(var(--k-side-w, 420px), calc(100vw - 680px)); }
+}
+@media (min-width: 900px) and (max-width: 1179.98px) {
+  /* not enough room for three columns: the lab slides over the terminal instead */
+  .k-body { position: relative; }
+  .k-lab { position: absolute; top: 0; right: 0; bottom: 0; z-index: 5; box-shadow: -18px 0 44px rgba(0, 0, 0, 0.5); }
 }
 @media (max-width: 899.98px) {
   .k-lesson, .k-work, .k-lab { display: none; flex: 1 1 auto; width: 100%; }
@@ -274,6 +283,11 @@
 .k-confirm { padding: 10px 12px; border: 1px solid rgba(255, 123, 123, 0.5); border-radius: 6px; background: var(--k-danger-soft); font-size: 0.9rem; }
 .k-confirm-row { display: flex; gap: 8px; margin-top: 10px; }
 .k-about { padding-top: 14px; border-top: 1px solid var(--k-line); color: var(--k-faint); font-size: 0.82rem; }
+
+.k-fatal { max-width: 36rem; margin: 18vh auto 0; padding: 0 1.25rem; }
+.k-fatal h1 { margin-bottom: 0.5rem; font-size: 1.2rem; }
+.k-fatal p { color: var(--k-muted); }
+.k-fatal pre { margin-top: 1rem; padding: 10px 12px; border: 1px solid var(--k-line); border-radius: 6px; background: var(--k-term-bg); font: 0.82rem/1.5 var(--k-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .k-toast {
   position: absolute; left: 50%; bottom: 22px; z-index: 20; transform: translateX(-50%);

@@ -309,22 +309,21 @@
   /* ------------------------------------------------------------------ terminal */
   class Terminal {
     /**
-     * new K.ui.Terminal(hostElement, { fontSize, keybar: 'auto'|'on'|'off', onTitle(text), onMode(mode) })
-     * mode is 'read' (a line is being read), 'run', 'pager', 'nano' or 'vim'.
+     * new K.ui.Terminal(hostElement, { fontSize, keybar: 'auto'|'on'|'off', onTitle(text) })
+     * onTitle receives window titles set by programs (OSC 0 and 2).
      */
     constructor(host, o) {
       this.opts = o || {};
       this.signal = new K.Signal();
       this.cols = 80; this.rows = 24; this.charW = 8; this.lineH = 18;
-      this.title = '';
       this.buf = new Buffer(MAX_LINES);
-      this.buf.onTitle = (t) => { this.title = t; if (this.opts.onTitle) this.opts.onTitle(t); };
+      this.buf.onTitle = this.opts.onTitle || null;
       this._read = null;          // the line being edited
       this._pending = '';         // type-ahead and pasted lines waiting for a reader
       this._subs = new Set();     // raw key subscribers (onKey)
       this._overlay = null;       // pager or editor
       this._zsh = true; this._kill = ''; this._latch = false; this._composing = false; this._rawPrev = SENTINEL;
-      this._raf = 0; this._stick = true; this._curLine = null; this._keyset = ''; this._modeName = '';
+      this._raf = 0; this._stick = true; this._curLine = null; this._keyset = '';
       this._build(host);
       this.setFontSize(this.opts.fontSize || 14);
       this.setKeybar(this.opts.keybar || 'auto');
@@ -436,6 +435,7 @@
       const r = this._read;
       return this.buf.text() + (r && !r.hidden ? (r.search ? r.search.line : r.buf) : '');
     }
+    /** 'read' while a line is being read, 'run' while a command runs, or 'pager', 'nano', 'vim'. */
     get mode() { return this._overlay ? this._overlay.kind : this._read ? 'read' : 'run'; }
     /** True while an editor holds unsaved changes. */
     get unsaved() { return !!(this._overlay && this._overlay.dirty); }
@@ -494,7 +494,6 @@
 
     /* ---- focus, selection, clipboard ---- */
     focus() { if (!this._disposed) { try { this.ta.focus({ preventScroll: true }); } catch (e) { this.ta.focus(); } } }
-    hasFocus() { return this.el.contains(document.activeElement); }
     _hasSelection() {
       const sel = typeof getSelection === 'function' ? getSelection() : null;
       // a click at the end of a line can leave a range that is not collapsed and yet selects nothing
@@ -1005,19 +1004,16 @@
       this._stick = true; this._schedule();
     }
 
-    /** Tell the app what kind of input is expected and show the matching key bar. */
+    /** Show the key bar that matches what is on the screen: the command line, the pager or an editor. */
     _mode() {
-      const mode = this.mode;
-      const set = KEYSETS[mode] ? mode : 'line';
-      if (set !== this._keyset) {
-        this._keyset = set; this._latch = false;
-        this.keys.textContent = '';
-        KEYSETS[set].forEach((d, i) => this.keys.appendChild(h('button', {
-          type: 'button', class: 'kt-key', 'data-i': String(i), 'data-latch': d.latch ? '' : null,
-          'aria-pressed': d.latch ? 'false' : null, 'aria-label': d.name || null, tabindex: '-1', text: d.label,
-        })));
-      }
-      if (mode !== this._modeName) { this._modeName = mode; if (this.opts.onMode) this.opts.onMode(mode); }
+      const set = KEYSETS[this.mode] ? this.mode : 'line';
+      if (set === this._keyset) return;
+      this._keyset = set; this._latch = false;
+      this.keys.textContent = '';
+      KEYSETS[set].forEach((d, i) => this.keys.appendChild(h('button', {
+        type: 'button', class: 'kt-key', 'data-i': String(i), 'data-latch': d.latch ? '' : null,
+        'aria-pressed': d.latch ? 'false' : null, 'aria-label': d.name || null, tabindex: '-1', text: d.label,
+      })));
     }
   }
   ui.Terminal = Terminal;

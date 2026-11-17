@@ -225,6 +225,7 @@
       document.addEventListener('keydown', (e) => this._strayKey(e));
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') this._saveHome(); });
       root.addEventListener('pagehide', () => this._saveHome());
+      root.addEventListener('beforeunload', (e) => { if (this.tabs.some((t) => t.term.unsaved)) e.preventDefault(); });   // an editor has unsaved text
       this._followViewport();
     }
 
@@ -251,6 +252,7 @@
       const vv = root.visualViewport;
       if (!vv) return;
       const fit = () => {
+        if (Math.abs(vv.scale - 1) > 0.01) return;      // pinch zoom also shrinks the visual viewport: leave the layout alone
         this.el.style.height = vv.height + 'px';
         this.el.style.transform = vv.offsetTop ? 'translateY(' + vv.offsetTop + 'px)' : '';
       };
@@ -336,8 +338,8 @@
     _makeTab() {
       const host = h('div', { class: 'k-term', role: 'tabpanel' });
       this.termHost.appendChild(host);
-      const term = new ui.Terminal(host, { fontSize: this.settings.fontSize, keybar: this.settings.keybar });
-      const tab = { id: ++this.tabSeq, host, term, shell: null, closed: false, label: 'kali@kali: ~' };
+      const tab = { id: ++this.tabSeq, host, term: null, shell: null, closed: false, label: 'kali@kali: ~' };
+      tab.term = new ui.Terminal(host, { fontSize: this.settings.fontSize, keybar: this.settings.keybar, onTitle: (title) => this._setLabel(tab, title) });
       this.tabs.push(tab);
       return tab;
     }
@@ -354,8 +356,7 @@
         if (crashed) await new Promise((resolve) => setTimeout(resolve, 300));     // never spin if a shell cannot start
         tab.term.write('\x1b[0;2m[Shell exited. A new login shell has started.]\x1b[0m\n');
         tab.shell = this._loginShell(tab.term);
-        tab.label = 'kali@kali: ~';
-        this._renderTabs();
+        this._setLabel(tab, 'kali@kali: ~');
       }
     }
 
@@ -408,9 +409,9 @@
       if (!tab) return;
       const home = ev.shell.user && ev.shell.user.home;
       const cwd = home && ev.cwd === home ? '~' : home && ev.cwd.indexOf(home + '/') === 0 ? '~' + ev.cwd.slice(home.length) : ev.cwd;
-      const label = ev.user + '@' + ev.host + ': ' + cwd;
-      if (label !== tab.label) { tab.label = label; this._renderTabs(); }
+      this._setLabel(tab, ev.user + '@' + ev.host + ': ' + cwd);
     }
+    _setLabel(tab, label) { if (label !== tab.label) { tab.label = label; this._renderTabs(); } }
 
     _onCommand(ev) {
       this._saveHomeSoon();
@@ -462,6 +463,7 @@
       this._celebrateTimer = setTimeout(() => { this.celebrating = null; this.renderLesson(); this._showCurrent(); }, CELEBRATE_MS);
       this._finishIfDone(lesson);
       this.renderLesson();
+      if (this.wide.matches && !this.state.lessonOpen) this.toast('Step complete. The lesson panel has the next one.');
     }
     _finishIfDone(lesson) {
       if (this._currentIndex(lesson) >= lesson.steps.length && !this._quizLeft(lesson)) K.lessons.progress.complete(lesson.id);
@@ -829,9 +831,20 @@
     }
   }
 
+  /** Starting failed (a broken pack, most likely): say so instead of leaving an empty page. */
+  function fatal(host, error) {
+    console.error(error);
+    host.textContent = '';
+    host.appendChild(h('div', { class: 'k-fatal', role: 'alert' },
+      h('h1', null, 'Kalima could not start'),
+      h('p', null, 'The simulator stopped while starting up. Reloading the page may help; nothing was sent anywhere.'),
+      h('pre', null, String((error && error.stack) || error))));
+  }
+
   function start() {
-    const app = (K.app = new App(document.getElementById('app')));
-    app.start();
+    const host = document.getElementById('app');
+    const app = (K.app = new App(host));
+    app.start().catch((error) => fatal(host, error));
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
 })(typeof globalThis !== 'undefined' ? globalThis : this);

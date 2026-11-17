@@ -235,6 +235,16 @@ group('terminal: Tab completion', async ({ page }) => {
   await page.keyboard.press('Tab');
   assert.match(await page.locator('.kt-below').first().textContent(), /fxb-alpha\s+fxb-alpine/, 'the second Tab lists the candidates');
   assert.equal(await typed(page), 'fxb-alp');
+  await page.keyboard.press('Tab');                    // further Tabs walk through the candidates, as zsh does
+  assert.equal(await typed(page), 'fxb-alpha');
+  assert.equal(await page.locator('.kt-below .kt-sel').first().textContent(), 'fxb-alpha');
+  await page.keyboard.press('Tab');
+  assert.equal(await typed(page), 'fxb-alpine');
+  await page.keyboard.press('Shift+Tab');
+  assert.equal(await typed(page), 'fxb-alpha');
+  await page.keyboard.press('Control+u');
+  await page.keyboard.type('fxb-alp');
+  await page.keyboard.press('Tab');
   await page.keyboard.type('i');
   assert.equal(await page.locator('.kt-below').first().textContent(), '', 'typing removes the list');
   await page.keyboard.press('Tab');
@@ -244,6 +254,41 @@ group('terminal: Tab completion', async ({ page }) => {
   await page.keyboard.type('cd /us');
   await page.keyboard.press('Tab');
   assert.equal(await typed(page), 'cd /usr/', 'a directory completes with a slash and no space');
+  await page.keyboard.press('Control+u');
+});
+
+group('terminal: reverse search, suggestions and continuation lines', async ({ page }) => {
+  await run(page, 'echo search-target-one');
+  await run(page, 'echo other');
+  await page.keyboard.press('Control+r');                 // must not reload the page
+  await page.keyboard.type('target');
+  assert.equal(await page.locator('.kt-below').first().textContent().then((t) => t.trim()), 'bck-i-search: target');
+  assert.match(await text(page), /└─\$ echo search-target-one$/);
+  await page.keyboard.press('Enter');
+  await waitText(page, /\nsearch-target-one\n[^\n]*\n└─\$ $/);
+  assert.equal(await page.evaluate(() => K.app.booted && !!K.cmd.get('fx-sleep')), true, 'the page was not reloaded');
+
+  // zsh-autosuggestions: the rest of the newest matching history line, accepted with Right
+  await page.keyboard.type('echo sea');
+  assert.equal(await page.evaluate(() => K.app.term._read.suggest), 'rch-target-one');
+  assert.equal(await page.locator('.kt-suggest').first().isVisible(), true);
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await typed(page), 'echo search-target-one');
+  await page.keyboard.press('Control+w');
+  assert.equal(await typed(page), 'echo ', 'Ctrl-W deletes the word before the cursor');
+  await page.keyboard.press('Control+u');
+
+  // an unfinished quote asks for the rest on a continuation line
+  await page.keyboard.type('echo "two');
+  await page.keyboard.press('Enter');
+  await waitText(page, /\n> $/);
+  await page.keyboard.type('lines"');
+  await page.keyboard.press('Enter');
+  await waitText(page, /\ntwo\nlines\n[^\n]*\n└─\$ $/);
+
+  await page.keyboard.type('echo before');
+  await page.keyboard.press('Control+l');
+  assert.match(await text(page), /^┌──\(kali㉿kali\)-\[~\]\n└─\$ echo before$/, 'Ctrl-L clears the screen and keeps the line');
   await page.keyboard.press('Control+u');
 });
 
