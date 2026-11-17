@@ -10,12 +10,12 @@
 
   const BIND = '9.20.11-4-Debian';
   const RR_TYPES = ['A', 'AAAA', 'ANY', 'AXFR', 'CAA', 'CNAME', 'DNSKEY', 'DS', 'HINFO', 'HTTPS', 'MX', 'NAPTR', 'NS', 'NSEC', 'PTR', 'RRSIG', 'SOA', 'SPF', 'SRV', 'SVCB', 'TLSA', 'TXT'];
-  const RR_CLASSES = ['IN', 'CH', 'HS'];
+  const RR_CLASSES = { IN: 'IN', CH: 'CH', CHAOS: 'CH', HS: 'HS', HESIOD: 'HS' };
 
   /* ------------------------------------------------------------ records */
   const dot = (name) => (name ? name + '.' : '.');
   const isType = (s) => RR_TYPES.indexOf(String(s).toUpperCase()) >= 0;
-  const isClass = (s) => RR_CLASSES.indexOf(String(s).toUpperCase()) >= 0;
+  const classOf = (s) => RR_CLASSES[String(s).toUpperCase()] || null;
 
   /** Presentation form of a record's data: host names get their trailing dot. */
   function rdata(r) {
@@ -119,12 +119,12 @@
    * Put one question to the servers the way the BIND tools do: every server in
    * turn, `tries` rounds, waiting out each timeout. Returns the reply, or null
    * after printing a line for every attempt that failed.
-   *   q: { name, shown, type, servers: [ip], arg, port, tcp, tries, timeout }
+   *   q: { shown, servers: [ip], arg, port, tcp, tries, timeout }; send(ip) -> reply with .status and .ms
    */
-  async function ask(ctx, q) {
+  async function ask(ctx, q, send) {
     for (let round = 0; round < q.tries; round++) {
       for (const ip of q.servers) {
-        const res = q.port === 53 ? query(ctx, q.name, q.type, ip) : null;
+        const res = q.port === 53 ? send(ip) : null;
         if (res && res.status !== 'TIMEOUT') { await ctx.sleep(res.ms); return res; }
         const why = silence(ctx, ip, q.port, q.tcp);
         await ctx.sleep(why === 'timed out' ? q.timeout * 1000 : 1);
@@ -134,6 +134,22 @@
       }
     }
     return null;
+  }
+
+  /** Names the BIND tools try (ndots:1): a single label goes through the search list first, a dotted name is taken as it is. */
+  function candidates(machine, name) {
+    if (name.indexOf('.') >= 0) return [name];
+    return (machine.search || []).map((s) => name + '.' + s).concat([name]);
+  }
+
+  /** Ask for each candidate name until one exists. Returns the last reply, or null when no server answered. */
+  async function askNames(ctx, q, names, type) {
+    let res = null;
+    for (const name of names) {
+      res = await ask(ctx, q, (ip) => query(ctx, name, type, ip));
+      if (!res || res.status !== 'NXDOMAIN') break;
+    }
+    return res;
   }
 
   /** Addresses for a server given on the command line; empty when the name does not resolve. */
@@ -200,7 +216,15 @@
     type: 'A', cls: 'IN', server: null, port: 53, tcp: false, recurse: true, search: false, trace: false,
     question: true, answer: true, authority: true, additional: true, comments: true, stats: true, identify: false,
     edns: true, cookie: true, dnssec: false, showTtl: true, showClass: true, onesoa: false, tries: 3, timeout: 0, id: null,
+    tcpSet: false,
   });
+
+  /* dig sends ANY over TCP unless told otherwise, and prints a transfer without headers. */
+  function digSetType(cur, type) {
+    cur.type = type.toUpperCase();
+    if (cur.type === 'ANY' && !cur.tcpSet) cur.tcp = true;
+    if (cur.type === 'AXFR') cur.question = cur.comments = false;
+  }
 
   /** Apply one +keyword[=value]. Returns null, or the text of the complaint. */
   function digPlus(cur, glob, word) {
@@ -219,9 +243,9 @@
     switch (full) {
       case 'all': cur.question = cur.answer = cur.authority = cur.additional = cur.comments = cur.stats = state; glob.cmd = state; return null;
       case 'answer': case 'authority': case 'additional': case 'question': case 'comments': case 'stats':
-      case 'identify': case 'tcp': case 'recurse': case 'search': case 'edns': case 'cookie': case 'dnssec': case 'onesoa':
+      case 'identify': case 'recurse': case 'search': case 'edns': case 'cookie': case 'dnssec': case 'onesoa':
         cur[full] = state; return null;
-      case 'vc': cur.tcp = state; return null;
+      case 'tcp': case 'vc': cur.tcp = state; cur.tcpSet = true; return null;
       case 'rdflag': cur.recurse = state; return null;
       case 'defname': cur.search = state; return null;
       case 'class': cur.showClass = state; return null;
@@ -278,8 +302,8 @@
           const value = a.slice(j + 1) || args[++i];
           if (value === undefined) return usage('Invalid option: ' + a);
           if (ch === 'q') begin({ name: value });
-          else if (ch === 't') { if (isType(value)) cur.type = value.toUpperCase(); else ctx.eprintln(';; Warning, ignoring invalid type ' + value); }
-          else if (ch === 'c') { if (isClass(value)) cur.cls = value.toUpperCase(); else ctx.eprintln(';; Warning, ignoring invalid class ' + value); }
+          else if (ch === 't') { if (isType(value)) digSetType(cur, value); else ctx.eprintln(';; Warning, ignoring invalid type ' + value); }
+          else if (ch === 'c') { if (classOf(value)) cur.cls = classOf(value); else ctx.eprintln(';; Warning, ignoring invalid class ' + value); }
           else if (ch === 'p') {
             if (!/^\d+$/.test(value) || +value > 65535) {
               ctx.println("invalid port number '" + value + "': " + (/^\d+$/.test(value) ? 'out of range' : 'not a valid number'));
@@ -295,8 +319,8 @@
         }
         continue;
       }
-      if (isType(a)) cur.type = a.toUpperCase();
-      else if (isClass(a)) cur.cls = a.toUpperCase();
+      if (isType(a)) digSetType(cur, a);
+      else if (classOf(a)) cur.cls = classOf(a);
       else begin({ name: a });
     }
     if (!lookups.length) begin({ name: '.', type: 'NS' });
@@ -350,23 +374,110 @@
       ';; WHEN: ' + when(K.clock.now()) + '\n' + sizeLine + '\n\n';
   }
 
-  /** Names to try, in resolver order (ndots:1): the search list first for a single label. */
-  function candidates(machine, name) {
-    if (name.endsWith('.')) return [name];
-    const searched = (machine.search || []).map((s) => name + '.' + s);
-    return name.indexOf('.') >= 0 ? [name].concat(searched) : searched.concat([name]);
+  /** What BIND says about itself in the CHAOS class; everything else there is refused. */
+  function chaosQuery(ctx, name, type, ip) {
+    const res = ctx.net.dns(ctx.machine, name, type, { server: ip });
+    if (res.status === 'TIMEOUT') return res;
+    const host = ctx.net.knownHost(ip);
+    const bind = host && ctx.net.servicesOf(host).find((s) => s.port === 53 && /BIND/.test(s.product || ''));
+    const about = { 'version.bind': bind && bind.version + '-Debian', 'hostname.bind': bind && host.hostname }[res.question.name];
+    const ok = about && (type === 'TXT' || type === 'ANY');
+    res.status = ok ? 'NOERROR' : 'REFUSED';
+    res.flags = { aa: !!ok, ra: false, rd: true };
+    res.answers = ok ? [{ name: res.question.name, type: 'TXT', ttl: 0, data: '"' + about + '"' }] : [];
+    res.authority = [];
+    return res;
   }
 
+  const digQuestion = (lk, servers) => ({
+    shown: lk.name, servers: servers.ips, arg: servers.arg, port: lk.port, tcp: lk.tcp, tries: lk.tries, timeout: lk.timeout || (lk.tcp ? 10 : 5),
+  });
+  const NO_SERVERS = ';; no servers could be reached\n\n';
+
   async function digLookup(ctx, p, lk, servers, banner) {
-    const q = { type: lk.type, servers: servers.ips, arg: servers.arg, port: lk.port, tcp: lk.tcp, tries: lk.tries, timeout: lk.timeout || (lk.tcp ? 10 : 5), shown: lk.name };
-    let res = null;
-    for (const name of (lk.search ? candidates(ctx.machine, lk.name) : [lk.name])) {
-      res = await ask(ctx, Object.assign(q, { name }));
-      if (!res || res.status !== 'NXDOMAIN') break;
-    }
+    if (lk.type === 'AXFR') return digTransfer(ctx, p, lk, servers, banner);
+    if (lk.trace) return digTrace(ctx, p, lk, servers, banner);
+    const q = digQuestion(lk, servers);
+    const res = lk.cls === 'IN' ? await askNames(ctx, q, lk.search ? candidates(ctx.machine, lk.name) : [lk.name], lk.type)
+      : await ask(ctx, q, (ip) => chaosQuery(ctx, lk.name, lk.type, ip));
     ctx.out(banner());
-    if (!res) { ctx.out(';; no servers could be reached\n\n'); return 9; }
+    if (!res) { ctx.out(NO_SERVERS); return 9; }
     ctx.out(digReply(ctx, p, lk, res, { ip: res.server, arg: servers.arg || res.server }));
+    return 0;
+  }
+
+  async function digTransfer(ctx, p, lk, servers, banner) {
+    const q = Object.assign(digQuestion(lk, servers), { tcp: true, timeout: lk.timeout || 10 });
+    const x = await ask(ctx, q, (ip) => Object.assign(ctx.net.axfr(ctx.machine, lk.name, ip), { server: ip }));
+    ctx.out(banner());
+    if (!x) { ctx.out(NO_SERVERS); return 9; }
+    if (x.status !== 'OK') { ctx.out('; Transfer failed.\n'); return 0; }
+    const records = lk.onesoa ? x.records.slice(0, -1) : x.records;
+    if (p.glob.short) { ctx.out(records.map((r) => rdata(r) + '\n').join('')); return 0; }
+    let out = lk.answer ? records.map((r) => recordLine(r, lk) + '\n').join('') : '';
+    const zone = lk.name.toLowerCase().replace(/\.$/, '');
+    if (lk.stats) out += digStats(p, lk, { ip: x.server, arg: servers.arg || x.server }, x.ms, ';; XFR size: ' + records.length + ' records (messages 1, bytes ' + wireSize(zone, records, 0) + ')');
+    ctx.out(out);
+    return 0;
+  }
+
+  /* --- +trace: the referrals from the root down, simplified to one server per step and no DNSSEC records */
+  const GTLD_SERVERS = ROOT_SERVERS.map((n) => n.replace('root-servers', 'gtld-servers'));
+  const tldServers = (tld) => (tld === 'com' || tld === 'net' ? GTLD_SERVERS : 'abcd'.split('').map((l) => l + '.nic.' + tld));
+  const nsSet = (name, hosts) => hosts.map((data) => ({ name, type: 'NS', ttl: 172800, data }));
+
+  function isLabOnly(net, name) {
+    const zones = net.world.dns.zones;
+    return Object.keys(zones).some((z) => zones[z].internal && (name === z || name.endsWith('.' + z)));
+  }
+
+  /**
+   * The record sets a resolver meets on the way to `name`: one per referral,
+   * ending in the answer or in the SOA of whoever says the name does not exist.
+   */
+  function referrals(ctx, lk, name, resolver) {
+    const net = ctx.net;
+    const labels = name ? name.split('.') : [];
+    const final = query(ctx, name, lk.type, resolver);
+    const answer = final.answers.length ? final.answers : final.authority;
+    if (!labels.length) return [answer];
+    const tld = labels[labels.length - 1];
+    const day = new Date(K.clock.now()).toISOString().slice(0, 10).replace(/-/g, '');
+    const soa = (owner, mname, rname) => [{ name: owner, type: 'SOA', ttl: owner ? 900 : 86400, data: mname + ' ' + rname + ' ' + day + '00 1800 900 604800 86400' }];
+    if (isLabOnly(net, name) || (final.status !== 'NOERROR' && !net._publicName('nic.' + tld))) return [soa('', ROOT_SERVERS[0], 'nstld.verisign-grs.com')];
+    const steps = [nsSet(tld, tldServers(tld))];
+    if (labels.length === 1) return steps;
+    if (final.status !== 'NOERROR') return steps.concat([soa(tld, tldServers(tld)[0], 'hostmaster.nic.' + tld)]);
+    const apex = labels.slice(-2).join('.');
+    const ns = query(ctx, apex, 'NS', resolver).answers.filter((r) => r.type === 'NS').map((r) => r.data);
+    return steps.concat([nsSet(apex, ns.length ? ns : ['ns1.' + apex, 'ns2.' + apex]), answer]);
+  }
+
+  async function digTrace(ctx, p, lk, servers, banner) {
+    const net = ctx.net;
+    const name = lk.name.toLowerCase().replace(/\.$/, '');
+    const q = digQuestion(lk, servers);
+    const step = (asked, records, ip, label, ms) => records.map((r) => recordLine(r, lk) + '\n').join('') +
+      ';; Received ' + wireSize(asked, records, 11) + ' bytes from ' + ip + '#' + lk.port + '(' + label + ') in ' + ms + ' ms\n\n';
+    const hints = await ask(ctx, q, (ip) => query(ctx, '.', 'NS', ip));
+    ctx.out(banner());
+    if (!hints) { ctx.out(NO_SERVERS); return 9; }
+    ctx.out(step('', hints.answers, hints.server, servers.arg || hints.server, hints.ms));
+    let from = hints.answers;
+    for (const records of from.length ? referrals(ctx, lk, name, hints.server) : []) {
+      const label = from[Math.floor(net.rand() * from.length)].data;
+      const addr = net.resolve(ctx.machine, label);
+      if (!addr) { ctx.eprintln("dig: couldn't get address for '" + label + "': not found"); return 10; }
+      const rt = net.route(ctx.machine, addr.ip);
+      if (!rt.ok || !(rt.inet || rt.direct || rt.self)) {
+        for (let i = 0; i < q.tries; i++) { await ctx.sleep(q.timeout * 1000); ctx.println(';; communications error to ' + addr.ip + '#53: timed out'); }
+        ctx.out(NO_SERVERS); return 9;
+      }
+      const ms = Math.max(1, Math.round(net.jitter(rt.rtt, 4)));
+      await ctx.sleep(ms);
+      ctx.out(step(name, records, addr.ip, label, ms));
+      from = records.filter((r) => r.type === 'NS');
+    }
     return 0;
   }
 
