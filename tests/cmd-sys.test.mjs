@@ -726,3 +726,61 @@ test('cal', async () => {
   assert.equal((await sim.run('cal 1 10000')).err, 'cal: illegal year value: use 1-9999\n');
   assert.ok((await sim.out('cal', { tty: true })).includes('\x1b[7m17\x1b[27m'));
 });
+
+/* ---------------------------------------------------------- top, htop, watch */
+
+test('top: batch mode', async () => {
+  const sim = await sys();
+  const lines = (await sim.out('top -b -n 1')).split('\n');
+  assert.match(lines[0], /^top - \d\d:\d\d:\d\d up .*load average: /);
+  assert.match(lines[1], /^Tasks: +\d+ total, +1 running, +\d+ sleeping, +0 stopped, +0 zombie$/);
+  assert.match(lines[2], /^%Cpu\(s\): +[\d.]+ us, +[\d.]+ sy, +0\.0 ni, +[\d.]+ id, +[\d.]+ wa, +0\.0 hi, +[\d.]+ si, +0\.0 st $/);
+  assert.match(lines[3], /^MiB Mem : +3932\.0 total, +[\d.]+ free, +[\d.]+ used, +[\d.]+ buff\/cache {5}$/);
+  assert.match(lines[4], /^MiB Swap: +1024\.0 total, +1024\.0 free, +0\.0 used\. +[\d.]+ avail Mem $/);
+  assert.equal(lines[5], '');
+  assert.equal(lines[6], '    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND');
+  assert.match(lines[7], /^ +452 root +20 +0 +421776 +118320 +\d+ S +1\.2 +2\.9 +2:22\.\d\d Xorg$/);
+  assert.equal((await sim.out('top -b -n 2')).split('\n').filter((l) => /^top - /.test(l)).length, 2);
+  assert.equal((await sim.out('top -bn1 -p 1')).split('\n').length, 9);
+  assert.ok((await sim.out('top -bn1 -u kali')).split('\n').slice(7).every((l) => !l || / kali /.test(l)));
+  assert.match(await sim.out('top -bn1 -c -p 452'), /\/usr\/lib\/xorg\/Xorg :0 -seat seat0/);
+});
+
+test('top: options and errors', async () => {
+  const sim = await sys();
+  const bad = await sim.run('top -x');
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /^top: unknown option 'x'\nUsage:/);
+  assert.match((await sim.run('top -n x')).err, /^top: bad iterations argument 'x'/);
+  assert.match((await sim.run('top -u nobodyhere')).err, /^top: Invalid user 'nobodyhere'/);
+  assert.match(await sim.out('top -v'), /^top from procps-ng/);
+});
+
+test('top: live screen redraws until q', async () => {
+  const sim = await sys();
+  sim.term.take();
+  const pending = sim.shell.runLine('top');
+  setTimeout(() => sim.term.pressKey('q'), 80);
+  assert.equal(await pending, 0);
+  const out = sim.term.take();
+  assert.ok(out.includes('\x1b[2J\x1b[H'));
+  assert.ok(out.split('top - ').length > 2, 'redrawn more than once');
+  const again = await interrupted(sim, 'top');
+  assert.equal(again.code, 0);
+});
+
+test('htop and watch', async () => {
+  const sim = await sys();
+  const h = (await sim.out('htop')).split('\n');
+  assert.match(h[0], /^ {2}0\[\|*\s+[\d.]+%\] {2}Tasks: \d+, \d+ thr, \d+ kthr; 1 running$/);
+  assert.match(h[5], /^ {4}PID USER {7}PRI {2}NI/);
+  assert.match(h.find((l) => /F10Quit/.test(l)), /^F1Help/);
+  assert.match((await sim.run('htop -u nobody')).err, /^htop: Unknown user: nobody/);
+  const w = await sim.run('watch -n 1 -g date');
+  assert.equal(w.code, 0);
+  assert.match(w.out, /^Every 1\.0s: date +kali: \w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\n\n\w{3} /);
+  assert.equal((await sim.out('watch -t -q 1 echo hi')).split('\n')[0], 'hi');
+  assert.equal((await sim.run('watch')).code, 1);
+  const stopped = await interrupted(sim, 'watch -n 1 echo hi');
+  assert.equal(stopped.code, 0);
+});

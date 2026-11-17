@@ -2143,4 +2143,227 @@
       return 0;
     },
   });
+
+  /* ------------------------------------------------------- top, htop, watch */
+
+  /** Redraw frame() every delayMs until q or Ctrl-C. Ends the way top and watch do: quietly, status 0. */
+  async function liveScreen(ctx, delayMs, frame, quitKeys) {
+    let quit = false;
+    const off = ctx.term.onKey((k) => { if (quitKeys.indexOf(k) >= 0) quit = true; });
+    try {
+      while (!quit) {
+        ctx.term.write('\x1b[2J\x1b[H' + frame());
+        for (let t = 0; t < delayMs && !quit; t += 100) {
+          await ctx.sleep(Math.min(100, delayMs - t));
+          if (K.clock._virtual) await new Promise((r) => setTimeout(r, 0)); // let queued key presses arrive
+        }
+      }
+    } catch (e) {
+      if (!(e instanceof K.Interrupt)) throw e;
+    } finally { off(); }
+    ctx.term.write('\x1b[2J\x1b[H');
+    return 0;
+  }
+
+  const topNumber = (kb, width) => {
+    if (String(kb).length <= width) return String(kb);
+    const units = [['m', 1024], ['g', 1048576], ['t', 1073741824]];
+    for (const [u, d] of units) { const s = (kb / d).toFixed(1) + u; if (s.length <= width) return s; }
+    return String(kb);
+  };
+  const topTime = (sec, seed) => Math.floor(sec / 60) + ':' + U.pad2(Math.floor(sec) % 60) + '.' + U.pad2(U.hash32('t' + seed) % 100);
+
+  function sysSummary(ctx, views) {
+    const m = memInfo(ctx); const mib = (kb) => U.padStart((kb / 1024).toFixed(1), 8);
+    const count = (re) => views.filter((v) => re.test(v.stat[0])).length;
+    const run = count(/R/); const stopped = count(/T|t/); const zombie = count(/Z/);
+    const busy = Math.min(100, views.reduce((a, v) => a + v.cpu, 0));
+    const us = busy * 0.7 + K.net.rand() * 0.5; const sy = busy * 0.3 + K.net.rand() * 0.4; const wa = K.net.rand() * 0.2;
+    const idle = Math.max(0, 100 - us - sy - wa);
+    const cpu = [[us, 'us'], [sy, 'sy'], [0, 'ni'], [idle, 'id'], [wa, 'wa'], [0, 'hi'], [K.net.rand() * 0.1, 'si'], [0, 'st']].map(([v, n]) => U.padStart(v.toFixed(1), 4) + ' ' + n).join(', ');
+    return [
+      'top -' + uptimeLine(ctx.machine),
+      'Tasks: ' + [[views.length, 'total'], [run, 'running'], [views.length - run - stopped - zombie, 'sleeping'], [stopped, 'stopped'], [zombie, 'zombie']].map(([n, w]) => U.padStart(n, w === 'total' ? 3 : 3) + ' ' + w).join(', '),
+      '%Cpu(s): ' + cpu + ' ',
+      'MiB Mem : ' + mib(m.total) + ' total, ' + mib(m.free) + ' free, ' + mib(m.used) + ' used, ' + mib(m.buffers + m.cache) + ' buff/cache     ',
+      'MiB Swap: ' + mib(m.swapTotal) + ' total, ' + mib(m.swapFree) + ' free, ' + mib(m.swapTotal - m.swapFree) + ' used. ' + mib(m.available) + ' avail Mem ',
+    ];
+  }
+
+  /** Processes ordered the way top shows them: busiest first. */
+  function topProcesses(ctx, o) {
+    let views = allProcs(ctx);
+    for (const v of views) if (v.pid === ctx.pid) { v.cpu = 0.3; v.stat = 'R'; }
+    const total = views.length;
+    if (o.pids) views = views.filter((v) => o.pids.indexOf(v.pid) >= 0);
+    if (o.user) views = views.filter((v) => v.user === o.user);
+    return { total: views, shown: views.slice().sort((a, b) => b.cpu - a.cpu || a.pid - b.pid), count: total };
+  }
+
+  const TOP_USAGE = 'Usage:\n top -hv | -bcEeHiOSs1 -d secs -n max -u|U user -p pid(s) -o field -w [cols]\n';
+
+  reg({
+    name: 'top', pkg: 'procps', summary: 'display Linux processes', synopsis: 'top -hv | -bcEeHiOSs1 -d secs -n max -u|U user -p pid(s) -o field -w [cols]',
+    man: 'DESCRIPTION\n       The top program provides a dynamic real-time view of a running system. It can display system summary information as well as a list of processes or threads currently being managed by the Linux kernel.\n\nOPTIONS\n       -b, --batch-mode\n              Starts top in Batch mode, which could be useful for sending output from top to other programs or to a file.\n\n       -c     Command-line/Program-name toggle.\n\n       -d, --delay=SECS\n              Specifies the delay between screen updates.\n\n       -n, --iterations=NUMBER\n              Specifies the maximum number of iterations, or frames, top should produce before ending.\n\n       -p, --pid=PIDLIST\n              Monitor only processes with specified process IDs.\n\n       -u, --filter-only-euser=USER\n              Monitor only processes with an effective user ID or user name matching that given.\n\n       -w, --width[=COLS]\n              In Batch mode, when used without an argument top will format output using the COLUMNS= and LINES= environment variables.\n\n       q      Quit interactive top.\n\nEXAMPLES\n       top\n              Watch the system; press q to leave.\n       top -b -n 1 | head -15\n              One snapshot, ready for a pipe.',
+    async run(ctx) {
+      const g = ctx.getopt({ short: 'bcd:n:p:u:U:w::hvHiSsEeO1', long: ['batch', 'help', 'version', 'delay=', 'iterations=', 'pid=', 'filter-only-euser=', 'width=?'] });
+      if (g.err) {
+        const bad = /option -- '(.)'/.exec(g.err) || /option '(.*)'/.exec(g.err);
+        ctx.err('top: unknown option \'' + (bad ? bad[1] : g.err) + '\'\n' + TOP_USAGE);
+        return 1;
+      }
+      if (g.opts.h || g.opts.help) { ctx.out(' procps-ng 4.0.4\n' + TOP_USAGE); return 0; }
+      if (g.opts.v || g.opts.version) { ctx.out('top from procps-ng 4.0.4\n'); return 0; }
+      const delay = g.opts.d != null ? Number(g.opts.d) : g.opts.delay != null ? Number(g.opts.delay) : 3;
+      if (!(delay >= 0)) { ctx.err('top: bad delay interval \'' + (g.opts.d || g.opts.delay) + "'\n"); return 1; }
+      const nRaw = g.opts.n != null ? g.opts.n : g.opts.iterations;
+      if (nRaw != null && !/^\d+$/.test(nRaw)) { ctx.err('top: bad iterations argument \'' + nRaw + "'\n"); return 1; }
+      const iterations = nRaw != null ? +nRaw : Infinity;
+      const pidArg = g.opts.p != null ? g.opts.p : g.opts.pid;
+      let pids = null;
+      if (pidArg != null) {
+        pids = String(pidArg).split(',').map((x) => (/^\d+$/.test(x) ? +x : NaN));
+        if (pids.some(isNaN)) { ctx.err('top: bad pid \'' + pidArg + "'\n"); return 1; }
+      }
+      const user = g.opts.u || g.opts.U || g.opts['filter-only-euser'] || null;
+      if (user && !ctx.machine.userByName(user) && !ctx.machine.procs.some((p) => p.user === user)) { ctx.err('top: Invalid user \'' + user + "'\n"); return 1; }
+      const batch = !!(g.opts.b || g.opts.batch) || !ctx.isTTY;
+      const width = g.opts.w && g.opts.w !== true ? +g.opts.w : batch ? 512 : ctx.cols;
+      const full = !!g.opts.c;
+      const frame = (rowsLeft) => {
+        const sel = topProcesses(ctx, { pids, user });
+        const head = sysSummary(ctx, sel.total.length ? allProcs(ctx) : []);
+        const col = '    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND';
+        const rows = sel.shown.slice(0, rowsLeft).map((v) => {
+          const shr = v.kthread ? 0 : Math.floor(v.rss * 0.36);
+          return U.padStart(v.pid, 7) + ' ' + shortUser(v.user).padEnd(8) + ' ' + U.padStart(v.kthread ? 0 : 20 + v.ni, 3) + ' ' + U.padStart(v.ni, 3) + ' ' + U.padStart(topNumber(v.vsz, 7), 7) + ' ' +
+            U.padStart(topNumber(v.rss, 6), 6) + ' ' + U.padStart(topNumber(shr, 6), 6) + ' ' + v.stat[0] + ' ' + U.padStart(v.cpu.toFixed(1), 5) + ' ' + U.padStart(v.mem.toFixed(1), 5) + ' ' + U.padStart(topTime(v.time, v.pid), 9) + ' ' + (full ? v.cmd : v.comm);
+        });
+        const text = head.concat(['', batch ? col : K.c.inverse(col.padEnd(width))], rows);
+        return text.map((l) => (K.util.stripAnsi(l).length > width && !batch ? l.slice(0, width) : batch ? l.slice(0, width) : l)).join('\n') + '\n';
+      };
+      if (batch) {
+        for (let i = 0; i < iterations; i++) {
+          ctx.out(frame(Infinity));
+          if (i + 1 < iterations) await ctx.sleep(delay * 1000);
+        }
+        return 0;
+      }
+      const rowsLeft = Math.max(1, ctx.rows - 7);
+      let shown = 0;
+      return liveScreen(ctx, delay * 1000, () => (++shown > iterations ? (ctx.term.write(''), '') : frame(rowsLeft).replace(/\n$/, '')), ['q', 'Q', 'Escape']);
+    },
+  });
+
+  /** htop sizes: KiB while small, then whole MiB, then GiB with a decimal. */
+  const htopSize = (kb) => (kb < 100000 ? String(kb) : kb < 10485760 ? Math.round(kb / 1024) + 'M' : (kb / 1048576).toFixed(1) + 'G');
+
+  const htopBar = (label, frac, text, width) => {
+    const inner = width - 2; const filled = Math.min(inner, Math.round(inner * frac));
+    const body = '|'.repeat(filled).padEnd(inner);
+    const t = text.length < inner ? body.slice(0, inner - text.length) + text : body;
+    return label + '[' + t + ']';
+  };
+
+  reg({
+    name: 'htop', pkg: 'htop', summary: 'interactive process viewer', synopsis: 'htop [-dCFhpustvH]',
+    man: 'DESCRIPTION\n       htop is a cross-platform interactive process viewer. It is similar to top, but allows you to scroll vertically and horizontally, so you can see all the processes running on the system, along with their full command lines.\n\nOPTIONS\n       -d --delay=DELAY\n              Delay between updates, in tenths of seconds.\n\n       -u --user=USERNAME\n              Show only the processes of a given user.\n\n       -p --pid=PID[,PID...]\n              Show only the given PIDs.\n\n       -h --help\n              Print a help message and exit.\n\n       -V --version\n              Print version info and exit.\n\n       F10, q Quit.\n\nEXAMPLES\n       htop\n              Interactive process list; press F10 or q to leave.\n       htop -u kali\n              Only kali\'s processes.',
+    async run(ctx) {
+      const g = ctx.getopt({ short: 'd:CsFhpu:tVH', long: ['delay=', 'no-color', 'no-colour', 'help', 'version', 'user=', 'pid=', 'tree'] });
+      if (g.err) { ctx.err('htop: ' + g.err + '\nPlease use \'htop --help\' for help on command line options.\n'); return 1; }
+      if (g.opts.h || g.opts.help) { ctx.out('htop 3.4.1\n(C) 2004-2019 Hisham Muhammad. (C) 2020-2025 htop dev team.\nReleased under the GNU GPLv2+.\n\n-C --no-color               Use a monochrome color scheme\n-d --delay=DELAY            Set the delay between updates, in tenths of seconds\n-F --filter=FILTER          Show only the commands matching the given filter\n-h --help                   Print this help screen\n-p --pid=PID[,PID,PID...]   Show only the given PIDs\n-s --sort-key=COLUMN        Sort by COLUMN in list view (try --sort-key=help for a list)\n-t --tree                   Show the tree view (can be combined with -s)\n-u --user[=USERNAME]        Show only processes for a given user (or $USER)\n-U --no-unicode             Do not use unicode but ASCII characters for graph meters\n-V --version                Print version info\n'); return 0; }
+      if (g.opts.V || g.opts.version) { ctx.out('htop 3.4.1\n'); return 0; }
+      const user = g.opts.u || g.opts.user || null;
+      if (user && !ctx.machine.procs.some((p) => p.user === user)) { ctx.err('htop: Unknown user: ' + user + '\n'); return 1; }
+      const cols = ctx.cols; const rows = ctx.rows;
+      const frame = () => {
+        const views = allProcs(ctx).filter((v) => !user || v.user === user);
+        const m = memInfo(ctx);
+        const busy = Math.min(100, views.reduce((a, v) => a + v.cpu, 0));
+        const half = Math.floor((cols - 4) / 2) - 1;
+        const cpus = (ctx.fs.read('/proc/cpuinfo').match(/^processor/gm) || []).length || 1;
+        const left = []; const right = [];
+        for (let i = 0; i < cpus; i++) { const pct = i ? K.net.rand() * 2 : busy; left.push(htopBar(U.padStart(i, 3), pct / 100, pct.toFixed(1) + '%', half)); }
+        left.push(htopBar('Mem', m.used / m.total, (m.used / 1048576).toFixed(2) + 'G/' + (m.total / 1048576).toFixed(2) + 'G', half));
+        left.push(htopBar('Swp', 0, '0K/' + Math.round(m.swapTotal / 1024) + 'M', half));
+        const thr = views.length + 14; const [l1, l5, l15] = loadAverage(ctx.machine);
+        right.push('Tasks: ' + views.filter((v) => !v.kthread).length + ', ' + thr + ' thr, ' + views.filter((v) => v.kthread).length + ' kthr; ' + views.filter((v) => v.stat[0] === 'R').length + ' running');
+        right.push('Load average: ' + l1 + ' ' + l5 + ' ' + l15);
+        const up = Math.floor((K.clock.now() - K.getBootTime()) / 1000);
+        right.push('Uptime: ' + U.pad2(Math.floor(up / 3600)) + ':' + U.pad2(Math.floor(up / 60) % 60) + ':' + U.pad2(up % 60));
+        const top = left.map((l, i) => l + '  ' + (right[i] || ''));
+        const col = '    PID USER       PRI  NI  VIRT   RES   SHR S  CPU% MEM%   TIME+  Command';
+        const body = views.slice().sort((a, b) => b.cpu - a.cpu || a.pid - b.pid).slice(0, Math.max(1, rows - top.length - 3)).map((v) =>
+          U.padStart(v.pid, 7) + ' ' + shortUser(v.user).padEnd(10) + ' ' + U.padStart(v.kthread ? 0 : 20 + v.ni, 3) + U.padStart(v.ni, 4) + U.padStart(htopSize(v.vsz), 6) + U.padStart(htopSize(v.rss), 6) +
+          U.padStart(htopSize(v.kthread ? 0 : Math.floor(v.rss * 0.36)), 6) + ' ' + v.stat[0] + U.padStart(v.cpu.toFixed(1), 6) + U.padStart(v.mem.toFixed(1), 5) + U.padStart(topTime(v.time, v.pid), 9) + '  ' + v.cmd);
+        const keys = 'F1Help  F2Setup F3SearchF4FilterF5Tree  F6SortByF7Nice -F8Nice +F9Kill  F10Quit';
+        return top.concat(['', ctx.isTTY ? K.c.inverse(col.padEnd(cols)) : col], body, [ctx.isTTY ? K.c.inverse(keys.padEnd(cols)) : keys]).map((l) => (ctx.isTTY ? l : l.slice(0, cols))).join('\n') + '\n';
+      };
+      if (!ctx.isTTY) { ctx.out(frame()); return 0; }
+      return liveScreen(ctx, (g.opts.d != null ? Number(g.opts.d) * 100 : 1500), () => frame().replace(/\n$/, ''), ['q', 'Q', 'F10']);
+    },
+  });
+
+  const WATCH_USAGE = '\nUsage:\n watch [options] command\n\nOptions:\n  -b, --beep             beep if command has a non-zero exit\n  -c, --color            interpret ANSI color and style sequences\n  -d, --differences[=<permanent>]\n                         highlight changes between updates\n  -e, --errexit          exit if command has a non-zero exit\n  -g, --chgexit          exit when output from command changes\n  -q, --equexit <cycles>\n                         exit when output from command does not change\n  -n, --interval <secs>  seconds to wait between updates\n  -p, --precise          attempt run command in precise intervals\n  -r, --no-rerun         do not rerun program on window resize\n  -t, --no-title         turn off header\n  -w, --no-linewrap      turn off line wrapping\n  -x, --exec             pass command to exec instead of "sh -c"\n\n  -h, --help     display this help and exit\n  -v, --version  output version information and exit\n\nFor more details see watch(1).\n';
+
+  reg({
+    name: 'watch', pkg: 'procps', summary: 'execute a program periodically, showing output fullscreen', synopsis: 'watch [options] command',
+    man: 'DESCRIPTION\n       watch runs command repeatedly, displaying its output and errors (the first screenfull). This allows you to watch the program output change over time. By default, command is run every 2 seconds and watch will run until interrupted.\n\nOPTIONS\n       -d, --differences\n              Highlight the differences between successive updates.\n\n       -e, --errexit\n              Freeze updates on command error, and exit after a key press.\n\n       -g, --chgexit\n              Exit when the output of command changes.\n\n       -n, --interval seconds\n              Specify update interval. The command will not allow quicker than 0.1 second interval.\n\n       -t, --no-title\n              Turn off the header showing the interval, command, and current time at the top of the display.\n\n       q      Quit watch.\n\nEXAMPLES\n       watch -n 1 date\n              Show the clock, refreshed every second.\n       watch -d free -m\n              Watch memory use and highlight changes.',
+    async run(ctx) {
+      const g = ctx.getopt({ short: 'bcd::egq:n:prtwxhv', long: ['beep', 'color', 'differences=?', 'errexit', 'chgexit', 'equexit=', 'interval=', 'precise', 'no-rerun', 'no-title', 'no-linewrap', 'exec', 'help', 'version'],
+        alias: { interval: 'n', 'no-title': 't', errexit: 'e', chgexit: 'g', exec: 'x' }, stopAtNonOption: true });
+      if (g.err) { ctx.err('watch: ' + g.err + '\n' + WATCH_USAGE); return 1; }
+      if (g.opts.h) { ctx.out(WATCH_USAGE); return 0; }
+      if (g.opts.v) { ctx.out('watch from procps-ng 4.0.4\n'); return 0; }
+      if (!g.rest.length) { ctx.err(WATCH_USAGE); return 1; }
+      let secs = 2;
+      if (g.opts.n != null) {
+        secs = Number(String(g.opts.n).replace(',', '.'));
+        if (isNaN(secs)) secs = 0.1;
+      }
+      secs = Math.max(0.1, secs);
+      const line = g.rest.join(' ');
+      let last = null; let exitCode = null; let same = 0;
+      const frame = async () => {
+        const r = await ctx.run(g.opts.x ? g.rest : line);
+        const text = r.out + r.err;
+        if (g.opts.g && last != null && text !== last) exitCode = 0;
+        if (g.opts.e && r.code) exitCode = r.code;
+        same = last != null && text === last ? same + 1 : 0;
+        if (g.opts.q != null && same >= Math.max(1, parseInt(g.opts.q, 10) || 1)) exitCode = 0;
+        last = text;
+        const stamp = U.dateString(K.clock.now()).replace(/^(\w+ \w+ +\d+) (\d+):(\d+):(\d+) [AP]M UTC (\d+)$/, '$1 ' + clockTime(K.clock.now()) + ' $5');
+        const title = 'Every ' + secs.toFixed(1) + 's: ' + line;
+        const right = ctx.machine.hostname + ': ' + stamp;
+        const head = g.opts.t ? '' : title.slice(0, Math.max(0, ctx.cols - right.length - 1)).padEnd(Math.max(0, ctx.cols - right.length)) + right + '\n\n';
+        return head + text.split('\n').slice(0, Math.max(1, ctx.rows - (g.opts.t ? 0 : 2))).map((l) => l.slice(0, ctx.cols)).join('\n');
+      };
+      if (!ctx.isTTY) {
+        try {
+          for (;;) {
+            const text = await frame();
+            ctx.out(text.replace(/\n?$/, '\n'));
+            if (exitCode != null) return exitCode;
+            await ctx.sleep(secs * 1000);
+            if (K.clock._virtual) await new Promise((r) => setTimeout(r, 0));
+          }
+        } catch (e) { if (e instanceof K.Interrupt) return 0; throw e; }
+      }
+      let screen = await frame();
+      let quit = false;
+      const off = ctx.term.onKey((k) => { if (k === 'q' || k === 'Q') quit = true; });
+      try {
+        while (!quit && exitCode == null) {
+          ctx.term.write('\x1b[2J\x1b[H' + screen.replace(/\n$/, ''));
+          for (let t = 0; t < secs * 1000 && !quit; t += 100) {
+            await ctx.sleep(Math.min(100, secs * 1000 - t));
+            if (K.clock._virtual) await new Promise((r) => setTimeout(r, 0));
+          }
+          if (!quit) screen = await frame();
+        }
+      } catch (e) { if (!(e instanceof K.Interrupt)) throw e; } finally { off(); }
+      ctx.term.write('\x1b[2J\x1b[H');
+      return exitCode == null ? 0 : exitCode;
+    },
+  });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
