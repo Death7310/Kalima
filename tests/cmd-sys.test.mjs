@@ -645,3 +645,84 @@ test('pkill stops a background job', async () => {
   assert.equal(await sim.out('pgrep -c sleep'), '0\n');
   assert.doesNotMatch(await sim.out('jobs'), /running/);
 });
+
+/* ------------------------------------------------- memory, sessions, calendar */
+
+test('free: layout and units', async () => {
+  const sim = await sys();
+  const lines = (await sim.out('free')).split('\n');
+  assert.equal(lines[0], '               total        used        free      shared  buff/cache   available');
+  assert.match(lines[1], /^Mem: {9}4026392 +\d+ +1493820 +41280 +\d+ +2871544$/);
+  assert.match(lines[2], /^Swap: {8}1048572 {11}0 +1048572$/);
+  assert.match(await sim.out('free -h'), /^ +total.*\nMem: +3\.8Gi +1\.\dGi +1\.4Gi +40Mi +1\.\dGi +2\.7Gi\nSwap: +1\.0Gi +0B +1\.0Gi\n$/);
+  assert.match(await sim.out('free -m -t'), /\nTotal: +4956 +\d+ +\d+\n$/);
+  assert.match(await sim.out('free -w'), /shared +buffers +cache +available/);
+  assert.equal((await sim.out('free -s 1 -c 2')).split('\n\n').length, 2);
+  assert.match(await sim.out('free --si -h'), /Mem: +4\.1GB/);
+  const bad = await sim.run('free -z');
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /^free: invalid option -- 'z'\n\nUsage:\n free \[options\]/);
+  assert.match(await sim.out('free -V'), /^free from procps-ng/);
+});
+
+test('arch, nproc, tty, lsb_release', async () => {
+  const sim = await sys();
+  assert.equal(await sim.out('arch'), 'x86_64\n');
+  assert.equal(await sim.out('nproc'), '2\n');
+  assert.equal(await sim.out('nproc --ignore=1'), '1\n');
+  assert.equal(await sim.out('nproc --ignore=9'), '1\n');
+  assert.equal((await sim.run('nproc --ignore=x')).err, "nproc: invalid number: 'x'\n");
+  assert.equal(await sim.out('tty'), '/dev/pts/0\n');
+  const piped = await sim.run('echo | tty');
+  assert.equal(piped.out, 'not a tty\n');
+  assert.equal(piped.code, 1);
+  assert.equal((await sim.run('echo | tty -s')).out, '');
+  const lsb = await sim.run('lsb_release -a');
+  assert.equal(lsb.out, 'Distributor ID:\tKali\nDescription:\tKali GNU/Linux Rolling\nRelease:\t2026.3\nCodename:\tkali-rolling\n');
+  assert.equal(lsb.err, 'No LSB modules are available.\n');
+  assert.equal(await sim.out('lsb_release -ds'), 'Kali GNU/Linux Rolling\n');
+  assert.equal(await sim.out('lsb_release -rc'), 'Release:\t2026.3\nCodename:\tkali-rolling\n');
+  assert.equal(await sim.out('lsb_release'), 'No LSB modules are available.\n');
+});
+
+test('who, w, users, last', async () => {
+  const sim = await sys();
+  assert.match(await sim.out('who'), /^kali {5}tty7 {9}\d{4}-\d\d-\d\d \d\d:\d\d \(:0\)\n$/);
+  assert.match(await sim.out('who -H'), /^NAME {5}LINE {9}TIME {13}COMMENT\nkali/);
+  assert.match(await sim.out('who -b'), /^ {9}system boot {2}\d{4}-/);
+  assert.equal(await sim.out('who -q'), 'kali\n# users=1\n');
+  assert.equal(await sim.out('who am i'), '');
+  assert.equal(await sim.out('users'), 'kali\n');
+  const w = (await sim.out('w')).split('\n');
+  assert.match(w[0], /^ \d\d:\d\d:\d\d up .*1 user,  load average: /);
+  assert.equal(w[1], 'USER     TTY      FROM             LOGIN@   IDLE   JCPU   PCPU WHAT');
+  assert.match(w[2], /^kali {5}tty7 {5}:0 {15}\d\d:\d\d +[\d:]+m +[\d:]+ +0\.05s xfce4-session$/);
+  assert.equal((await sim.out('w -h')).split('\n').length, 2);
+  assert.equal(await sim.out('w nobody -h'), '\n');
+  const last = (await sim.out('last')).split('\n');
+  assert.match(last[0], /^kali {5}tty7 {9}:0 {15}\w{3} \w{3} [ \d]\d \d\d:\d\d {3}still logged in$/);
+  assert.match(last[1], /^reboot {3}system boot {2}7\.1\.5-kali1-amd64 \w{3} \w{3} [ \d]\d \d\d:\d\d {3}still running$/);
+  assert.match(last[2], / - \d\d:\d\d \(\d\d:\d\d\)$/);
+  assert.match(last.slice(-2)[0], /^wtmp begins \w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}$/);
+  assert.equal((await sim.out('last -n 2')).split('\n').filter((l) => /^\S/.test(l) && !/^wtmp/.test(l)).length, 2);
+  assert.equal((await sim.out('last -2 reboot')).split('\n').filter((l) => /^reboot/.test(l)).length, 2);
+  assert.match((await sim.run('last -z')).err, /^last: invalid option -- 'z'/);
+});
+
+test('cal', async () => {
+  const sim = await sys();
+  sim.K.clock.useVirtual(Date.UTC(2026, 10, 17, 12, 0, 0));
+  assert.equal(await sim.out('cal'), [
+    '   November 2026      ', 'Su Mo Tu We Th Fr Sa  ', ' 1  2  3  4  5  6  7  ', ' 8  9 10 11 12 13 14  ',
+    '15 16 17 18 19 20 21  ', '22 23 24 25 26 27 28  ', '29 30                 ', ''].join('\n'));
+  assert.equal((await sim.out('cal 2 2028')).split('\n')[6], '27 28 29              ');
+  assert.equal((await sim.out('cal feb 2027')).split('\n')[0], '   February 2027      ');
+  assert.equal((await sim.out('cal -m 9 2026')).split('\n')[1], 'Mo Tu We Th Fr Sa Su  ');
+  assert.match((await sim.out('cal -3')).split('\n')[0], /^ {4}October 2026 {9}November 2026 {9}December 2026 {6}$/);
+  const year = (await sim.out('cal 2027')).split('\n');
+  assert.equal(year[0].trim(), '2027');
+  assert.match(year[2], /January 2027 +February 2027 +March 2027/);
+  assert.equal((await sim.run('cal 13 2026')).err, 'cal: illegal month value: use 1-12\n');
+  assert.equal((await sim.run('cal 1 10000')).err, 'cal: illegal year value: use 1-9999\n');
+  assert.ok((await sim.out('cal', { tty: true })).includes('\x1b[7m17\x1b[27m'));
+});

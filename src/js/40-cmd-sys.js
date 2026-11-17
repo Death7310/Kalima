@@ -1777,4 +1777,370 @@
       return 0;
     },
   });
+
+  /* ------------------------------------------------------ small system info */
+
+  reg({
+    name: 'arch', pkg: 'coreutils', summary: 'print machine hardware name (same as uname -m)', synopsis: 'arch [OPTION]...',
+    man: 'DESCRIPTION\n       Print machine architecture.\n\n       --help display this help and exit\n\n       --version\n              output version information and exit\n\nEXAMPLES\n       arch\n              Print x86_64 on a 64-bit PC.',
+    run(ctx) {
+      const g = ctx.getopt({ long: ['help', 'version'] });
+      if (g.err) return usageError(ctx, g.err);
+      if (g.opts.help) { ctx.out(coreutilsHelp('arch', 'Usage: arch [OPTION]...\nPrint machine architecture.\n\n      --help        display this help and exit\n      --version     output version information and exit\n')); return 0; }
+      if (g.opts.version) { ctx.out(coreutilsVersion('arch', 'David MacKenzie and Karel Zak')); return 0; }
+      if (g.rest.length) return usageError(ctx, "extra operand '" + g.rest[0] + "'");
+      ctx.println(K.distro.arch);
+      return 0;
+    },
+  });
+
+  reg({
+    name: 'nproc', pkg: 'coreutils', summary: 'print the number of processing units available', synopsis: 'nproc [OPTION]...',
+    man: 'DESCRIPTION\n       Print the number of processing units available to the current process, which may be less than the number of online processors.\n\nOPTIONS\n       --all  print the number of installed processors\n\n       --ignore=N\n              if possible, exclude N processing units\n\n       --help display this help and exit\n\n       --version\n              output version information and exit\n\nEXAMPLES\n       nproc\n              Print the number of CPUs, e.g. to choose how many threads a cracking tool gets.',
+    run(ctx) {
+      const g = ctx.getopt({ long: ['all', 'ignore=', 'help', 'version'] });
+      if (g.err) return usageError(ctx, g.err);
+      if (g.opts.help) { ctx.out(coreutilsHelp('nproc', 'Usage: nproc [OPTION]...\nPrint the number of processing units available to the current process,\nwhich may be less than the number of online processors\n\n      --all      print the number of installed processors\n      --ignore=N  if possible, exclude N processing units\n      --help        display this help and exit\n      --version     output version information and exit\n')); return 0; }
+      if (g.opts.version) { ctx.out(coreutilsVersion('nproc', 'Giuseppe Scrivano')); return 0; }
+      if (g.rest.length) return usageError(ctx, "extra operand '" + g.rest[0] + "'");
+      let skip = 0;
+      if (g.opts.ignore != null) {
+        if (!/^\d+$/.test(g.opts.ignore)) return ctx.fail("invalid number: '" + g.opts.ignore + "'", 1);
+        skip = +g.opts.ignore;
+      }
+      let cpus = 1;
+      try { cpus = (ctx.fs.read('/proc/cpuinfo').match(/^processor/gm) || []).length || 1; } catch (e) { /* no cpuinfo: one CPU */ }
+      ctx.println(Math.max(1, cpus - skip));
+      return 0;
+    },
+  });
+
+  reg({
+    name: 'tty', pkg: 'coreutils', summary: 'print the file name of the terminal connected to standard input', synopsis: 'tty [OPTION]...',
+    man: 'DESCRIPTION\n       Print the file name of the terminal connected to standard input.\n\nOPTIONS\n       -s, --silent, --quiet\n              print nothing, only return an exit status\n\n       --help display this help and exit\n\n       --version\n              output version information and exit\n\nEXIT STATUS\n       0 if standard input is a terminal, 1 if not, 2 for a wrong option.\n\nEXAMPLES\n       tty\n              Print /dev/pts/0 in a terminal window.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 's', long: ['silent', 'quiet', 'help', 'version'], alias: { silent: 's', quiet: 's' } });
+      if (g.err) { ctx.err('tty: ' + g.err + "\nTry 'tty --help' for more information.\n"); return 2; }
+      if (g.opts.help) { ctx.out(coreutilsHelp('tty', 'Usage: tty [OPTION]...\nPrint the file name of the terminal connected to standard input.\n\n  -s, --silent, --quiet   print nothing, only return an exit status\n      --help        display this help and exit\n      --version     output version information and exit\n')); return 0; }
+      if (g.opts.version) { ctx.out(coreutilsVersion('tty', 'David MacKenzie')); return 0; }
+      if (g.rest.length) { ctx.err("tty: extra operand '" + g.rest[0] + "'\nTry 'tty --help' for more information.\n"); return 2; }
+      if (!ctx.stdinTTY) { if (!g.opts.s) ctx.println('not a tty'); return 1; }
+      if (!g.opts.s) ctx.println('/dev/pts/0');
+      return 0;
+    },
+  });
+
+  const LSB_USAGE = 'Usage: lsb_release [options]\n\nOptions:\n  -h, --help         show this help message and exit\n  -v, --version      show LSB modules this system supports\n  -i, --id           show distributor ID\n  -d, --description  show description of this distribution\n  -r, --release      show release number of this distribution\n  -c, --codename     show code name of this distribution\n  -a, --all          show all of the above information\n  -s, --short        show requested information in a short format\n';
+
+  reg({
+    name: 'lsb_release', pkg: 'lsb-release', summary: 'print distribution-specific information', synopsis: 'lsb_release [OPTION]...',
+    man: 'DESCRIPTION\n       The lsb_release command provides certain LSB (Linux Standard Base) and distribution-specific information.\n\nOPTIONS\n       -v, --version\n              Display the version of the LSB specification against which the distribution is compliant.\n\n       -i, --id\n              Display the string, referred to as the distributor ID.\n\n       -d, --description\n              Display the single line text description of the distribution.\n\n       -r, --release\n              Display the release number of the distribution.\n\n       -c, --codename\n              Display the codename according to the distribution release.\n\n       -a, --all\n              Display all of the above information.\n\n       -s, --short\n              Use a short output format for the other options.\n\nEXAMPLES\n       lsb_release -a\n              Show which Kali release this is.\n       lsb_release -ds\n              Print only the description.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'hvidrcas', long: ['help', 'version', 'id', 'description', 'release', 'codename', 'all', 'short'], alias: { help: 'h', version: 'v', id: 'i', description: 'd', release: 'r', codename: 'c', all: 'a', short: 's' } });
+      if (g.err) { ctx.err('Usage: lsb_release [options]\n\nlsb_release: error: ' + g.err.replace(/^unrecognized option '(.*)'$/, 'no such option: $1').replace(/^invalid option -- '(.)'$/, 'no such option: -$1') + '\n'); return 2; }
+      if (g.opts.h) { ctx.out(LSB_USAGE); return 0; }
+      const fields = [['i', 'Distributor ID', 'Kali'], ['d', 'Description', K.distro.pretty], ['r', 'Release', K.distro.release], ['c', 'Codename', K.distro.codename]];
+      const picked = fields.some((f) => g.opts[f[0]]);
+      if (g.opts.v || !picked && !g.opts.a) ctx.println(g.opts.s ? 'n/a' : 'No LSB modules are available.');
+      else if (g.opts.a) ctx.err('No LSB modules are available.\n');
+      for (const [k, label, value] of fields) {
+        if (!g.opts[k] && !g.opts.a) continue;
+        ctx.println(g.opts.s ? value : label + ':\t' + value);
+      }
+      return 0;
+    },
+  });
+
+  /* -------------------------------------------------------------------- free */
+
+  const FREE_USAGE = '\nUsage:\n free [options]\n\nOptions:\n -b, --bytes         show output in bytes\n     --kilo          show output in kilobytes\n     --mega          show output in megabytes\n     --giga          show output in gigabytes\n     --tera          show output in terabytes\n     --peta          show output in petabytes\n -k, --kibi          show output in kibibytes\n -m, --mebi          show output in mebibytes\n -g, --gibi          show output in gibibytes\n     --tebi          show output in tebibytes\n     --pebi          show output in pebibytes\n -h, --human         show human-readable output\n     --si            use powers of 1000 not 1024\n -l, --lohi          show detailed low and high memory statistics\n -L, --line          show output on a single line\n -t, --total         show total for RAM + swap\n -v, --committed     show committed memory and commit limit\n -s N, --seconds N   repeat printing every N seconds\n -c N, --count N     repeat printing N times, then exit\n     --wide          wide output\n\n     --help     display this help and exit\n -V, --version  output version information and exit\n\nFor more details see free(1).\n';
+
+  function memInfo(ctx) {
+    const kb = {};
+    for (const line of ctx.fs.read('/proc/meminfo').split('\n')) { const m = /^(\w+):\s+(\d+)/.exec(line); if (m) kb[m[1]] = +m[2]; }
+    const cache = (kb.Cached || 0) + (kb.SReclaimable || 0);
+    return { total: kb.MemTotal, free: kb.MemFree, shared: kb.Shmem || 0, buffers: kb.Buffers || 0, cache, available: kb.MemAvailable,
+      used: kb.MemTotal - kb.MemAvailable, swapTotal: kb.SwapTotal || 0, swapFree: kb.SwapFree || 0 };
+  }
+
+  function humanBytes(bytes, base) {
+    const names = base === 1000 ? ['B', 'kB', 'MB', 'GB', 'TB', 'PB'] : ['B', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi'];
+    let i = 0; let v = bytes;
+    const shown = () => (v < 10 ? (Math.round(v * 10) / 10).toFixed(1) : String(Math.round(v)));
+    while (i < names.length - 1 && (i ? +shown() : v) >= base) { v /= base; i++; }
+    return (i ? shown() : String(Math.round(v))) + names[i];
+  }
+
+  const FREE_UNITS = { b: 1, bytes: 1, kilo: 1000, mega: 1e6, giga: 1e9, tera: 1e12, peta: 1e15, k: 1024, kibi: 1024, m: 1048576, mebi: 1048576, g: 1073741824, gibi: 1073741824, tebi: 2 ** 40, pebi: 2 ** 50 };
+
+  reg({
+    name: 'free', pkg: 'procps', summary: 'Display amount of free and used memory in the system', synopsis: 'free [options]',
+    man: 'DESCRIPTION\n       free displays the total amount of free and used physical and swap memory in the system, as well as the buffers and caches used by the kernel. The information is gathered by parsing /proc/meminfo.\n\nOPTIONS\n       -b, --bytes\n              Display the amount of memory in bytes.\n\n       -k, --kibi\n              Display the amount of memory in kibibytes. This is the default.\n\n       -m, --mebi\n              Display the amount of memory in mebibytes.\n\n       -g, --gibi\n              Display the amount of memory in gibibytes.\n\n       -h, --human\n              Show all output fields automatically scaled to shortest three digit unit and display the units of print out.\n\n       -t, --total\n              Display a line showing the column totals.\n\n       -s, --seconds seconds\n              Continuously display the result delay seconds apart.\n\n       -c, --count count\n              Display the result count times. Requires the -s option.\n\n       --wide Switch to the wide mode, with separate buffers and cache columns.\n\nEXAMPLES\n       free -h\n              Memory in human readable units.\n       free -m -s 2 -c 3\n              Print three samples, two seconds apart.',
+    async run(ctx) {
+      const g = ctx.getopt({ short: 'bkmghlLtvVws:c:', long: ['bytes', 'kilo', 'mega', 'giga', 'tera', 'peta', 'kibi', 'mebi', 'gibi', 'tebi', 'pebi', 'human', 'si', 'lohi', 'line', 'total', 'committed', 'seconds=', 'count=', 'wide', 'help', 'version'],
+        alias: { bytes: 'b', kibi: 'k', mebi: 'm', gibi: 'g', human: 'h', lohi: 'l', line: 'L', total: 't', committed: 'v', seconds: 's', count: 'c', version: 'V', wide: 'w' } });
+      if (g.err) { ctx.err('free: ' + g.err + '\n' + FREE_USAGE); return 1; }
+      if (g.opts.help) { ctx.out(FREE_USAGE); return 0; }
+      if (g.opts.V) { ctx.out('free from procps-ng 4.0.4\n'); return 0; }
+      if (g.rest.length) { ctx.err('free: ' + "extra operand '" + g.rest[0] + "'\n" + FREE_USAGE); return 1; }
+      let div = 1024; let human = false;
+      for (const k of Object.keys(FREE_UNITS)) if (g.opts[k]) div = FREE_UNITS[k];
+      if (g.opts.h) human = true;
+      const si = !!g.opts.si;
+      if (si && div === 1024) div = 1000;
+      const delay = g.opts.s != null ? Number(g.opts.s) : 0;
+      if (g.opts.s != null && !(delay > 0)) { ctx.err('free: seconds argument `' + g.opts.s + "' failed\n"); return 1; }
+      let count = g.opts.c != null ? parseInt(g.opts.c, 10) : delay ? Infinity : 1;
+      if (g.opts.c != null && !(count > 0)) { ctx.err('free: failed to parse count argument: \'' + g.opts.c + "'\n"); return 1; }
+      const cell = (kb) => {
+        const bytes = kb * 1024;
+        if (human) return humanBytes(bytes, si ? 1000 : 1024);
+        return String(Math.floor(bytes / div));
+      };
+      const row = (label, vals) => label.padEnd(8) + vals.map((v) => U.padStart(v, 12)).join('').slice(0);
+      const frame = () => {
+        const m = memInfo(ctx); const wide = !!g.opts.w;
+        const head = wide ? ['total', 'used', 'free', 'shared', 'buffers', 'cache', 'available'] : ['total', 'used', 'free', 'shared', 'buff/cache', 'available'];
+        const lines = [row('', head)];
+        const memVals = wide ? [m.total, m.used, m.free, m.shared, m.buffers, m.cache, m.available] : [m.total, m.used, m.free, m.shared, m.buffers + m.cache, m.available];
+        lines.push(row('Mem:', memVals.map(cell)));
+        const swapUsed = m.swapTotal - m.swapFree;
+        lines.push(row('Swap:', [m.swapTotal, swapUsed, m.swapFree].map(cell)));
+        if (g.opts.t) lines.push(row('Total:', [m.total + m.swapTotal, m.used + swapUsed, m.free + m.swapFree].map(cell)));
+        return lines.join('\n') + '\n';
+      };
+      for (let n = 0; n < count; n++) {
+        if (n) ctx.out('\n');
+        ctx.out(frame());
+        if (n + 1 < count) await ctx.sleep(delay * 1000);
+      }
+      return 0;
+    },
+  });
+
+  /* ------------------------------------------------------- who, w, users, last */
+
+  const loginsOf = (machine) => machine.state.logins || [];
+  const whoTime = (ms) => U.isoDate(ms).slice(0, 16);
+  const idleText = (sec) => (sec < 60 ? '0.00s' : sec < 3600 ? Math.floor(sec / 60) + ':' + U.pad2(sec % 60) : Math.floor(sec / 3600) + ':' + U.pad2(Math.floor(sec / 60) % 60) + 'm');
+
+  reg({
+    name: 'users', pkg: 'coreutils', summary: 'print the user names of users currently logged in to the current host', synopsis: 'users [OPTION]... [FILE]',
+    man: 'DESCRIPTION\n       Output who is currently logged in according to FILE. If FILE is not specified, use /var/run/utmp.\n\n       --help display this help and exit\n\n       --version\n              output version information and exit\n\nEXAMPLES\n       users\n              Print the login names of everyone logged in.',
+    run(ctx) {
+      const g = ctx.getopt({ long: ['help', 'version'] });
+      if (g.err) return usageError(ctx, g.err);
+      if (g.opts.help) { ctx.out(coreutilsHelp('users', 'Usage: users [OPTION]... [FILE]\nOutput who is currently logged in according to FILE.\nIf FILE is not specified, use /var/run/utmp.  /var/log/wtmp as FILE is common.\n\n      --help        display this help and exit\n      --version     output version information and exit\n')); return 0; }
+      if (g.opts.version) { ctx.out(coreutilsVersion('users', 'Joseph Arceneaux, David MacKenzie, and Kaveh Ghazi')); return 0; }
+      const names = loginsOf(ctx.machine).map((l) => l.user).sort();
+      if (names.length) ctx.println(names.join(' '));
+      return 0;
+    },
+  });
+
+  reg({
+    name: 'who', pkg: 'coreutils', summary: 'show who is logged on', synopsis: 'who [OPTION]... [ FILE | ARG1 ARG2 ]',
+    man: 'DESCRIPTION\n       Print information about users who are currently logged in.\n\nOPTIONS\n       -a, --all\n              same as -b -d --login -p -r -t -T -u\n\n       -b, --boot\n              time of last system boot\n\n       -H, --heading\n              print line of column headings\n\n       -m     only hostname and user associated with stdin\n\n       -q, --count\n              all login names and number of users logged on\n\n       -u, --users\n              list users logged in\n\n       --help display this help and exit\n\n       --version\n              output version information and exit\n\nEXAMPLES\n       who\n              One line for each login session.\n       who -H\n              The same with a header line.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'abdHlmpqrstTuwi', long: ['all', 'boot', 'dead', 'heading', 'login', 'only-hostname-user', 'process', 'count', 'runlevel', 'short', 'time', 'mesg', 'message', 'writable', 'users', 'lookup', 'ips', 'help', 'version'],
+        alias: { all: 'a', boot: 'b', dead: 'd', heading: 'H', login: 'l', process: 'p', count: 'q', runlevel: 'r', short: 's', time: 't', users: 'u' } });
+      if (g.err) return usageError(ctx, g.err);
+      if (g.opts.help) { ctx.out(coreutilsHelp('who', 'Usage: who [OPTION]... [ FILE | ARG1 ARG2 ]\nPrint information about users who are currently logged in.\n\n  -a, --all         same as -b -d --login -p -r -t -T -u\n  -b, --boot        time of last system boot\n  -d, --dead        print dead processes\n  -H, --heading     print line of column headings\n  -l, --login       print system login processes\n      --lookup      attempt to canonicalize hostnames via DNS\n  -m                only hostname and user associated with stdin\n  -p, --process     print active processes spawned by init\n  -q, --count       all login names and number of users logged on\n  -r, --runlevel    print current runlevel\n  -s, --short       print only name, line, and time (default)\n  -T, -w, --mesg    add user\'s message status as +, - or ?\n  -u, --users       list users logged in\n      --message     same as -T\n      --writable    same as -T\n      --help        display this help and exit\n      --version     output version information and exit\n')); return 0; }
+      if (g.opts.version) { ctx.out(coreutilsVersion('who', 'Joseph Arceneaux, David MacKenzie, and Michael Stone')); return 0; }
+      if (g.rest.length > 2) return usageError(ctx, "extra operand '" + g.rest[2] + "'");
+      const m = ctx.machine; const lines = [];
+      const boot = K.getBootTime(); const now = K.clock.now();
+      if (g.opts.q) {
+        const names = loginsOf(m).map((l) => l.user);
+        ctx.println(names.join(' ') + (names.length ? '\n' : '') + '# users=' + names.length);
+        return 0;
+      }
+      const wantAll = !!g.opts.a; const idle = g.opts.u || wantAll;
+      const head = 'NAME     LINE         TIME             COMMENT';
+      if (g.rest.length === 2 || g.opts.m) return 0; // "who am i": a terminal without a utmp record prints nothing
+      if (g.opts.H) lines.push(idle ? 'NAME     LINE         TIME             IDLE          PID COMMENT' : head);
+      if (g.opts.b || wantAll) lines.push('         system boot  ' + whoTime(boot));
+      if (!g.opts.b || wantAll) {
+        for (const l of loginsOf(m)) {
+          const line = l.user.padEnd(8) + ' ' + l.tty.padEnd(12) + ' ' + whoTime(l.at);
+          lines.push(idle ? line + ' ' + (now - l.at < 60 * SEC ? '  .  ' : 'old  ') + '       ' + U.padStart(m.procs.find((p) => p.tty === l.tty) ? m.procs.find((p) => p.tty === l.tty).pid : 1, 4) + ' (' + l.host + ')' : line + ' (' + l.host + ')');
+        }
+      }
+      if (lines.length) ctx.println(lines.join('\n'));
+      return 0;
+    },
+  });
+
+  const W_USAGE = '\nUsage:\n w [options] [user]\n\nOptions:\n -h, --no-header     do not print header\n -u, --no-current    ignore current process username\n -s, --short         short format\n -f, --from          show remote hostname field\n -o, --old-style     old style output\n -i, --ip-addr       display IP address instead of hostname (if possible)\n\n     --help     display this help and exit\n -V, --version  output version information and exit\n\nFor more details see w(1).\n';
+
+  reg({
+    name: 'w', pkg: 'procps', summary: 'Show who is logged on and what they are doing.', synopsis: 'w [options] [user]',
+    man: 'DESCRIPTION\n       w displays information about the users currently on the machine, and their processes. The header shows, in this order, the current time, how long the system has been running, how many users are currently logged on, and the system load averages for the past 1, 5, and 15 minutes.\n\nOPTIONS\n       -h, --no-header\n              Don\'t print the header.\n\n       -s, --short\n              Use the short format. Don\'t print the login time, JCPU or PCPU times.\n\n       -f, --from\n              Toggle printing the from (remote hostname) field.\n\n       user   Show information about the specified user only.\n\nEXAMPLES\n       w\n              Who is on the box and what they run.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'husfoiV', long: ['no-header', 'no-current', 'short', 'from', 'old-style', 'ip-addr', 'help', 'version'], alias: { 'no-header': 'h', short: 's', from: 'f' } });
+      if (g.err) { ctx.err('w: ' + g.err + '\n' + W_USAGE); return 1; }
+      if (g.opts.help) { ctx.out(W_USAGE); return 0; }
+      if (g.opts.V) { ctx.out('w from procps-ng 4.0.4\n'); return 0; }
+      const m = ctx.machine; const now = K.clock.now();
+      let rows = loginsOf(m);
+      if (g.rest.length) rows = rows.filter((l) => l.user === g.rest[0]);
+      const showFrom = !g.opts.f; // procps shows FROM unless -f toggles it off
+      const lines = [];
+      if (!g.opts.h) {
+        lines.push(uptimeLine(m));
+        lines.push('USER     TTY      ' + (showFrom ? 'FROM            ' : '') + (g.opts.s ? ' IDLE WHAT' : ' LOGIN@   IDLE   JCPU   PCPU WHAT'));
+      }
+      for (const l of rows) {
+        const idle = Math.floor((now - l.at) / 1000);
+        const d = new Date(l.at); const login = U.pad2(d.getUTCHours()) + ':' + U.pad2(d.getUTCMinutes());
+        const what = l.tty.indexOf('tty') === 0 ? 'xfce4-session' : '-zsh';
+        const from = showFrom ? (l.host || '-').padEnd(16) : '';
+        lines.push(l.user.padEnd(8) + ' ' + l.tty.padEnd(8) + ' ' + from + (g.opts.s ? U.padStart(idleText(idle), 6) + ' ' + what
+          : ' ' + login.padEnd(8) + U.padStart(idleText(idle), 6) + U.padStart(idleText(Math.floor(idle / 80)), 7) + U.padStart('0.05s', 7) + ' ' + what));
+      }
+      ctx.println(lines.join('\n'));
+      return 0;
+    },
+  });
+
+  const LAST_USAGE = '\nUsage:\n last [options] [<username>...] [<tty>...]\n\nShow a listing of last logged in users.\n\nOptions:\n -<number>            how many lines to show\n -a, --hostlast       display hostnames in the last column\n -d, --dns            translate the IP number back into a hostname\n -f, --file <file>    use a specific file instead of /var/log/wtmp\n -F, --fulltimes      print full login and logout times and dates\n -i, --ip             display IP numbers in numbers-and-dots notation\n -n, --limit <number> how many lines to show\n -R, --nohostname     don\'t display the hostname field\n -s, --since <time>   display the lines since the specified time\n -t, --until <time>   display the lines until the specified time\n -p, --present <time> display who was present at the specified time\n -w, --fullnames      display full user and domain names\n -x, --system         display system shutdown entries and run level changes\n\n     --time-format <format>  show timestamps in the specified <format>:\n                               notime|short|full|iso\n\n -h, --help           display this help\n -V, --version        display version\n\nFor more details see last(1).\n';
+
+  /** Earlier boots and sessions, so `last` has history beyond the current boot. */
+  function loginHistory(machine) {
+    const boot = K.getBootTime(); const kali = machine.profile === 'kali';
+    const entries = [];
+    const sessions = kali ? [['kali', 'tty7', ':0'], ['kali', 'pts/0', '10.10.10.1']] : [['student', 'pts/0', '10.10.10.5']];
+    for (let i = 1; i <= 3; i++) {
+      const bootAt = boot - i * (DAY + 3 * HOUR + i * 17 * MIN);
+      const down = bootAt + 2 * HOUR + 25 * MIN + i * 7 * MIN;
+      const s = sessions[(i - 1) % sessions.length];
+      entries.push({ user: s[0], tty: s[1], host: s[2], at: bootAt + 40 * SEC, end: down - 20 * SEC });
+      entries.push({ user: 'reboot', tty: 'system boot', host: K.distro.kernel, at: bootAt, end: down });
+    }
+    return entries;
+  }
+
+  reg({
+    name: 'last', aliases: ['lastb'], pkg: 'util-linux', summary: 'show a listing of last logged in users', synopsis: 'last [options] [username...] [tty...]',
+    man: 'DESCRIPTION\n       last searches back through the /var/log/wtmp file and displays a list of all users logged in (and out) since that file was created. One or more usernames and/or ttys can be given, in which case last will show only the entries matching those arguments.\n\nOPTIONS\n       -n, --limit number\n              Tell last how many lines to show.\n\n       -a, --hostlast\n              Display the hostname in the last column.\n\n       -R, --nohostname\n              Suppresses the display of the hostname field.\n\n       -F, --fulltimes\n              Print full login and logout times and dates.\n\n       -x, --system\n              Display the system shutdown entries and run level changes.\n\nEXAMPLES\n       last -n 5\n              The five most recent logins.\n       last reboot\n              Show the boot history.',
+    run(ctx) {
+      const args = ctx.args.map((a) => (/^-\d+$/.test(a) ? '-n' + a.slice(1) : a));
+      const g = K.getopt(args, { short: 'adf:Fin:Rs:t:p:wxhV', long: ['hostlast', 'dns', 'file=', 'fulltimes', 'ip', 'limit=', 'nohostname', 'since=', 'until=', 'present=', 'fullnames', 'system', 'time-format=', 'help', 'version'],
+        alias: { hostlast: 'a', dns: 'd', file: 'f', fulltimes: 'F', ip: 'i', limit: 'n', nohostname: 'R', fullnames: 'w', system: 'x', help: 'h', version: 'V' } });
+      if (g.err) { ctx.err('last: ' + g.err + '\n' + LAST_USAGE); return 1; }
+      if (g.opts.h) { ctx.out(LAST_USAGE); return 0; }
+      if (g.opts.V) { ctx.out('last from util-linux 2.41\n'); return 0; }
+      if (ctx.name === 'lastb' || g.opts.f) {
+        const file = g.opts.f || '/var/log/btmp';
+        if (!ctx.fs.exists(file)) { ctx.err('last: cannot open ' + file + ': No such file or directory\n'); return 1; }
+        if (!ctx.isRoot) { ctx.err('last: cannot open ' + file + ': Permission denied\n'); return 1; }
+        ctx.println('\n' + (ctx.name === 'lastb' ? 'btmp' : 'wtmp') + ' begins ' + U.dateString(K.getBootTime()).replace(/ [AP]M UTC/, '').replace(/^(\w+ \w+ +\d+) (\d+:\d+:\d+) (\d+)$/, '$1 $2 $3'));
+        return 0;
+      }
+      const m = ctx.machine; const boot = K.getBootTime();
+      const current = loginsOf(m).map((l) => ({ user: l.user, tty: l.tty, host: l.host, at: l.at, end: null }));
+      current.push({ user: 'reboot', tty: 'system boot', host: K.distro.kernel, at: boot, end: null });
+      let list = current.concat(loginHistory(m)).sort((a, b) => b.at - a.at);
+      const filters = g.rest;
+      if (filters.length) list = list.filter((e) => filters.some((f) => f === e.user || f === e.tty || f === e.tty.replace(/^\/dev\//, '') || (f === 'reboot' && e.user === 'reboot')));
+      if (g.opts.n != null) {
+        if (!/^\d+$/.test(g.opts.n)) { ctx.err("last: failed to parse number: '" + g.opts.n + "'\n"); return 1; }
+        list = list.slice(0, +g.opts.n);
+      }
+      const stamp = (ms) => { const s = U.dateString(ms); return s.slice(0, 3) + ' ' + s.slice(4, 10) + ' ' + whoTime(ms).slice(11); };
+      const out = list.map((e) => {
+        const host = g.opts.R ? '' : (e.host || '').padEnd(16) + ' ';
+        const left = e.user.padEnd(8) + ' ' + e.tty.padEnd(12) + ' ' + host;
+        let tail;
+        if (e.end == null) tail = e.user === 'reboot' ? 'still running' : 'still logged in';
+        else {
+          const span = Math.floor((e.end - e.at) / MIN);
+          tail = whoTime(e.end).slice(11) + ' (' + (span >= 1440 ? Math.floor(span / 1440) + '+' : '') + U.pad2(Math.floor(span / 60) % 24) + ':' + U.pad2(span % 60) + ')';
+        }
+        return left + stamp(e.at) + (e.end == null ? '   ' : ' - ') + tail;
+      });
+      const begins = loginHistory(m).reduce((t, e) => Math.min(t, e.at), boot) - 2 * DAY - 7 * MIN - 11 * SEC;
+      ctx.println(out.join('\n') + (out.length ? '\n' : '') + '\nwtmp begins ' + stamp(begins) + ':' + U.pad2(new Date(begins).getUTCSeconds()) + ' ' + new Date(begins).getUTCFullYear());
+      return 0;
+    },
+  });
+
+  /* --------------------------------------------------------------------- cal */
+
+  const CAL_USAGE = '\nUsage:\n cal [options] [[[day] month] year]\n cal [options] <timestamp|monthname>\n\nDisplay a calendar, or some part of it.\nWithout any arguments, display the current month.\n\nOptions:\n -1, --one             show only a single month (default)\n -3, --three           show three months spanning the date\n -s, --sunday          Sunday as first day of week\n -m, --monday          Monday as first day of week\n -j, --julian          output Julian dates\n -y, --year            show the whole year\n -Y, --twelve          show the next twelve months\n -w, --week[=<num>]    show US or ISO-8601 week numbers\n     --color[=<when>]  colorize messages (auto, always or never)\n                         colors are enabled by default\n\n -h, --help            display this help\n -V, --version         display version\n\nFor more details see cal(1).\n';
+  const daysInMonth = (y, m) => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+
+  /** One month as seven-column weeks, each line 22 wide as util-linux pads them. */
+  function calMonth(y, m, monday, today, color) {
+    const title = MONTH_NAMES[m] + ' ' + y;
+    const lines = [(' '.repeat(Math.floor((20 - title.length) / 2)) + title).padEnd(22)];
+    const names = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+    lines.push((monday ? names.slice(1).concat(names[0]) : names).join(' ').padEnd(22));
+    let col = (new Date(Date.UTC(y, m, 1)).getUTCDay() - (monday ? 1 : 0) + 7) % 7;
+    let row = ' '.repeat(col * 3);
+    for (let d = 1; d <= daysInMonth(y, m); d++) {
+      const cell = U.padStart(d, 2);
+      row += (today && today.y === y && today.m === m && today.d === d && color ? K.c.inverse(cell) : cell) + ' ';
+      if (++col === 7) { lines.push(row + ' '); row = ''; col = 0; }
+    }
+    if (row) lines.push(row + ' '.repeat(Math.max(0, 22 - K.util.stripAnsi(row).length)));
+    return lines;
+  }
+
+  /** Months laid side by side, `per` to a row: one array of lines per row. */
+  function calRows(months, per, monday, today, color) {
+    const out = [];
+    for (let i = 0; i < months.length; i += per) {
+      const blocks = months.slice(i, i + per).map((x) => calMonth(x[0], x[1], monday, today, color));
+      const height = Math.max.apply(null, blocks.map((b) => b.length));
+      const rows = [];
+      for (let r = 0; r < height; r++) rows.push(blocks.map((b) => (b[r] != null ? b[r] : ' '.repeat(22))).join(''));
+      out.push(rows);
+    }
+    return out;
+  }
+
+  const MONTH_PREFIX = (word) => MONTH_NAMES.findIndex((n) => word.length >= 3 && n.toLowerCase().indexOf(word.toLowerCase()) === 0);
+
+  reg({
+    name: 'cal', aliases: ['ncal'], pkg: 'bsdextrautils', summary: 'display a calendar', synopsis: 'cal [options] [[[day] month] year]',
+    man: 'DESCRIPTION\n       cal displays a simple calendar. If no arguments are specified, the current month is displayed.\n\nOPTIONS\n       -1, --one\n              Display single month output. (This is the default.)\n\n       -3, --three\n              Display prev/current/next month output.\n\n       -s, --sunday\n              Display Sunday as the first day of the week.\n\n       -m, --monday\n              Display Monday as the first day of the week.\n\n       -y, --year\n              Display a calendar for the current year.\n\nEXAMPLES\n       cal\n              The current month, with today highlighted.\n       cal 2 2028\n              February 2028 (a leap year).\n       cal -y\n              The whole current year.',
+    run(ctx) {
+      const g = ctx.getopt({ short: '13smjyYwhV', long: ['one', 'three', 'sunday', 'monday', 'julian', 'year', 'twelve', 'week=?', 'color=?', 'help', 'version'], alias: { one: '1', three: '3', sunday: 's', monday: 'm', year: 'y', help: 'h', version: 'V' } });
+      if (g.err) { ctx.err('cal: ' + g.err + "\nTry 'cal --help' for more information.\n"); return 1; }
+      if (g.opts.h) { ctx.out(CAL_USAGE); return 0; }
+      if (g.opts.V) { ctx.out('cal from util-linux 2.41\n'); return 0; }
+      const now = new Date(K.clock.now());
+      const today = { y: now.getUTCFullYear(), m: now.getUTCMonth(), d: now.getUTCDate() };
+      let y = today.y; let m = today.m; let wholeYear = !!g.opts.y; let showToday = true;
+      const nums = g.rest.slice();
+      const num = (s, what, lo, hi) => {
+        if (!/^\d+$/.test(s) || +s < lo || +s > hi) { ctx.err('cal: illegal ' + what + ' value: use ' + lo + '-' + hi + '\n'); return null; }
+        return +s;
+      };
+      if (nums.length > 3) { ctx.err(CAL_USAGE); return 1; }
+      if (nums.length === 1 && MONTH_PREFIX(nums[0]) >= 0) { m = MONTH_PREFIX(nums[0]); } else if (nums.length === 1) {
+        y = num(nums[0], 'year', 1, 9999); if (y == null) return 1; wholeYear = true; showToday = y === today.y;
+      } else if (nums.length >= 2) {
+        const mm = nums[nums.length - 2]; const yy = nums[nums.length - 1];
+        const mi = MONTH_PREFIX(mm) >= 0 ? MONTH_PREFIX(mm) : (num(mm, 'month', 1, 12) || 0) - 1;
+        if (mi < 0) return 1;
+        y = num(yy, 'year', 1, 9999); if (y == null) return 1; m = mi; showToday = y === today.y && m === today.m;
+        if (nums.length === 3 && num(nums[0], 'day', 1, 31) == null) return 1;
+      }
+      const monday = !!g.opts.m; const color = ctx.isTTY && showToday && g.opts.color !== 'never';
+      const mark = showToday ? today : null;
+      let lines;
+      if (wholeYear) {
+        const title = String(y);
+        lines = [' '.repeat(Math.floor((66 - title.length) / 2)) + title + ' '.repeat(Math.ceil((66 - title.length) / 2)), ''];
+        const rows = calRows(Array.from({ length: 12 }, (_, i) => [y, i]), 3, monday, mark, color);
+        rows.forEach((r, i) => { if (i) lines.push(''); lines.push.apply(lines, r); });
+      } else if (g.opts[3]) {
+        lines = calRows([-1, 0, 1].map((d) => { const t = new Date(Date.UTC(y, m + d, 1)); return [t.getUTCFullYear(), t.getUTCMonth()]; }), 3, monday, mark, color)[0];
+      } else lines = calMonth(y, m, monday, mark, color);
+      ctx.println(lines.join('\n'));
+      return 0;
+    },
+  });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
