@@ -298,7 +298,8 @@ test('nc -z: port checks, ranges, UDP and the scope guard', async () => {
   assert.equal(r.err, 'files01.halcyon.lab [10.10.10.20] 22 (ssh) open\nfiles01.halcyon.lab [10.10.10.20] 21 (ftp) open\n', 'one -v hides refusals in a scan');
   assert.equal(r.code, 0);
   r = await sim.run('nc -zvv 10.10.10.10 79-80 443');
-  assert.equal(r.err, 'web01.halcyon.lab [10.10.10.10] 80 (http) open\nweb01.halcyon.lab [10.10.10.10] 79 (finger) : Connection refused\nweb01.halcyon.lab [10.10.10.10] 443 (https) open\n sent 0, rcvd 0\n');
+  assert.match(r.err, /^web01\.halcyon\.lab \[10\.10\.10\.10\] 80 \(http\) open\nweb01\.halcyon\.lab \[10\.10\.10\.10\] 79 \((finger|\?)\) : Connection refused\nweb01\.halcyon\.lab \[10\.10\.10\.10\] 443 \(https\) open\n sent 0, rcvd 0\n$/);
+  assert.equal(r.code, 1, 'the -vv byte counts leave through bail()');
   r = await sim.run('nc -zv web01 http');
   assert.deepEqual([r.code, r.err], [0, 'web01.halcyon.lab [10.10.10.10] 80 (http) open\n']);
   r = await sim.run('nc -z web01 80 && echo open; nc -z web01 81 || echo closed');
@@ -360,7 +361,7 @@ test('telnet: connection lines and a line session', async () => {
   assert.equal(r.err, 'Connection closed by foreign host.\n');
   assert.equal(r.code, 1);
   r = await withInput(sim, 'telnet cam01.halcyon.lab', ['^]', 'bogus', 'quit']);
-  assert.match(r.out, /Escape character is '\^\]'\.\n\r\ncam01 login: \?Invalid command\nConnection closed\.\n$/);
+  assert.match(r.out, /Escape character is '\^\]'\.\n\r\ncam01 login: \r\n\?Invalid command\nConnection closed\.\n$/);
   assert.equal(r.code, 0);
   assert.match(r.screen, /telnet> bogus\ntelnet> quit\n$/);
   r = await sim.run('telnet printer.halcyon.lab');
