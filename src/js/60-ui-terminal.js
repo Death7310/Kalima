@@ -29,7 +29,7 @@
   const LIST_LIMIT = 400;        // completion candidates rendered at once
   const SENTINEL = '  ';         // raw-mode field content: gives soft keyboards something to delete
   const PROBE = 'MMMMMMMMMMMMMMMMMMMM';
-  const NANO_VERSION = '8.6';
+  const NANO_VERSION = '8.4';        // the version `nano --version` reports in the command pack
   const WORD = /[A-Za-z0-9*?_\-.[\]~=&;!#$%^(){}<>]/;   // zsh WORDCHARS as set in Kali's zshrc (no slash)
   const COMBINING = /^[̀-ͯ‍︎️⃐-⃿]$/;
   const IS_MAC = /Mac|iPhone|iPad/.test((typeof navigator !== 'undefined' && navigator.platform) || '');
@@ -1030,7 +1030,7 @@
   class Pager {
     constructor(term, text, o, done) {
       this.term = term; this.done = done; this.kind = 'pager';
-      this.title = o.title ? String(o.title) : '';
+      this.title = o.title && o.title !== '(standard input)' ? String(o.title) : '';
       // man(1) runs less with its own prompt; a title such as "ls(1)" or "Manual page ls(1)" selects it
       const man = /^(?:Manual page )?(\S+\(\d\w*\))$/.exec(this.title);
       this.man = man ? 'Manual page ' + man[1] : '';
@@ -1179,7 +1179,8 @@
       this.term = term; this.done = done;
       this.path = o.path ? String(o.path) : '';
       const content = o.content == null ? '' : String(o.content);
-      this.isNew = o.isNew != null ? !!o.isNew : o.content == null;
+      // commands hand over '' for a file that does not exist yet, so an empty buffer counts as a new file
+      this.isNew = o.isNew != null ? !!o.isNew : !content;
       this.lines = content.replace(/\n$/, '').split('\n');
       this.cy = 0; this.cx = 0; this.want = 0; this.hideCursor = false;
       this.saved = false; this.savedContent = content; this.savedPath = this.path;

@@ -140,7 +140,15 @@ function installFixtures() {
       },
     },
     { name: 'fx-nap', async run(ctx) { await ctx.sleep(30000); ctx.println('napped'); return 0; } },
-    { name: 'fx-power', run(ctx) { ctx.println('going down'); K.events.emit('power', { action: ctx.args[0] || 'reboot' }); return 0; } },
+    {
+      // what reboot and poweroff do: announce a power event for a machine (Kali unless "elsewhere" is given)
+      name: 'fx-power',
+      run(ctx) {
+        ctx.println('going down');
+        K.events.emit('power', { action: ctx.args[0], machine: ctx.args[1] === 'elsewhere' ? { hostname: 'web01' } : ctx.machine, host: ctx.machine.hostname });
+        return 0;
+      },
+    },
     { name: 'fxa-one', run() { return 0; } },
     { name: 'fxb-alpha', run() { return 0; } },
     { name: 'fxb-alpine', run() { return 0; } },
@@ -473,7 +481,7 @@ group('pager: j k Space b g G /search n q', async ({ page }) => {
 group('nano: write out, exit question, cut, paste, search', async ({ page }) => {
   await start(page, 'fx-edit nano notes.txt', 'nano');
   let o = await overlay(page);
-  assert.match(o.screen, /GNU nano 8\.6\s+notes\.txt/);
+  assert.match(o.screen, /GNU nano 8\.4\s+notes\.txt/);
   assert.equal(o.status, '[ New File ]');
   assert.match(o.screen, /\^G Help\s+\^O Write Out/);
   await page.keyboard.type('first line');
@@ -801,7 +809,9 @@ group('settings: time speed, font size, restart and the power event', async ({ p
   assert.match(await text(page), /kept=kept lost=gone old=\[\]\n/);
 
   // reboot, poweroff and reset all arrive as a 'power' event
-  await run(page, 'echo again > ~/fx-again.txt');
+  await run(page, 'echo again > ~/fx-again.txt; fx-power reboot elsewhere');
+  await page.waitForTimeout(600);
+  assert.match(await text(page), /fx-again\.txt/, 'a lab server going down does not restart the simulator');
   await page.keyboard.type('fx-power poweroff');
   await page.keyboard.press('Enter');
   await page.waitForFunction(() => K.app.booted && K.app.term && K.app.term.mode === 'read' && !K.app.term.text().includes('going down'));

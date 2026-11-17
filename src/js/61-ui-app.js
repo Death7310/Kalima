@@ -208,7 +208,7 @@
     /* --------------------------------------------------------------- wiring */
     _listen() {
       K.events.on('command', (ev) => this._onCommand(ev));
-      K.events.on('power', () => setTimeout(() => this.restart({ notice: 'The simulated machine restarted. Your files and progress were kept.' }), 300));
+      K.events.on('power', (ev) => this._onPower(ev));
       K.net.bus.on('packet', (p) => { this._sawPacket(p); });
       K.net.bus.on('conn', (c) => { this._sawService(c.host, c.proto, c.port); });
       K.net.bus.on('http', (x) => { this._sawService(x.host, 'tcp', x.svc && x.svc.port); });
@@ -324,6 +324,12 @@
       store.clear();
       this._saveSettings(); this._saveState();
       await this.restart({ fresh: true, notice: 'Saved progress was erased. This is a fresh system.' });
+    }
+
+    /** reboot, poweroff and halt on the Kali machine all end the same way here: the simulator starts again. */
+    _onPower(ev) {
+      if (ev && ev.machine && ev.machine !== K.kali) return;      // a lab server going down is that server's business
+      setTimeout(() => this.restart({ notice: 'The simulated machine restarted. Your files and progress were kept.' }), 300);
     }
 
     _saveHome() {
