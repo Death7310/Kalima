@@ -717,12 +717,250 @@
     refs: ['chmod(1)', 'chown(1)', 'chgrp(1)', 'umask(2)', 'The Linux Command Line (W. Shotts), ch. 9'],
   };
 
+  /* ------------------------------------------------------------------ sudo */
+  const sudoLesson = {
+    id: 'perms-sudo',
+    title: 'Privilege: sudo, su and special permissions',
+    minutes: 12,
+    objectives: [
+      'Read `Permission denied` as information, and find its cause before asking for more privilege',
+      'Run one command as root with `sudo`, and list what you are allowed to do with `sudo -l`',
+      'Explain how `su` differs from `sudo`, and what the setuid and sticky permissions are for',
+      'Work with least privilege: borrow root for the command that needs it and give it back',
+    ],
+    intro: T(
+      'The account `root` may do anything on a Linux system: read every file, stop every program, erase the disk. Kali used to log you in as root. Since 2020 it starts you as an ordinary user, `kali`, for the reason every other system does: a typing mistake made as root can destroy the machine, and a faulty or hostile program run as root gets the whole system instead of one account.',
+      '',
+      'This lesson shows how privilege is meant to be used: borrowed for one command when a task needs it, and handed back straight away.'
+    ),
+    steps: [
+      {
+        id: 'denied',
+        prompt: T(
+          'Begin with a refusal. `/etc/shadow` stores the password hashes of every account. Try to read it as yourself:',
+          '',
+          '```',
+          'cat /etc/shadow',
+          '```',
+          '',
+          '`Permission denied`. Read the message as information, not as an obstacle: the file exists, and the account you are using is not meant to read it. The reflex to repeat the command with more privilege is one to unlearn. First find out why you were refused.'
+        ),
+        hint: 'Run the command as shown, without `sudo`. The step completes when the refusal appears.',
+        solution: 'cat /etc/shadow',
+        check: { user: 'kali', out: /\/etc\/shadow.*Permission denied/ },
+      },
+      {
+        id: 'why',
+        prompt: T(
+          'The reason is in the long listing:',
+          '',
+          '```',
+          'ls -l /etc/shadow',
+          '```',
+          '',
+          'It shows `-rw-r-----` with owner `root` and group `shadow`. The owner may read and write, members of `shadow` may read, and everyone else gets nothing. You are `kali`, and `shadow` is not one of your groups, so the last class applies to you.',
+          '',
+          'The system is working as designed. Password hashes are exactly what should stay out of reach of everyday accounts and of the programs they run.'
+        ),
+        hint: '`ls -l` followed by the path of the file.',
+        solution: 'ls -l /etc/shadow',
+        check: { any: [
+          { cmd: 'ls', out: /-rw-r-----\s+\d+\s+root\s+shadow\s.*\/etc\/shadow/ },
+          { cmd: 'stat', out: /0640\/-rw-r-----\)[^\n]*root\)[^\n]*shadow\)/ },
+        ] },
+      },
+      {
+        id: 'sudo',
+        prompt: T(
+          'When a task really does need root, borrow root\'s identity for that one command. `sudo` runs the command that follows it as root. It asks for *your* password, not root\'s. In this lab your password is `kali`.',
+          '',
+          '```',
+          'sudo whoami',
+          '```',
+          '',
+          'The answer is `root`: for the length of that one command you were the administrator. Run `whoami` on its own and you are `kali` again.',
+          '',
+          'sudo also records each use in the system log, with your name and the command, so there is a trace of what was done with root\'s power and by whom.'
+        ),
+        hint: 'Put `sudo` in front of the command. Type your own password when it asks.',
+        solution: 'sudo whoami',
+        input: ['kali'],
+        check: { cmd: ['whoami', 'id'], user: 'root', out: /^root\s*$|uid=0\(root\)/m },
+      },
+      {
+        id: 'shadow-line',
+        prompt: T(
+          'Now use `sudo` for the task that was refused, and ask for no more than you need: print only the first line of `/etc/shadow`, not the whole file.',
+          '',
+          'When it works, look at the second field of the line, between the first two colons. For `root` it holds `!` where a password hash would be, and no password can ever match that. On this machine nobody can log in as root with a password.'
+        ),
+        hint: '`head -n 1` prints the first line of a file. Put `sudo` in front of the whole command.',
+        solution: 'sudo head -n 1 /etc/shadow',
+        input: ['kali'],
+        check: { cmd: READERS, user: 'root', fn: (ev) => { const l = linesOf(ev); return l.some((x) => /^root:[^:]*:\d+:\d*:\d*:\d*:/.test(x)) && !l.some((x) => /^(daemon|kali):/.test(x)); } },
+      },
+      {
+        id: 'list',
+        prompt: T(
+          'What exactly are you allowed to do with sudo? Ask it to list your privileges:',
+          '',
+          '```',
+          'sudo -l',
+          '```',
+          '',
+          'Read the last line: `(ALL : ALL) ALL`. The part in brackets names the users and groups you may act as, and the final `ALL` names the commands you may run. This account may do anything, because it is a member of the group `sudo`.',
+          '',
+          'On a well-run server you will often find the opposite: an account that may run one or two named commands as root and nothing else.'
+        ),
+        hint: 'The option is a lower-case L, for *list*.',
+        solution: 'sudo -l',
+        input: ['kali'],
+        check: { cmd: 'sudo', out: /may run the following commands/ },
+      },
+      {
+        id: 'su',
+        prompt: T(
+          'There is an older tool, `su`, short for *substitute user*. With no name after it, it means root. Try it, and type `kali` when it asks for a password:',
+          '',
+          '```',
+          'su',
+          '```',
+          '',
+          '`Authentication failure`. The difference from sudo is whose password is wanted: `su` asks for the password of the account you are switching *to*, and you have just seen that root has none here.',
+          '',
+          'Where `su` does work, it also behaves differently. It starts a new shell in which every command runs as root until you type `exit`. sudo limits privilege to one command and leaves one log entry for it, which is why Kali and most current systems are built around sudo.'
+        ),
+        hint: 'Type `su`, press Enter, then type `kali` at the `Password:` prompt. The refusal is the expected result.',
+        solution: 'su',
+        input: ['kali'],
+        check: { cmd: 'su', out: /Authentication failure/ },
+      },
+      {
+        id: 'setuid',
+        prompt: T(
+          'How can sudo make you root at all, when it is a program that you start as `kali`? Look at its permissions, and at those of `passwd`, the program for changing your own password:',
+          '',
+          '```',
+          'ls -l /usr/bin/sudo /usr/bin/passwd',
+          '```',
+          '',
+          'Both show `-rwsr-xr-x` and belong to root. The `s` in the place of the owner\'s `x` is the *setuid* permission: whoever starts the program, it runs with the identity of the file\'s owner. That is how `passwd` can update `/etc/shadow`, a file you cannot even read.',
+          '',
+          'This is a design, not a loophole. Instead of opening the file to everyone, the system lets everyone run one carefully written program that makes only the change it should. Because such a program acts as root for anybody, a system should have few of them, and listing them is a routine part of a security review.'
+        ),
+        hint: '`ls -l` followed by the two paths.',
+        solution: 'ls -l /usr/bin/sudo /usr/bin/passwd',
+        check: { cmd: 'ls', out: /^-rwsr-xr-x\s+\d+\s+root\s+root\s.*\bpasswd\s*$/m, all: [{ out: /^-rwsr-xr-x\s+\d+\s+root\s+root\s.*\bsudo\s*$/m }] },
+      },
+      {
+        id: 'setuid-octal',
+        prompt: T(
+          'In octal, special permissions such as setuid are written as a fourth digit in front of the usual three.',
+          '',
+          '`stat` has a format option, `-c %a`, that prints nothing but the octal mode. Use it on `/usr/bin/passwd`. What does it print?'
+        ),
+        hint: '`stat -c %a /usr/bin/passwd`. The first digit of the answer stands for setuid.',
+        solution: '4755',
+        answer: /^0?4755$/,
+      },
+      {
+        id: 'sticky',
+        prompt: T(
+          'One more special permission protects shared space. `/tmp` is a directory in which every account may create files. Look at the directory itself:',
+          '',
+          '```',
+          'ls -ld /tmp',
+          '```',
+          '',
+          'It shows `drwxrwxrwt`: read, write and execute for everyone, with a `t` in the last position. Write permission on a directory normally lets you delete any entry in it, which here would let every account delete the temporary files of every other account.',
+          '',
+          'The `t`, the *sticky* permission, closes that gap. In a sticky directory only the owner of a file, the owner of the directory, or root may delete or rename it. In octal it is the leading 1 of `1777`.'
+        ),
+        hint: 'Use `-d` so that `ls` shows the directory itself and not its contents.',
+        solution: 'ls -ld /tmp',
+        check: { any: [
+          { cmd: 'ls', out: /drwxrwxrwt\s.*\btmp\/?\s*$/m },
+          { cmd: 'stat', out: /1777\/drwxrwxrwt/ },
+        ] },
+      },
+      {
+        id: 'forget',
+        prompt: T(
+          'After a successful sudo, further sudo commands in the same terminal do not ask for your password again for a few minutes. That is convenient, and it also means that an unattended terminal has root within reach. When you have finished the privileged part of a job, or before you step away, tell sudo to forget:',
+          '',
+          '```',
+          'sudo -k',
+          '```',
+          '',
+          'It prints nothing. The next sudo command will ask for your password again.',
+          '',
+          'The habits of this lesson fit in four lines:',
+          '',
+          '- work as yourself, and add `sudo` only to the command that needs it',
+          '- when you are refused, find out why before you reach for more privilege',
+          '- never widen permissions, for example with `chmod 777`, to make an error go away',
+          '- do not keep a root shell open for convenience'
+        ),
+        hint: 'The option is a lower-case `k`.',
+        solution: 'sudo -k',
+        check: { cmd: 'sudo', exit: 0, fn: () => !K.kali.sudoStamp || K.kali.sudoStamp.kali == null },
+      },
+    ],
+    quiz: [
+      {
+        q: '`cat /etc/shadow` answers `Permission denied`. What is the best first reaction?',
+        choices: [
+          'Put `sudo` in front of every command from now on, to avoid further errors',
+          'Look at the owner, group and mode of the file with `ls -l`, and decide whether the task really needs root',
+          'Run `sudo chmod 644 /etc/shadow` so that the file can be read',
+          'Assume the file is damaged and restore it from a backup',
+        ],
+        answer: 1,
+        why: 'The refusal is the system protecting something. Understanding why tells you whether root is really needed, and then one command with `sudo` is enough. Loosening the mode of `/etc/shadow` would expose every password hash to every account.',
+      },
+      {
+        q: 'Which password does each tool ask for?',
+        choices: [
+          '`su` asks for your own password, `sudo` for the password of root',
+          '`su` asks for the password of the account you switch to, `sudo` for your own',
+          'Both ask for the password of root',
+          'Both ask for your own password',
+        ],
+        answer: 1,
+        why: '`su` needs the target account\'s password, so everyone who uses it must know the root password. `sudo` checks who you are and what you are permitted, so no root password has to be shared, or even to exist.',
+      },
+      {
+        q: 'root creates `/tmp/report.txt` with mode `644`. `/tmp` shows `drwxrwxrwt`. Can `kali` delete the file?',
+        choices: [
+          'Yes, because everyone has write permission on `/tmp`',
+          'Yes, but only with `rm -f`',
+          'No: in a sticky directory only the owner of the file, the owner of the directory or root may delete it',
+          'No, because the file itself is not writable by `kali`',
+        ],
+        answer: 2,
+        why: 'Without the `t`, write permission on the directory would be enough to delete any entry. The sticky permission restricts deleting and renaming to the owners and root. The file\'s own mode plays no part in deletion.',
+      },
+      {
+        q: '`/usr/bin/passwd` shows `-rwsr-xr-x root root`. What does the `s` mean when `kali` runs the program?',
+        choices: [
+          '`kali` becomes root in that terminal until logging out',
+          'The program runs with the identity of its owner, root, which lets it update `/etc/shadow`',
+          'Only root is allowed to run the program',
+          'The program will ask for the password of root',
+        ],
+        answer: 1,
+        why: 'Setuid applies to that one program for as long as it runs. `passwd` uses root\'s rights to change one entry in `/etc/shadow` and then exits. Your shell stays what it was.',
+      },
+    ],
+    refs: ['sudo(8)', 'sudoers(5)', 'su(1)', 'shadow(5)', 'chmod(1)', 'NIST SP 800-53 Rev. 5, AC-6 (Least Privilege)'],
+  };
+
   K.lessons.register({
     id: 'perms',
     title: 'Users, permissions and privilege',
     order: 30,
     summary: 'Know who you are on the system, read and set file permissions with confidence, and use root privilege only for the commands that need it.',
-    lessons: [usersLesson, readLesson, changeLesson],
+    lessons: [usersLesson, readLesson, changeLesson, sudoLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
