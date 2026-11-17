@@ -198,3 +198,122 @@ test('dig asks BIND about itself in the CHAOS class and sends ANY over TCP', asy
   assert.match(any, /\(TCP\)\n/);
   assert.match((await sim.run('dig +notcp any halcyon.lab')).out, /\(UDP\)\n/);
 });
+
+test('host: addresses, aliases, mail, reverse and search list', async () => {
+  const sim = await dnsSim();
+  const out = async (line) => (await sim.run(line)).out;
+  assert.equal(await out('host web01.halcyon.lab'), 'web01.halcyon.lab has address 10.10.10.10\n');
+  assert.equal(await out('host www.halcyon.lab'), 'www.halcyon.lab is an alias for web01.halcyon.lab.\nweb01.halcyon.lab has address 10.10.10.10\n');
+  assert.equal(await out('host halcyon.lab'), 'halcyon.lab mail is handled by 10 mail01.halcyon.lab.\n');
+  assert.equal(await out('host web01'), 'web01.halcyon.lab has address 10.10.10.10\n', 'single labels go through the search list');
+  assert.equal(await out('host 10.10.10.40'), '40.10.10.10.in-addr.arpa domain name pointer mail01.halcyon.lab.\n');
+  assert.equal(await out('host example.com 8.8.8.8'), 'Using domain server:\nName: 8.8.8.8\nAddress: 8.8.8.8#53\nAliases: \n\nexample.com has address 93.184.215.14\n');
+  assert.equal(await out('host -t ns halcyon.lab'), 'halcyon.lab name server ns1.halcyon.lab.\n');
+  assert.equal(await out('host -t txt halcyon.lab'), 'halcyon.lab descriptive text "v=spf1 mx -all"\n');
+  assert.equal(await out('host -t soa halcyon.lab'), 'halcyon.lab has SOA record ns1.halcyon.lab. hostmaster.halcyon.lab. 2026111201 3600 900 604800 86400\n');
+  assert.equal(await out('host -t srv _ldap._tcp.halcyon.lab'), '_ldap._tcp.halcyon.lab has SRV record 0 100 389 dc01.halcyon.lab.\n');
+  assert.equal(await out('host -t cname www.halcyon.lab'), 'www.halcyon.lab is an alias for web01.halcyon.lab.\n');
+  assert.equal(await out('host -t txt web01.halcyon.lab'), 'web01.halcyon.lab has no TXT record\n');
+  assert.equal(await out('host -C halcyon.lab'), 'Nameserver 10.10.10.53:\n\thalcyon.lab has SOA record ns1.halcyon.lab. hostmaster.halcyon.lab. 2026111201 3600 900 604800 86400\n');
+  assert.equal(await out('host -c CH -t txt version.bind 10.10.10.53 | t-count'), '5\n');
+  assert.equal(await out('host mail.halcyon.lab | t-count'), '2\n');
+});
+
+test('host: verbose output, zone listing and failures', async () => {
+  const sim = await dnsSim();
+  const v = stable((await sim.run('host -t a -v web01.halcyon.lab')).out);
+  assert.equal(v, 'Trying "web01.halcyon.lab"\n;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: N\n' +
+    ';; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0\n\n;; QUESTION SECTION:\n;web01.halcyon.lab.\t\tIN\tA\n\n' +
+    ';; ANSWER SECTION:\nweb01.halcyon.lab.\t3600\tIN\tA\t10.10.10.10\n\nReceived 51 bytes from 10.10.10.53#53 in T ms\n');
+  assert.equal((await sim.run('host -v web01.halcyon.lab')).out.match(/^Trying "web01\.halcyon\.lab"$/gm).length, 3, 'A, AAAA and MX');
+  assert.match((await sim.run('host -a halcyon.lab')).out, /;halcyon\.lab\.\t\t\tIN\tANY\n\n;; ANSWER SECTION:\nhalcyon\.lab\.\t\t3600\tIN\tNS\tns1\.halcyon\.lab\.\n/);
+
+  const list = await sim.run('host -l halcyon.lab 10.10.10.53');
+  assert.equal(list.code, 0);
+  const lines = list.out.split('\n');
+  assert.deepEqual(lines.slice(0, 7), ['Using domain server:', 'Name: 10.10.10.53', 'Address: 10.10.10.53#53', 'Aliases: ', '',
+    'halcyon.lab name server ns1.halcyon.lab.', 'gw.halcyon.lab has address 10.10.10.1']);
+  assert.equal(lines.filter((l) => / has address /.test(l)).length, 11);
+  assert.ok(!/alias|mail is handled/.test(list.out), 'only NS, PTR and address records are listed');
+  assert.equal((await sim.run('host -l -t cname halcyon.lab | t-count')).out, '3\n');
+  assert.match((await sim.run('host -l -a halcyon.lab')).out, /ANSWER: 21,[^]*;halcyon\.lab\.\t\t\tIN\tAXFR\n/);
+  const refused = await sim.run('host -l halcyonfreight.example 203.0.113.53');
+  assert.equal(refused.code, 1);
+  assert.match(refused.out, /Aliases: \n\nHost halcyonfreight\.example not found: 5\(REFUSED\)\n; Transfer failed\.\n$/);
+
+  const nx = await sim.run('host nosuch.halcyon.lab');
+  assert.deepEqual([nx.code, nx.out], [1, 'Host nosuch.halcyon.lab not found: 3(NXDOMAIN)\n']);
+  assert.equal((await sim.run('host nosuchhost')).out, 'Host nosuchhost not found: 3(NXDOMAIN)\n');
+  assert.match(stable((await sim.run('host -v nosuch.halcyon.lab')).out), /^Trying "nosuch\.halcyon\.lab"\nHost nosuch\.halcyon\.lab not found: 3\(NXDOMAIN\)\nReceived \d+ bytes from 10\.10\.10\.53#53 in T ms\n$/);
+  const dead = await sim.run('host web01.halcyon.lab 10.10.10.99');
+  assert.deepEqual([dead.code, dead.out], [1, ';; communications error to 10.10.10.99#53: timed out\n'.repeat(2) + ';; no servers could be reached\n\n']);
+  const bad = await sim.run('host -z web01');
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /^host: illegal option -- z\nUsage: host \[-aCdilrTvVw\] \[-c class\] \[-N ndots\] \[-t type\] \[-W time\]\n/);
+  assert.match((await sim.run('host')).err, /^Usage: host /);
+  assert.equal((await sim.run('host -t')).err.split('\n')[0], 'host: option requires an argument -- t');
+  assert.deepEqual(await sim.run('host -t bogus web01').then((r) => [r.code, r.err]), [1, 'host: invalid type: bogus\n\n']);
+  assert.equal((await sim.run('host -V')).err, 'host 9.20.11-4-Debian\n');
+  assert.equal((await sim.run('host web01 ns.nonexistent.example')).err, "host: couldn't get address for 'ns.nonexistent.example': not found\n");
+});
+
+test('nslookup non-interactive output', async () => {
+  const sim = await dnsSim();
+  const out = async (line) => (await sim.run(line)).out;
+  const lab = 'Server:\t\t10.10.10.53\nAddress:\t10.10.10.53#53\n\n';
+  assert.equal(await out('nslookup web01.halcyon.lab'), lab + 'Name:\tweb01.halcyon.lab\nAddress: 10.10.10.10\n\n');
+  assert.equal(await out('nslookup www.halcyon.lab'), lab + 'www.halcyon.lab\tcanonical name = web01.halcyon.lab.\nName:\tweb01.halcyon.lab\nAddress: 10.10.10.10\n\n');
+  assert.equal(await out('nslookup web01'), lab + 'Name:\tweb01.halcyon.lab\nAddress: 10.10.10.10\n\n');
+  assert.equal(await out('nslookup example.com 8.8.8.8'), 'Server:\t\t8.8.8.8\nAddress:\t8.8.8.8#53\n\nNon-authoritative answer:\nName:\texample.com\nAddress: 93.184.215.14\n\n');
+  assert.equal(await out('nslookup example.com dns.google'), 'Server:\t\tdns.google\nAddress:\t8.8.8.8#53\n\nNon-authoritative answer:\nName:\texample.com\nAddress: 93.184.215.14\n\n');
+  assert.equal(await out('nslookup -type=mx halcyon.lab'), lab + 'halcyon.lab\tmail exchanger = 10 mail01.halcyon.lab.\n\n');
+  assert.equal(await out('nslookup -q=ns halcyon.lab 10.10.10.53'), lab + 'halcyon.lab\tnameserver = ns1.halcyon.lab.\n\n');
+  assert.equal(await out('nslookup -query=txt halcyon.lab'), lab + 'halcyon.lab\ttext = "v=spf1 mx -all"\n\n');
+  assert.equal(await out('nslookup -type=soa halcyon.lab'), lab + 'halcyon.lab\n\torigin = ns1.halcyon.lab\n\tmail addr = hostmaster.halcyon.lab\n\tserial = 2026111201\n' +
+    '\trefresh = 3600\n\tretry = 900\n\texpire = 604800\n\tminimum = 86400\n\n');
+  assert.equal(await out('nslookup -type=mx kali.org 1.1.1.1'), 'Server:\t\t1.1.1.1\nAddress:\t1.1.1.1#53\n\nNon-authoritative answer:\n' +
+    'kali.org\tmail exchanger = 10 mail.kali.org.\nkali.org\tmail exchanger = 20 mail2.kali.org.\n\nAuthoritative answers can be found from:\n\n');
+  assert.equal(await out('nslookup 10.10.10.10'), '10.10.10.10.in-addr.arpa\tname = web01.halcyon.lab.\n\n');
+  assert.equal(await out('nslookup 8.8.8.8'), '8.8.8.8.in-addr.arpa\tname = dns.google.\n\nAuthoritative answers can be found from:\n\n');
+  assert.equal(await out('nslookup -type=aaaa example.com 8.8.8.8'), "Server:\t\t8.8.8.8\nAddress:\t8.8.8.8#53\n\nNon-authoritative answer:\n*** Can't find example.com: No answer\n\n");
+  assert.equal(await out('nslookup web01.halcyon.lab | t-count'), '4\n');
+});
+
+test('nslookup failures and options', async () => {
+  const sim = await dnsSim();
+  const nx = await sim.run('nslookup nosuch.halcyon.lab');
+  assert.deepEqual([nx.code, nx.out], [1, "Server:\t\t10.10.10.53\nAddress:\t10.10.10.53#53\n\n** server can't find nosuch.halcyon.lab: NXDOMAIN\n\n"]);
+  const hidden = await sim.run('nslookup web01.halcyon.lab 8.8.8.8');
+  assert.match(hidden.out, /\*\* server can't find web01\.halcyon\.lab: NXDOMAIN\n\n$/, 'public resolvers do not know the lab zone');
+  const dead = await sim.run('nslookup -timeout=2 web01.halcyon.lab 10.10.10.99');
+  assert.deepEqual([dead.code, dead.out], [1, ';; communications error to 10.10.10.99#53: timed out\n'.repeat(3) + ';; no servers could be reached\n\n\n']);
+  assert.match((await sim.run('nslookup -type=bogus web01.halcyon.lab')).out, /^unknown query type: bogus\nServer:/);
+  assert.match((await sim.run('nslookup -frobnicate web01.halcyon.lab')).out, /^\*\*\* Invalid option: frobnicate\nServer:/);
+  assert.equal((await sim.run('nslookup -version')).err, 'nslookup 9.20.11-4-Debian\n');
+  const many = await sim.run('nslookup a b c');
+  assert.equal(many.code, 1);
+  assert.match(many.err, /^Usage:\n {3}nslookup \[-opt \.\.\.\] {13}# interactive mode using default server\n/);
+  assert.equal((await sim.run('nslookup web01 ns.nonexistent.example')).err, "nslookup: couldn't get address for 'ns.nonexistent.example': not found\n");
+});
+
+test('nslookup interactive mode', async () => {
+  const sim = await dnsSim();
+  for (const line of ['web01.halcyon.lab', 'set type=mx', 'halcyon.lab', 'server 8.8.8.8', 'example.com', 'set bogus', 'exit']) sim.term.feed(line);
+  const r = await sim.type('nslookup');
+  assert.equal(r.code, 0);
+  assert.equal(r.output.replace(/\r/g, ''), [
+    '> web01.halcyon.lab', 'Server:\t\t10.10.10.53', 'Address:\t10.10.10.53#53', '', 'Name:\tweb01.halcyon.lab', 'Address: 10.10.10.10',
+    '> set type=mx',
+    '> halcyon.lab', 'Server:\t\t10.10.10.53', 'Address:\t10.10.10.53#53', '', 'halcyon.lab\tmail exchanger = 10 mail01.halcyon.lab.',
+    '> server 8.8.8.8', 'Default server: 8.8.8.8', 'Address: 8.8.8.8#53',
+    '> example.com', 'Server:\t\t8.8.8.8', 'Address:\t8.8.8.8#53', '', 'Non-authoritative answer:', 'example.com\tmail exchanger = 10 mail.example.com.',
+    'example.com\tmail exchanger = 20 mail2.example.com.', '', 'Authoritative answers can be found from:',
+    '> set bogus', '*** Invalid option: bogus',
+    '> exit', '', '',
+  ].join('\n'));
+
+  const piped = await sim.run('printf "set type=ns\\nhalcyon.lab\\nset all\\n" | nslookup - 10.10.10.53');
+  assert.equal(piped.out, '> > Server:\t\t10.10.10.53\nAddress:\t10.10.10.53#53\n\nhalcyon.lab\tnameserver = ns1.halcyon.lab.\n' +
+    '> Default server: 10.10.10.53\nAddress: 10.10.10.53#53\n\nSet options:\n  novc\t\t\tnodebug\t\tnod2\n  search\t\trecurse\n' +
+    '  timeout = 0\t\tretry = 3\tport = 53\tndots = 1\n  querytype = NS      \tclass = IN\n  srchlist = halcyon.lab\n> \n');
+});

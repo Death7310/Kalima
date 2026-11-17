@@ -109,6 +109,21 @@
     return r;
   }
 
+  /** What BIND says about itself in the CHAOS class; everything else there is refused. */
+  function chaosQuery(ctx, name, type, ip) {
+    const res = ctx.net.dns(ctx.machine, name, type, { server: ip });
+    if (res.status === 'TIMEOUT') return res;
+    const host = ctx.net.knownHost(ip);
+    const bind = host && ctx.net.servicesOf(host).find((s) => s.port === 53 && /BIND/.test(s.product || ''));
+    const about = { 'version.bind': bind && bind.version + '-Debian', 'hostname.bind': bind && host.hostname }[res.question.name];
+    const ok = about && (type === 'TXT' || type === 'ANY');
+    res.status = ok ? 'NOERROR' : 'REFUSED';
+    res.flags = { aa: !!ok, ra: false, rd: true };
+    res.answers = ok ? [{ name: res.question.name, type: 'TXT', ttl: 0, data: '"' + about + '"' }] : [];
+    res.authority = [];
+    return res;
+  }
+
   /** Why a server stays silent: a closed port answers at once, anything else runs into the timeout. */
   function silence(ctx, ip, port, tcp) {
     const probe = tcp ? ctx.net.tcp(ctx.machine, ip, port) : ctx.net.udp(ctx.machine, ip, port);
@@ -137,20 +152,42 @@
   }
 
   /** Names the BIND tools try (ndots:1): a single label goes through the search list first, a dotted name is taken as it is. */
-  function candidates(machine, name) {
+  function candidates(searchList, name) {
     if (name.indexOf('.') >= 0) return [name];
-    return (machine.search || []).map((s) => name + '.' + s).concat([name]);
+    return (searchList || []).map((s) => name + '.' + s).concat([name]);
   }
 
-  /** Ask for each candidate name until one exists. Returns the last reply, or null when no server answered. */
-  async function askNames(ctx, q, names, type) {
+  /** The name a reply ends at once its CNAME chain is followed. */
+  function canonicalName(res) {
+    let name = res.question.name;
+    for (let hop = res.answers.length; hop > 0; hop--) {
+      const alias = res.answers.find((r) => r.type === 'CNAME' && r.name === name);
+      if (!alias) break;
+      name = alias.data;
+    }
+    return name;
+  }
+  const isAddress = (s) => U.isIPv4(s) || (s.indexOf(':') >= 0 && reverseName(s) !== null);
+  const RCODES = { NOERROR: 0, NXDOMAIN: 3, REFUSED: 5, NOTAUTH: 9 };
+
+  /* getopt's complaint in the words of the ISC command line parser. */
+  const iscOptError = (err) => err.replace(/^invalid option/, 'illegal option').replace(/'(.)'$/, '$1');
+
+  /**
+   * Ask for each candidate name until one exists; send(name, ip) puts the question.
+   * Returns the last reply, or null when no server answered.
+   */
+  async function askNames(ctx, q, names, send, trying) {
     let res = null;
     for (const name of names) {
-      res = await ask(ctx, q, (ip) => query(ctx, name, type, ip));
+      if (trying) trying(name);
+      res = await ask(ctx, q, (ip) => send(name, ip));
       if (!res || res.status !== 'NXDOMAIN') break;
     }
     return res;
   }
+  const sender = (ctx, type, cls) => (name, ip) => (cls === 'IN' ? query(ctx, name, type, ip) : chaosQuery(ctx, name, type, ip));
+  const NO_SERVERS = ';; no servers could be reached\n\n';
 
   /** Addresses for a server given on the command line; empty when the name does not resolve. */
   function serverAddresses(ctx, arg) {
@@ -374,32 +411,14 @@
       ';; WHEN: ' + when(K.clock.now()) + '\n' + sizeLine + '\n\n';
   }
 
-  /** What BIND says about itself in the CHAOS class; everything else there is refused. */
-  function chaosQuery(ctx, name, type, ip) {
-    const res = ctx.net.dns(ctx.machine, name, type, { server: ip });
-    if (res.status === 'TIMEOUT') return res;
-    const host = ctx.net.knownHost(ip);
-    const bind = host && ctx.net.servicesOf(host).find((s) => s.port === 53 && /BIND/.test(s.product || ''));
-    const about = { 'version.bind': bind && bind.version + '-Debian', 'hostname.bind': bind && host.hostname }[res.question.name];
-    const ok = about && (type === 'TXT' || type === 'ANY');
-    res.status = ok ? 'NOERROR' : 'REFUSED';
-    res.flags = { aa: !!ok, ra: false, rd: true };
-    res.answers = ok ? [{ name: res.question.name, type: 'TXT', ttl: 0, data: '"' + about + '"' }] : [];
-    res.authority = [];
-    return res;
-  }
-
   const digQuestion = (lk, servers) => ({
     shown: lk.name, servers: servers.ips, arg: servers.arg, port: lk.port, tcp: lk.tcp, tries: lk.tries, timeout: lk.timeout || (lk.tcp ? 10 : 5),
   });
-  const NO_SERVERS = ';; no servers could be reached\n\n';
-
   async function digLookup(ctx, p, lk, servers, banner) {
     if (lk.type === 'AXFR') return digTransfer(ctx, p, lk, servers, banner);
     if (lk.trace) return digTrace(ctx, p, lk, servers, banner);
     const q = digQuestion(lk, servers);
-    const res = lk.cls === 'IN' ? await askNames(ctx, q, lk.search ? candidates(ctx.machine, lk.name) : [lk.name], lk.type)
-      : await ask(ctx, q, (ip) => chaosQuery(ctx, lk.name, lk.type, ip));
+    const res = await askNames(ctx, q, lk.search ? candidates(ctx.machine.search, lk.name) : [lk.name], sender(ctx, lk.type, lk.cls));
     ctx.out(banner());
     if (!res) { ctx.out(NO_SERVERS); return 9; }
     ctx.out(digReply(ctx, p, lk, res, { ip: res.server, arg: servers.arg || res.server }));
@@ -558,5 +577,270 @@
     synopsis: 'dig [@server] [-p port] [-t type] [-x addr] [name] [type] [class] [queryopt...]',
     man: 'DESCRIPTION\n       dig is a flexible tool for interrogating DNS name servers. It performs DNS lookups and displays the answers that are returned from the name server(s) that were queried. Unless it is told to query a specific name server, dig tries each of the servers listed in /etc/resolv.conf. With no arguments it asks for the NS records of the root.\n\nOPTIONS\n       @server\n              The name or IP address of the name server to query.\n       -p port\n              Send the query to a non-standard port on the server.\n       -t type\n              The resource record type to query: A, AAAA, MX, NS, TXT, SOA, CNAME, PTR, SRV, ANY, or AXFR for a zone transfer. The type may also be given as a plain argument.\n       -x addr\n              Reverse lookup: query the PTR record for an address.\n       -q name\n              The domain name to query, for names that look like a type.\n\nQUERY OPTIONS\n       +short Print only the answer data.\n       +noall +answer\n              Clear all display flags, then show only the answer section.\n       +nocmd, +nocomments, +noquestion, +nostats\n              Leave out the banner, the header comments, the question section or the statistics.\n       +tcp   Use TCP instead of UDP.\n       +trace Follow the delegation path from the root name servers down to the answer.\n       +norecurse\n              Do not ask the server to recurse.\n       +time=T, +tries=N\n              Timeout in seconds (default 5) and number of attempts (default 3).\n\nEXIT STATUS\n       0 on a reply (even NXDOMAIN), 1 for a usage error, 9 when no server answered, 10 for an internal error.\n\nEXAMPLES\n       dig web01.halcyon.lab\n              Look up the address of a lab host with the default resolver.\n       dig @10.10.10.53 halcyon.lab MX +short\n              Ask the lab name server for the mail exchangers and print only the data.\n       dig axfr halcyon.lab @10.10.10.53\n              Request a transfer of the whole zone.',
     run: digRun,
+  });
+  /* --------------------------------------------------------------- host */
+  const HOST_USAGE = 'Usage: host [-aCdilrTvVw] [-c class] [-N ndots] [-t type] [-W time]\n' +
+    '            [-R number] [-m flag] [-p port] hostname [server]\n' +
+    '       -a is equivalent to -v -t ANY\n' +
+    '       -A is like -a but omits RRSIG, NSEC, NSEC3\n' +
+    '       -c specifies query class for non-IN data\n' +
+    '       -C compares SOA records on authoritative nameservers\n' +
+    '       -d is equivalent to -v\n' +
+    '       -l lists all hosts in a domain, using AXFR\n' +
+    '       -m set memory debugging flag (trace|record|usage)\n' +
+    '       -N changes the number of dots allowed before root lookup is done\n' +
+    '       -p specifies the port on the server to query\n' +
+    '       -r disables recursive processing\n' +
+    '       -R specifies number of retries for UDP packets\n' +
+    '       -s a SERVFAIL response should stop query\n' +
+    '       -t specifies the query type\n' +
+    '       -T enables TCP/IP mode\n' +
+    '       -U enables UDP mode\n' +
+    '       -v enables verbose output\n' +
+    '       -V print version number and exit\n' +
+    '       -w specifies to wait forever for a reply\n' +
+    '       -W specifies how long to wait for a reply\n' +
+    '       -4 use IPv4 query transport only\n';
+  const HOST_PHRASE = { A: 'has address', AAAA: 'has IPv6 address', NS: 'name server', CNAME: 'is an alias for', PTR: 'domain name pointer', MX: 'mail is handled by', TXT: 'descriptive text', HINFO: 'host information' };
+  const hostSays = (r) => r.name + ' ' + (HOST_PHRASE[r.type] || 'has ' + r.type + ' record') + ' ' + rdata(r) + '\n';
+
+  /** host -v: the whole message, sections separated by blank lines, without EDNS. */
+  function hostVerbose(ctx, res, st) {
+    const sections = [['QUESTION', [questionLine(res.question, st)]], ['ANSWER', res.answers], ['AUTHORITY', res.authority], ['ADDITIONAL', res.additional]];
+    return headerLines(res, queryId(ctx.net), st.recurse, res.additional.length) +
+      sections.filter((x) => x[1].length).map((x) => '\n;; ' + x[0] + ' SECTION:\n' + x[1].map((r) => (typeof r === 'string' ? r : recordLine(r, st)) + '\n').join('')).join('') + '\n';
+  }
+
+  function hostOptions(ctx) {
+    const g = K.getopt(ctx.args, { short: 'aAc:Cdlm:N:p:rR:st:TUvVwW:4' });
+    const usage = () => { ctx.err(HOST_USAGE); return { exit: 1 }; };
+    const fatal = (msg) => { ctx.eprintln('host: ' + msg); return { exit: 1 }; };
+    if (g.err) { ctx.eprintln('host: ' + iscOptError(g.err)); return usage(); }
+    if (g.opts.V) { ctx.eprintln('host ' + BIND); return { exit: 0 }; }
+    if (!g.rest.length) return usage();
+    const o = g.opts; const all = !!(o.a || o.A);
+    const st = Object.assign({}, FULL, {
+      name: g.rest[0], serverArg: g.rest[1] || null, verbose: !!(o.v || o.d || all), list: !!o.l, compare: !!o.C, all,
+      type: null, recurse: !o.r, tcp: !!o.T && !o.U, port: 53, tries: 2, timeout: o.w ? 2147483 : 5,
+    });
+    if (o.t !== undefined) { if (!isType(o.t)) return fatal('invalid type: ' + o.t + '\n'); st.type = o.t.toUpperCase(); }
+    if (o.c !== undefined) { if (!classOf(o.c)) return fatal('invalid class: ' + o.c + '\n'); st.cls = classOf(o.c); }
+    for (const k of ['p', 'R', 'W']) if (o[k] !== undefined && !/^\d+$/.test(o[k])) return usage();
+    if (o.p !== undefined) st.port = +o.p;
+    if (o.R !== undefined) st.tries = Math.max(+o.R, 1) + 1;
+    if (o.W !== undefined) st.timeout = Math.max(+o.W, 1);
+    if (all && st.type !== 'AXFR') st.type = 'ANY';
+    return { st };
+  }
+
+  async function hostRun(ctx) {
+    const parsed = hostOptions(ctx);
+    if (parsed.exit !== undefined) return parsed.exit;
+    const st = parsed.st; const net = ctx.net;
+    const servers = st.serverArg ? serverAddresses(ctx, st.serverArg) : systemServers(ctx.machine);
+    if (!servers.length) { ctx.eprintln("host: couldn't get address for '" + st.serverArg + "': not found"); return 1; }
+    const q = { shown: st.name, servers, arg: st.serverArg, port: st.port, tcp: st.tcp, tries: st.tries, timeout: st.timeout };
+    let failed = false; let introduced = !st.serverArg;
+    const trying = st.verbose ? (name) => ctx.println('Trying "' + name + '"') : null;
+
+    /* One reply the way host prints it; `defaults` is the plain "host name" mode with its follow-up lookups. */
+    const show = (res, defaults) => {
+      let out = '';
+      if (!introduced) { out += 'Using domain server:\nName: ' + st.serverArg + '\nAddress: ' + res.server + '#' + st.port + '\nAliases: \n\n'; introduced = true; }
+      if (res.status !== 'NOERROR') {
+        failed = true;
+        out += 'Host ' + (res.status === 'NXDOMAIN' ? st.name : res.question.name) + ' not found: ' + RCODES[res.status] + '(' + res.status + ')\n';
+      } else if (st.verbose) out += hostVerbose(ctx, res, st);
+      else {
+        out += res.answers.map(hostSays).join('');
+        if (!defaults && !res.answers.length) out += res.question.name + ' has no ' + res.question.type + ' record\n';
+      }
+      if (st.verbose) out += 'Received ' + replySize(res, 0) + ' bytes from ' + res.server + '#' + st.port + ' in ' + res.ms + ' ms\n';
+      ctx.out(out);
+    };
+    const lookup = async (names, type, defaults) => {
+      const res = await askNames(ctx, q, names, sender(ctx, type, st.cls), trying);
+      if (res) show(res, defaults); else { failed = true; ctx.out(NO_SERVERS); }
+      return res;
+    };
+
+    if (st.list || st.type === 'AXFR') {
+      const x = await ask(ctx, Object.assign({}, q, { tcp: true }), (ip) => Object.assign(net.axfr(ctx.machine, st.name, ip), { server: ip }));
+      if (!x) { ctx.out(NO_SERVERS); return 1; }
+      const zone = st.name.toLowerCase().replace(/\.$/, '');
+      const wanted = st.all ? () => true : st.type && st.type !== 'AXFR' ? (r) => r.type === st.type : (r) => ['A', 'AAAA', 'NS', 'PTR'].indexOf(r.type) >= 0;
+      const status = x.status === 'OK' ? 'NOERROR' : x.status;
+      if (trying) trying(zone);
+      show({ status, server: x.server, ms: x.ms, flags: { aa: true, ra: false }, question: { name: zone, type: 'AXFR' }, answers: x.records.filter(wanted), authority: [], additional: [] }, true);
+      if (status !== 'NOERROR') ctx.out('; Transfer failed.\n');
+    } else if (st.compare) {
+      const ns = await lookupQuiet(ctx, q, st.name, 'NS');
+      if (!ns) { ctx.out(NO_SERVERS); return 1; }
+      for (const r of ns.answers.filter((a) => a.type === 'NS')) {
+        const addr = net.resolve(ctx.machine, r.data);
+        const soa = addr && await lookupQuiet(ctx, Object.assign({}, q, { servers: [addr.ip] }), st.name, 'SOA');
+        if (!soa) { failed = true; continue; }
+        ctx.out(soa.answers.filter((a) => a.type === 'SOA').map((a) => 'Nameserver ' + addr.ip + ':\n\t' + hostSays(a)).join(''));
+      }
+    } else if (isAddress(st.name)) {
+      await lookup([reverseName(st.name)], 'PTR', false);
+    } else if (st.type) {
+      await lookup(candidates(ctx.machine.search, st.name), st.type, false);
+    } else {
+      const first = await lookup(candidates(ctx.machine.search, st.name), 'A', true);
+      if (first && first.status === 'NOERROR') for (const type of ['AAAA', 'MX']) await lookup([canonicalName(first)], type, true);
+    }
+    return failed ? 1 : 0;
+  }
+  const lookupQuiet = (ctx, q, name, type) => ask(ctx, q, (ip) => query(ctx, name, type, ip));
+
+  K.cmd.register({
+    name: 'host', pkg: 'bind9-host', section: 1,
+    summary: 'DNS lookup utility',
+    synopsis: 'host [-aCdlrTvVw] [-c class] [-N ndots] [-R number] [-t type] [-W wait] [-p port] {name} [server]',
+    man: 'DESCRIPTION\n       host is a simple utility for performing DNS lookups. It is normally used to convert names to IP addresses and vice versa. name is the domain name that is to be looked up; an IPv4 or IPv6 address makes host perform a reverse lookup. server is an optional name or address of the name server to query instead of the ones in /etc/resolv.conf.\n\n       With no type given host asks for the A, AAAA and MX records of the name.\n\nOPTIONS\n       -t type\n              Query for records of this type: A, AAAA, CNAME, MX, NS, PTR, SOA, SRV, TXT, ANY.\n       -a     Equivalent to -v -t ANY.\n       -v     Verbose output, in the format dig uses.\n       -l     List the zone: host performs a zone transfer of name and prints the NS, PTR and address records. With -a all records are printed.\n       -C     Query the SOA record of the zone from each of its listed name servers.\n       -T     Use TCP instead of UDP.\n       -r     Non-recursive query.\n       -R number, -W wait\n              Number of retries (default 1) and seconds to wait for a reply (default 5).\n       -V     Print the version number and exit.\n\nEXIT STATUS\n       0 when the lookup succeeded, 1 otherwise.\n\nEXAMPLES\n       host www.halcyon.lab\n              Print the alias and the address behind it.\n       host -t mx halcyon.lab 10.10.10.53\n              Ask the lab name server who handles mail for the domain.\n       host -l halcyon.lab 10.10.10.53\n              List the hosts in the zone by zone transfer.',
+    run: hostRun,
+  });
+
+  /* ----------------------------------------------------------- nslookup */
+  const NS_PHRASE = { A: 'internet address', AAAA: 'has AAAA address', NS: 'nameserver', CNAME: 'canonical name', PTR: 'name', MX: 'mail exchanger', TXT: 'text', SRV: 'service' };
+
+  function nsRecords(records, inAnswer) {
+    return records.map((r) => {
+      if (inAnswer && (r.type === 'A' || r.type === 'AAAA')) return 'Name:\t' + r.name + '\nAddress: ' + r.data + '\n';
+      if (r.type !== 'SOA') return r.name + '\t' + (NS_PHRASE[r.type] || r.type.toLowerCase()) + ' = ' + rdata(r) + '\n';
+      const f = r.data.split(' ');
+      return (r.name || '.') + '\n' + ['origin', 'mail addr', 'serial', 'refresh', 'retry', 'expire', 'minimum'].map((label, i) => '\t' + label + ' = ' + f[i] + '\n').join('');
+    }).join('');
+  }
+
+  /** `set` keywords and their abbreviations, as nslookup's setoption() accepts them. */
+  function nsOption(ctx, st, opt) {
+    const eq = opt.indexOf('=');
+    const key = (eq < 0 ? opt : opt.slice(0, eq)).toLowerCase();
+    const value = eq < 0 ? null : opt.slice(eq + 1);
+    const flag = (word, min) => value === null && key.length >= min && word.startsWith(key);
+    const number = (what, max) => {
+      if (/^\d+$/.test(value) && +value <= max) return true;
+      ctx.println('invalid ' + what + " '" + value + "': " + (/^\d+$/.test(value) ? 'out of range' : 'not a valid number'));
+      return false;
+    };
+    if (flag('all', 3)) return nsSettings(ctx, st, true);
+    if (value !== null) {
+      switch (key) {
+        case 'type': case 'ty': case 'querytype': case 'query': case 'qu': case 'q':
+          if (isType(value)) { st.type = value.toUpperCase(); st.defaults = false; } else ctx.println('unknown query type: ' + value);
+          return undefined;
+        case 'class': case 'cl': if (classOf(value)) st.cls = classOf(value); else ctx.println('unknown query class: ' + value); return undefined;
+        case 'port': case 'po': if (number('port', 65535)) st.port = +value; return undefined;
+        case 'timeout': case 't': if (number('timeout', 65535)) st.timeout = +value; return undefined;
+        case 'retry': case 'ret': if (number('tries', 65535)) st.tries = +value; return undefined;
+        case 'domain': case 'do': st.searchList = [value]; st.search = true; return undefined;
+        case 'ndots': number('ndots', 255); return undefined;
+        default:
+      }
+    }
+    if (flag('recurse', 3) || flag('norecurse', 5)) st.recurse = key[0] !== 'n';
+    else if (flag('search', 3) || flag('nosearch', 5) || flag('defname', 3) || flag('nodefname', 5)) st.search = key[0] !== 'n';
+    else if (flag('vc', 2) || flag('novc', 4)) st.tcp = key[0] !== 'n';
+    else if (!(flag('nodebug', 5) || flag('nod2', 4) || flag('fail', 3) || flag('nofail', 5) || flag('sil', 3))) ctx.println('*** Invalid option: ' + opt);
+    return undefined;
+  }
+
+  function nsSettings(ctx, st, full) {
+    let out = st.servers.map((ip) => 'Default server: ' + (st.arg || ip) + '\nAddress: ' + ip + '#' + st.port + '\n').join('');
+    if (full) {
+      out += '\nSet options:\n  ' + (st.tcp ? 'vc' : 'novc') + '\t\t\tnodebug\t\tnod2\n' +
+        '  ' + (st.search ? 'search' : 'nosearch') + '\t\t' + (st.recurse ? 'recurse' : 'norecurse') + '\n' +
+        '  timeout = ' + st.timeout + '\t\tretry = ' + st.tries + '\tport = ' + st.port + '\tndots = 1\n' +
+        '  querytype = ' + st.type.padEnd(8) + '\tclass = ' + st.cls + '\n  srchlist = ' + st.searchList.join('/') + '\n';
+    }
+    ctx.out(out);
+  }
+
+  /** Point nslookup at another server. False (after the fatal message) when it has no address. */
+  function nsServer(ctx, st, arg) {
+    const addrs = serverAddresses(ctx, arg);
+    if (!addrs.length) { ctx.eprintln("nslookup: couldn't get address for '" + arg + "': not found"); return false; }
+    st.servers = addrs; st.arg = arg;
+    return true;
+  }
+
+  /** One lookup as nslookup prints it; plain name lookups ask for A, then AAAA. */
+  async function nsLookup(ctx, st, text, type) {
+    const q = { shown: text, servers: st.servers, arg: st.arg, port: st.port, tcp: st.tcp, tries: st.tries, timeout: st.timeout || 5 };
+    const fail = (out) => { ctx.out(out); st.failed = true; };
+    const reverse = (type === 'A' || type === 'AAAA') && isAddress(text);
+    if (reverse) type = 'PTR';
+    let names = reverse ? [reverseName(text)] : st.search ? candidates(st.searchList, text) : [text];
+    let noAddress = false;
+    for (const asking of (st.defaults && type === 'A' ? ['A', 'AAAA'] : [type])) {
+      const res = await askNames(ctx, q, names, sender(ctx, asking, st.cls));
+      if (!res) return fail(NO_SERVERS);
+      st.reached = true;
+      const lead = !st.defaults || asking === 'A';
+      let out = lead ? 'Server:\t\t' + (st.arg || res.server) + '\nAddress:\t' + res.server + '#' + st.port + '\n\n' : '';
+      if (res.status !== 'NOERROR') return fail(out + "** server can't find " + res.question.name + ': ' + res.status + '\n');
+      if (!res.flags.aa && lead) out += 'Non-authoritative answer:\n';
+      if (res.answers.length) out += nsRecords(res.answers, true);
+      else if (st.defaults && asking === 'A') noAddress = true;
+      else if (!st.defaults || noAddress) out += "*** Can't find " + text + ': No answer\n';
+      if (!res.flags.aa && asking !== 'A' && asking !== 'AAAA') out += '\nAuthoritative answers can be found from:\n' + nsRecords(res.authority, false) + nsRecords(res.additional, false);
+      ctx.out(out);
+      text = canonicalName(res); names = [text];
+    }
+    return undefined;
+  }
+
+  async function nsInteractive(ctx, st) {
+    for (;;) {
+      if (ctx.stdin !== null) ctx.out('> ');
+      const line = await ctx.readLine('> ');
+      if (line === null) break;
+      const words = line.trim().split(/\s+/);
+      const verb = words[0].toLowerCase();
+      if (!verb) continue;
+      if (verb === 'exit') break;
+      if (verb === 'server' || verb === 'lserver') {
+        if (!words[1]) ctx.println('usage: server hostname');
+        else if (!nsServer(ctx, st, words[1])) return false;
+        else nsSettings(ctx, st, false);
+      } else if (verb === 'set') nsOption(ctx, st, words[1] || '');
+      else if (['help', '?', 'ls', 'finger', 'root', 'view'].indexOf(verb) >= 0) ctx.println("The '" + words[0] + "' command is not yet implemented.");
+      else await nsLookup(ctx, st, words[0], st.type);
+    }
+    return true;
+  }
+
+  async function nslookupRun(ctx) {
+    const st = {
+      type: 'A', defaults: true, cls: 'IN', port: 53, timeout: 0, tries: 3, recurse: true, tcp: false, search: true,
+      searchList: (ctx.machine.search || []).slice(), servers: systemServers(ctx.machine), arg: null, reached: false, failed: false,
+    };
+    let target = null; let interactive = true;
+    for (let i = 0; i < ctx.args.length; i++) {
+      const a = ctx.args[i];
+      if (/^-ver/i.test(a)) { ctx.eprintln('nslookup ' + BIND); return 0; }
+      if (a[0] === '-' && a.length > 1) nsOption(ctx, st, a.slice(1));
+      else if (a === '-') target = { interactive: true };
+      else if (!target) { target = { name: a, type: st.type }; interactive = false; }
+      else if (i + 1 < ctx.args.length) {
+        ctx.err('Usage:\n   nslookup [-opt ...]             # interactive mode using default server\n   nslookup [-opt ...] - server    # interactive mode using \'server\'\n' +
+          '   nslookup [-opt ...] host        # just look up \'host\' using default server\n   nslookup [-opt ...] host server # just look up \'host\' using \'server\'\n');
+        return 1;
+      } else if (!nsServer(ctx, st, a)) return 1;
+    }
+    if (!interactive) await nsLookup(ctx, st, target.name, target.type);
+    else if (!await nsInteractive(ctx, st)) return 1;
+    ctx.out('\n');
+    return st.failed || !st.reached ? 1 : 0;
+  }
+
+  K.cmd.register({
+    name: 'nslookup', pkg: 'bind9-dnsutils', section: 1,
+    summary: 'query Internet name servers interactively',
+    synopsis: 'nslookup [-option] [name | -] [server]',
+    man: 'DESCRIPTION\n       nslookup is a program to query Internet domain name servers. It has two modes: interactive and non-interactive. Interactive mode is entered when no arguments are given, or when the first argument is a hyphen (-) and the second argument is the name or address of a name server. Non-interactive mode prints just the name and requested information for a host or domain.\n\n       An answer that does not come from a server that is authoritative for the name is introduced by "Non-authoritative answer:".\n\nOPTIONS\n       -type=TYPE, -query=TYPE, -q=TYPE\n              Change the type of the information query: A, AAAA, CNAME, MX, NS, PTR, SOA, SRV, TXT, ANY.\n       -port=N, -timeout=N, -retry=N\n              Server port (53), seconds to wait for a reply (5) and number of tries (3).\n       -norecurse, -vc, -nosearch\n              Do not ask for recursion, use TCP, do not use the search list.\n       -version\n              Print the version and exit.\n\nINTERACTIVE COMMANDS\n       host   Look up information for host using the current default server.\n       server domain\n              Change the default server to domain.\n       set keyword[=value]\n              Change state information; "set all" prints the current values, "set type=mx" changes the query type.\n       exit   Exit the program.\n\nEXAMPLES\n       nslookup web01.halcyon.lab\n              Look up a lab host with the default server.\n       nslookup -type=mx halcyon.lab 10.10.10.53\n              Ask the lab name server for the mail exchangers of the domain.',
+    run: nslookupRun,
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
