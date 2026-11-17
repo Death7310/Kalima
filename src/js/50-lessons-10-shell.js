@@ -238,7 +238,7 @@
         ),
         hint: 'Type `cd`, a space, then the path beginning with `/`.',
         solution: 'cd ' + DATA,
-        check: { cwd: DATA },
+        check: { cwd: DATA, any: [{ cmd: 'cd' }, { line: /kalima/ }] },
       },
       {
         id: 'relative',
@@ -452,7 +452,7 @@
         ),
         hint: 'The goal is to arrive in `' + SAMPLES + '`. Typing the whole path by hand also works, but try the Tab key.',
         solution: 'cd ' + SAMPLES,
-        check: { cwd: SAMPLES },
+        check: { cwd: SAMPLES, any: [{ cmd: 'cd' }, { line: /shell/ }] },
       },
       {
         id: 'history',

@@ -198,6 +198,8 @@
 
   /* ---------------------------------------------------------- files-manage */
   const WORK = '/home/kali/practice/files';
+  /** The line took the learner into the working directory (a cd of any spelling, or the path typed as a command). */
+  const inWork = { cwd: WORK, any: [{ cmd: 'cd' }, { line: /practice\/files/ }] };
   const exists = (path, type) => ({ file: type ? { path, type } : { path } });
   const gone = (path) => ({ file: { path, exists: false } });
   /** Is `path` itself a symbolic link (not the file it points to)? */
@@ -249,7 +251,7 @@
         ),
         hint: 'The argument is the path you just created, without the last part.',
         solution: 'cd ~/practice/files',
-        check: { cwd: WORK },
+        check: inWork,
       },
       {
         id: 'touch',
@@ -453,7 +455,7 @@
         ),
         hint: 'Type the whole line, including the two ampersands with a space on each side.',
         solution: 'mkdir -p ~/practice/files && cd ~/practice/files',
-        check: { cwd: WORK },
+        check: inWork,
       },
       {
         id: 'write',
@@ -674,7 +676,7 @@
         ),
         hint: 'Type the whole line. `&&` runs the `cd` only if the `mkdir` succeeded.',
         solution: 'mkdir -p ~/practice/files && cd ~/practice/files',
-        check: { cwd: WORK },
+        check: inWork,
       },
       {
         id: 'copy',
