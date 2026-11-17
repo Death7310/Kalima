@@ -188,7 +188,10 @@
     }
     installCommand(def) {
       const stub = '\x7fELF\x02\x01\x01\0kalima:' + (def.aliasOf || def.name) + '\n';
-      this.vfs.seed(def.path, stub, { mode: def.mode == null ? 0o755 : def.mode });
+      // Stubs look like the binaries they stand for: a believable size and the image build date.
+      const h = K.util.hash32('bin:' + (def.aliasOf || def.name));
+      const node = this.vfs.seed(def.path, stub, { mode: def.mode == null ? 0o755 : def.mode, mtime: Date.UTC(2026, 9, 1 + (h % 24), 6 + (h % 11), h % 60) });
+      node.vsize = 14488 + (h % 64) * 4096 + ((h >>> 9) % 9) * 8192;
     }
     /** Resolve an executable file path back to its command definition (or null). */
     commandAt(path) {

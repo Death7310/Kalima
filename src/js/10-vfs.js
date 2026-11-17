@@ -3,6 +3,7 @@
  * Node shapes:
  *   dir   { t:'d', mode, uid, gid, mtime, ino, ch: Map<name,node> }
  *   file  { t:'f', mode, uid, gid, mtime, ino, data: string, dyn?: key }
+ *         (vsize?: reported size for simulated binaries whose data is only a stub)
  *   link  { t:'l', mode:0o777, uid, gid, mtime, ino, target: string }
  *   chdev { t:'c', mode, uid, gid, mtime, ino, dev: 'null'|'zero'|'random'|'tty' }
  *
@@ -150,7 +151,7 @@
 
     _info(node) {
       let size = 0; let nlink = 1;
-      if (node.t === 'f') size = K.util.byteLen(this._content(node));
+      if (node.t === 'f') size = node.vsize != null ? node.vsize : K.util.byteLen(this._content(node));
       else if (node.t === 'd') {
         size = 4096; nlink = 2;
         for (const c of node.ch.values()) if (c.t === 'd') nlink++;
@@ -194,6 +195,7 @@
         if (!this.access(node, cred, 'w')) throw new FsError('EACCES', path);
         if (node.t === 'c') return;
         if (node.dyn) { delete node.dyn; node.data = ''; }
+        delete node.vsize;
         node.data = o.append ? node.data + data : data;
         node.mtime = K.clock.now();
       } else {
