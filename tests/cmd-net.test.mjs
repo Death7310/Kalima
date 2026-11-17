@@ -118,3 +118,159 @@ test('ping: works in a pipeline', async () => {
   const r = await sim.out('ping -c 2 10.10.10.10 | grep -c "bytes from"');
   assert.equal(r, '2\n');
 });
+
+/* --------------------------------------------------------------------- ip */
+
+test('ip addr: full layout for lo and eth0', async () => {
+  const sim = await net();
+  const out = await sim.out('ip addr');
+  const lines = out.split('\n');
+  assert.equal(lines[0], '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000');
+  assert.equal(lines[1], '    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00');
+  assert.equal(lines[2], '    inet 127.0.0.1/8 scope host lo');
+  assert.equal(lines[3], '       valid_lft forever preferred_lft forever');
+  assert.equal(lines[4], '    inet6 ::1/128 scope host noprefixroute ');
+  assert.match(lines[6], /^2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000$/);
+  assert.match(lines[7], /^    link\/ether [0-9a-f:]{17} brd ff:ff:ff:ff:ff:ff$/);
+  assert.equal(lines[8], '    inet 10.10.10.5/24 brd 10.10.10.255 scope global dynamic noprefixroute eth0');
+  assert.match(lines[9], /^       valid_lft \d+sec preferred_lft \d+sec$/);
+  assert.match(lines[10], /^    inet6 fe80::[0-9a-f:]+\/64 scope link noprefixroute $/);
+});
+
+test('ip: brief, oneline, -4 and abbreviations', async () => {
+  const sim = await net();
+  const br = (await sim.out('ip -br a')).split('\n');
+  assert.equal(br[0], 'lo               UNKNOWN        127.0.0.1/8 ::1/128 ');
+  assert.match(br[1], /^eth0             UP             10\.10\.10\.5\/24 fe80::[0-9a-f:]+\/64 $/);
+  const brl = (await sim.out('ip -br link')).split('\n');
+  assert.match(brl[1], /^eth0             UP             [0-9a-f:]{17} <BROADCAST,MULTICAST,UP,LOWER_UP> $/);
+  const one = (await sim.out('ip -o -4 addr show eth0')).trim();
+  assert.match(one, /^2: eth0    inet 10\.10\.10\.5\/24 brd 10\.10\.10\.255 scope global dynamic noprefixroute eth0\\       valid_lft \d+sec preferred_lft \d+sec$/);
+  assert.equal((await sim.out('ip -4 -br a s lo')), 'lo               UNKNOWN        127.0.0.1/8 \n');
+  assert.equal(await sim.out('ip a show dev lo | head -1'), '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000\n');
+});
+
+test('ip link: mode field, statistics and errors', async () => {
+  const sim = await net();
+  const l = await sim.out('ip -s link show eth0');
+  assert.match(l, /^2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000\n/);
+  assert.match(l, /\n    RX:  bytes packets errors dropped  missed   mcast\n +\d+ +\d+ +0 +0 +0 +0\n    TX:  bytes packets errors dropped carrier collsns\n/);
+  const r = await sim.run('ip addr show dev nope');
+  assert.equal(r.err, 'Device "nope" does not exist.\n');
+  assert.equal(r.code, 1);
+});
+
+test('ip route: show, get, and abbreviations', async () => {
+  const sim = await net();
+  const out = await sim.out('ip route');
+  const [d, c] = out.split('\n');
+  assert.equal(d, 'default via 10.10.10.1 dev eth0 proto dhcp src 10.10.10.5 metric 100 ');
+  assert.equal(c, '10.10.10.0/24 dev eth0 proto kernel scope link src 10.10.10.5 metric 100 ');
+  assert.equal(await sim.out('ip r get 10.10.10.10'), '10.10.10.10 dev eth0 src 10.10.10.5 uid 1000 \n    cache \n');
+  assert.equal(await sim.out('ip route get 8.8.8.8'), '8.8.8.8 via 10.10.10.1 dev eth0 src 10.10.10.5 uid 1000 \n    cache \n');
+  assert.equal(await sim.out('ip route get 127.0.0.1'), 'local 127.0.0.1 dev lo src 127.0.0.1 uid 1000 \n    cache <local> \n');
+});
+
+test('ip: changes need root and really change the machine', async () => {
+  const sim = await net();
+  sim.machine.sudoStamp = {};
+  let r = await sim.run('ip link set dev eth0 down');
+  assert.equal(r.err, 'RTNETLINK answers: Operation not permitted\n');
+  assert.equal(r.code, 2);
+  assert.equal(sim.machine.ifaces[1].state, 'UP');
+  r = await sim.run('ip route add 192.168.9.0/24 via 10.10.10.1');
+  assert.equal(r.err, 'RTNETLINK answers: Operation not permitted\n');
+  assert.equal((await sim.run('ip addr add 10.10.10.77/24 dev eth0')).err, 'RTNETLINK answers: Operation not permitted\n');
+});
+
+test('ip link set down/up: routing reacts and routes come back', async () => {
+  const sim = await net();
+  assert.equal((await sim.run('sudo ip link set dev eth0 down')).code, 0);
+  assert.match(await sim.out('ip -br link'), /eth0             DOWN           [0-9a-f:]{17} <BROADCAST,MULTICAST> /);
+  assert.equal(await sim.out('ip route'), '');
+  const p = await sim.run('ping -c 1 10.10.10.10');
+  assert.equal(p.err, 'ping: connect: Network is unreachable\n');
+  assert.equal((await sim.run('sudo ip link set eth0 up')).code, 0);
+  assert.match(await sim.out('ip route'), /^default via 10\.10\.10\.1 dev eth0 proto dhcp/);
+  assert.equal((await sim.run('ping -c 1 10.10.10.10')).code, 0);
+});
+
+test('ip addr add/del and ip route add/del', async () => {
+  const sim = await net();
+  assert.equal((await sim.run('sudo ip addr add 10.10.10.77/24 dev eth0')).code, 0);
+  assert.match(await sim.out('ip -4 addr show eth0'), /inet 10\.10\.10\.77\/24 brd 10\.10\.10\.255 scope global secondary eth0/);
+  assert.equal((await sim.run('sudo ip addr add 10.10.10.77/24 dev eth0')).err, 'RTNETLINK answers: File exists\n');
+  assert.equal((await sim.run('sudo ip addr del 10.10.10.77/24 dev eth0')).code, 0);
+  assert.equal((await sim.run('sudo ip addr del 10.10.10.77/24 dev eth0')).err, 'RTNETLINK answers: Cannot assign requested address\n');
+  assert.equal((await sim.run('sudo ip route add 172.30.0.0/16 via 10.10.10.1')).code, 0);
+  assert.match(await sim.out('ip route'), /\n172\.30\.0\.0\/16 via 10\.10\.10\.1 dev eth0 \n/);
+  assert.equal((await sim.run('sudo ip route add 172.30.0.0/16 via 10.10.10.1')).err, 'RTNETLINK answers: File exists\n');
+  assert.equal((await sim.run('sudo ip route add 172.31.0.0/16 via 192.168.77.1')).err, 'Error: Nexthop has invalid gateway.\n');
+  assert.equal((await sim.run('sudo ip route del 172.30.0.0/16')).code, 0);
+  assert.equal((await sim.run('sudo ip route del 172.30.0.0/16')).err, 'RTNETLINK answers: No such process\n');
+  assert.equal((await sim.run('sudo ip route del default')).code, 0);
+  assert.equal((await sim.run('ping -c 1 8.8.8.8')).err, 'ping: connect: Network is unreachable\n');
+});
+
+test('ip addr del of the only address removes its routes', async () => {
+  const sim = await net();
+  await sim.run('sudo ip addr del 10.10.10.5/24 dev eth0');
+  assert.equal(await sim.out('ip route'), '');
+  await sim.run('sudo ip addr add 10.10.10.5/24 dev eth0');
+  assert.equal(await sim.out('ip route'), '10.10.10.0/24 dev eth0 proto kernel scope link src 10.10.10.5 \n');
+});
+
+test('ip link: mtu, address, dummy devices', async () => {
+  const sim = await net();
+  await sim.run('sudo ip link set eth0 mtu 9000');
+  assert.match(await sim.out('ip link show eth0'), /mtu 9000/);
+  await sim.run('sudo ip link set dev eth0 address 02:00:00:aa:bb:cc');
+  assert.match(await sim.out('ip link show eth0'), /link\/ether 02:00:00:aa:bb:cc/);
+  assert.equal((await sim.run('sudo ip link set dev eth0 address nonsense')).err, 'Error: argument "nonsense" is wrong: Invalid address\n');
+  await sim.run('sudo ip link add dummy0 type dummy');
+  assert.match(await sim.out('ip -br link'), /^dummy0 +DOWN +[0-9a-f:]{17} <BROADCAST,NOARP> $/m);
+  await sim.run('sudo ip addr add 192.168.50.1/24 dev dummy0');
+  await sim.run('sudo ip link set dummy0 up');
+  assert.match(await sim.out('ip route'), /192\.168\.50\.0\/24 dev dummy0 proto kernel scope link src 192\.168\.50\.1/);
+  await sim.run('sudo ip link del dummy0');
+  assert.doesNotMatch(await sim.out('ip -br link'), /dummy0/);
+});
+
+test('ip neigh shows what ping learned; flush clears it', async () => {
+  const sim = await net();
+  await sim.run('ping -c 1 10.10.10.10');
+  assert.match(await sim.out('ip neigh'), /^10\.10\.10\.10 dev eth0 lladdr [0-9a-f:]{17} REACHABLE\n$/);
+  sim.K.net.hostById('web01').up = false;
+  sim.machine.arp.clear();
+  await sim.run('ping -c 1 -W 1 10.10.10.10');
+  assert.equal(await sim.out('ip neigh'), '10.10.10.10 dev eth0  FAILED\n');
+  assert.equal((await sim.run('sudo ip neigh flush all')).code, 0);
+  assert.equal(await sim.out('ip neigh'), '');
+});
+
+test('ip: errors, options and version', async () => {
+  const sim = await net();
+  let r = await sim.run('ip foo');
+  assert.equal(r.err, 'Object "foo" is unknown, try "ip help".\n');
+  assert.equal(r.code, 255);
+  r = await sim.run('ip addr frobnicate');
+  assert.equal(r.err, 'Command "frobnicate" is unknown, try "ip addr help".\n');
+  r = await sim.run('ip -x addr');
+  assert.equal(r.err, 'Option "-x" is unknown, try "ip -help".\n');
+  assert.equal((await sim.run('ip -V')).out, 'ip utility, iproute2-6.15.0\n');
+  r = await sim.run('ip');
+  assert.match(r.err, /^Usage: ip \[ OPTIONS \] OBJECT \{ COMMAND \| help \}/);
+  assert.equal(r.code, 255);
+  assert.match((await sim.run('ip -4 route add foo via 10.10.10.1')).err, /^Error: inet prefix is expected rather than "foo"\./);
+});
+
+test('ip: colour with --color=always, json and pipelines', async () => {
+  const sim = await net();
+  assert.match(await sim.out('ip --color=always -br a'), /\x1b\[36mlo\x1b\[0m/);
+  assert.doesNotMatch(await sim.out('ip --color=auto -br a'), /\x1b/);
+  const j = JSON.parse(await sim.out('ip -j addr show eth0'));
+  assert.equal(j[0].ifname, 'eth0');
+  assert.equal(j[0].addr_info[0].local, '10.10.10.5');
+  assert.equal(await sim.out('ip -o -4 addr | grep -c inet'), '2\n');
+  assert.equal(await sim.out('ip -4 -br a | grep eth0 | tr -s " " | cut -d" " -f3'), '10.10.10.5/24\n');
+});
