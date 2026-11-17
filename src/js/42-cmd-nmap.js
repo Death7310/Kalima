@@ -259,12 +259,14 @@
   const badOption = (text) => new Fatal('nmap: ' + text + '\nSee the output of nmap -h for a summary of options.\n', 255);
 
   // Long options: 1 = takes an argument.
-  const NMAP_LONG = { help: 0, version: 0, open: 0, reason: 0, 'top-ports': 1, exclude: 1, unprivileged: 0 };
-  const NMAP_FLAGS = { n: 'noDns', R: 'alwaysDns', F: 'fast', r: 'sequential', h: 'help', V: 'version' };
-  const SCAN_LETTERS = { S: 'syn', T: 'connect', n: 'pingOnly', P: 'pingOnly' };
+  const NMAP_LONG = { help: 0, version: 0, open: 0, reason: 0, 'top-ports': 1, exclude: 1, unprivileged: 0, traceroute: 0 };
+  const NMAP_FLAGS = { n: 'noDns', R: 'alwaysDns', F: 'fast', r: 'sequential', h: 'help', V: 'version', O: 'os', A: 'aggressive' };
+  const SCAN_LETTERS = { S: 'syn', T: 'connect', U: 'udp', V: 'detect', n: 'pingOnly', P: 'pingOnly' };
+  const OUTPUT_KINDS = { N: ['normal'], G: ['grepable'], X: ['xml'], A: ['normal', 'grepable', 'xml'] };
+  const OUTPUT_SUFFIX = { normal: '.nmap', grepable: '.gnmap', xml: '.xml' };
 
   function nmapOptions(args) {
-    const o = { targets: [], verbose: 0, timing: 3, scans: {} };
+    const o = { targets: [], verbose: 0, timing: 3, scans: {}, files: {} };
     const value = (i, attached, letter) => {
       if (attached) return [attached, i];
       if (i + 1 >= args.length) throw badOption("option requires an argument -- '" + letter + "'");
@@ -293,6 +295,11 @@
         case 'i':
           if (rest[0] !== 'L') throw badOption("unrecognized option '" + a + "'");
           [v, i] = value(i, rest.slice(1), 'i'); o.inputFile = v;
+          break;
+        case 'o':
+          if (!OUTPUT_KINDS[rest[0]]) throw badOption("unrecognized option '" + a + "'");
+          [v, i] = value(i, rest.slice(1), 'o');
+          for (const kind of OUTPUT_KINDS[rest[0]]) o.files[kind] = rest[0] === 'A' ? v + OUTPUT_SUFFIX[kind] : v;
           break;
         case 'v': o.verbose += /^\d+$/.test(rest) ? +rest : /^v*$/.test(rest) ? 1 + rest.length : NaN; if (isNaN(o.verbose)) throw badOption("unrecognized option '" + a + "'"); break;
         default:
@@ -366,20 +373,29 @@
     if (o.scans.syn && o.scans.connect) {
       throw quit('You specified more than one type of TCP scan.  Please choose only one of -sA, -b, -sT, -sF, -sI, -sM, -sN, -sS, -sW, and -sX');
     }
-    if (o.scans.pingOnly && (o.scans.syn || o.scans.connect)) throw quit('-sL and -sn (skip port scan) are not valid with any other scan types');
-    if (o.scans.syn && !o.root) throw quit('You requested a scan type which requires root privileges.');
+    if (o.scans.pingOnly && (o.scans.syn || o.scans.connect || o.scans.udp)) throw quit('-sL and -sn (skip port scan) are not valid with any other scan types');
+    if ((o.scans.syn || o.scans.udp) && !o.root) throw quit('You requested a scan type which requires root privileges.');
+    if (o.os && !o.root) throw quit('TCP/IP fingerprinting (for OS scan) requires root privileges.');
+    if (o.traceroute && !o.root) throw quit('Traceroute has to be run as root');
+    if (o.aggressive) Object.assign(o, { os: o.root, traceroute: o.root }); // -A quietly leaves out what needs root
+    o.detect = !!(o.scans.detect || o.aggressive);
     if (o.fast && o.portSpec) {
       throw quit('You cannot use -F (fast scan) with -p (explicit port selection) but see --top-ports and --port-ratio to fast scan a range of ports');
     }
     if (o.topPorts != null && !/^[1-9]\d*$/.test(o.topPorts)) throw quit('--top-ports should be an integer 1 or greater');
     o.reason = !!o.reason || o.verbose > 1;
-    o.tcp = o.scans.pingOnly ? null : o.scans.connect || !o.root ? 'connect' : 'syn';
+    o.warnings = [];
     if (o.scans.pingOnly) return o;
-    if (o.portSpec) {
-      const spec = parsePortSpec(o.portSpec);
-      if (spec.duplicates) o.warnings = ['WARNING: Duplicate port number(s) specified.  Are you alert enough to be using Nmap?  Have some coffee or Jolt(tm).'];
-      o.tcpPorts = spec.tcp;
-    } else o.tcpPorts = topPorts('tcp', o.fast ? 100 : o.topPorts ? Math.min(65535, +o.topPorts) : 1000);
+    o.tcp = o.scans.connect ? 'connect' : o.scans.syn ? 'syn' : o.scans.udp ? null : o.root ? 'syn' : 'connect';
+    o.udp = !!o.scans.udp;
+    const spec = o.portSpec ? parsePortSpec(o.portSpec) : null;
+    const amount = o.fast ? 100 : o.topPorts ? Math.min(65535, +o.topPorts) : 1000;
+    if (spec && spec.duplicates) o.warnings.push('WARNING: Duplicate port number(s) specified.  Are you alert enough to be using Nmap?  Have some coffee or Jolt(tm).');
+    if (spec && spec.named.U && !o.udp) o.warnings.push('WARNING: Your ports include "U:" but you haven\'t specified UDP scan with -sU.');
+    o.tcpPorts = spec ? spec.tcp : topPorts('tcp', amount);
+    o.udpPorts = spec ? spec.udp : topPorts('udp', amount);
+    if (o.tcp && !o.tcpPorts.length) { o.warnings.push('WARNING: a TCP scan type was requested, but no tcp ports were specified.  Skipping this scan type.'); o.tcp = null; }
+    if (o.udp && !o.udpPorts.length) { o.warnings.push('WARNING: UDP scan was requested, but no udp ports were specified.  Skipping this scan type.'); o.udp = false; }
     return o;
   }
 
@@ -392,6 +408,7 @@
     const o = run.o; const machine = run.ctx.machine;
     const rt = K.net.route(machine, t.ip);
     const host = rt.host;
+    t.route = rt;
     t.ttl = host && !rt.self ? (host.os.ttl || 64) - rt.hops.length : 64;
     if (rt.self) {
       // A privileged Nmap recognises its own address and does not ping it, so a ping scan has no latency to show.
@@ -400,10 +417,10 @@
     } else if (o.root && rt.direct) {
       // On the local Ethernet segment a privileged Nmap asks with ARP, which no host firewall can refuse.
       Object.assign(t, { method: 'arp', up: rt.ok, reason: rt.ok ? 'arp-response' : 'no-response' });
-      run.raw.sent += rt.ok ? 1 : 2; run.raw.sentBytes += rt.ok ? 28 : 56;
+      run.sent(rt.ok ? 1 : 2, 28);
       if (rt.ok) {
         Object.assign(t, { rtt: K.net.jitter(host.latency.base, host.latency.jitter), mac: host.mac.toUpperCase(), vendor: macVendor(host) });
-        run.raw.rcvd++; run.raw.rcvdBytes += 28;
+        run.received(1, 28);
       }
     } else if (o.skipPing) {
       Object.assign(t, { method: 'none', up: true, reason: 'user-set' });
@@ -422,13 +439,13 @@
     const echo = K.net.ping(machine, t.ip, 0, { id: run.ctx.pid & 0xffff });
     const syn = K.net.tcp(machine, t.ip, 443);
     const ack = K.net.tcp(machine, t.ip, 80);
-    run.raw.sent += 4; run.raw.sentBytes += 152;
+    run.sent(4, 38);
     let reason = 'no-response'; let rtt;
     if (echo.status === 'reply') { reason = 'echo-reply'; rtt = echo.rtt; }
     else if (syn.state !== 'filtered') { reason = syn.state === 'open' ? 'syn-ack' : 'reset'; rtt = syn.rtt; }
     else if (ack.state !== 'filtered') { reason = 'reset'; rtt = ack.rtt; }
     const up = reason !== 'no-response';
-    if (up) { run.raw.rcvd++; run.raw.rcvdBytes += 40; }
+    if (up) run.received(1, 40);
     Object.assign(t, { method: 'raw', up, reason, rtt, showTtl: up });
   }
 
@@ -477,22 +494,32 @@
 
   /* ---------------------------------------------------------- nmap: port scan */
 
-  const SCAN_NAMES = { syn: 'SYN Stealth Scan', connect: 'Connect Scan' };
+  const SCAN_NAMES = { syn: 'SYN Stealth Scan', connect: 'Connect Scan', udp: 'UDP Scan' };
+  const SCAN_TYPES = { syn: 'syn', connect: 'connect', udp: 'udp' };
   const CHUNK = 2048; // ports probed between two chances to press Ctrl-C
+  const UDP_BURST = 6;       // ICMP port-unreachable replies a Linux host sends before it starts rate limiting
+  const UDP_LIMITED = 900;   // ms per closed UDP port once the target limits its ICMP errors
 
   function probePort(run, t, kind, port) {
-    const r = K.net.tcp(run.ctx.machine, t.ip, port);
-    const raw = kind === 'syn';
-    if (raw) {
-      const silent = r.state === 'filtered';
-      run.raw.sent += silent ? 2 : 1; run.raw.sentBytes += silent ? 88 : 44;
-      if (!silent) { run.raw.rcvd++; run.raw.rcvdBytes += r.state === 'open' ? 44 : 40; }
+    const machine = run.ctx.machine;
+    if (kind === 'udp') {
+      const r = K.net.udp(machine, t.ip, port);
+      const answered = r.state === 'open' || r.state === 'closed';
+      run.sent(answered ? 1 : 2, 28);
+      if (answered) run.received(1, r.state === 'open' ? 60 : 56);
+      return { state: r.state, reason: r.reason, answered, ttl: answered ? t.ttl : 0, service: r.state === 'open' ? r.service : null };
     }
-    if (t.rtt == null && r.state !== 'filtered') t.rtt = r.rtt;
+    const r = K.net.tcp(machine, t.ip, port);
+    const raw = kind === 'syn'; const answered = r.state !== 'filtered';
+    if (raw) {
+      run.sent(answered ? 1 : 2, 44);
+      if (answered) run.received(1, r.state === 'open' ? 44 : 40);
+    }
+    if (t.rtt == null && answered) t.rtt = r.rtt;
     return {
-      state: r.state, service: r.state === 'open' ? r.service : null,
+      state: r.state, answered, service: r.state === 'open' ? r.service : null,
       reason: r.state === 'closed' && !raw ? 'conn-refused' : r.reason,
-      ttl: raw && r.state !== 'filtered' ? t.ttl : 0,
+      ttl: raw && answered ? t.ttl : 0,
     };
   }
 
@@ -505,21 +532,24 @@
   }
 
   async function scanHostPorts(run, t, kind, ports, share) {
-    const scan = { proto: 'tcp', total: ports.length, states: {}, services: new Map() };
+    const scan = { kind, proto: kind === 'udp' ? 'udp' : 'tcp', total: ports.length, states: {}, services: new Map(), versions: new Map(), scripts: new Map() };
+    let unreachables = 0;
     t.scans.push(scan);
     for (let i = 0; i < ports.length; i += CHUNK) {
-      let silent = 0; const end = Math.min(ports.length, i + CHUNK);
+      let silent = 0; let limited = 0; const end = Math.min(ports.length, i + CHUNK);
       for (let j = i; j < end; j++) {
         const r = probePort(run, t, kind, ports[j]);
         const group = scan.states[r.state] || (scan.states[r.state] = { state: r.state, reason: r.reason, ttl: r.ttl, ports: [] });
         group.ports.push(ports[j]);
-        if (r.state === 'filtered') silent++;
+        if (!r.answered) silent++;
+        if (kind === 'udp' && r.state === 'closed' && ++unreachables > UDP_BURST) limited++;
         if (r.state === 'open') {
           scan.services.set(ports[j], r.service);
           run.verbose('Discovered open port ' + ports[j] + '/' + scan.proto + ' on ' + t.ip);
         }
       }
-      await run.wait(portScanCost(run.o, end - i - silent, silent, ports.length) * share);
+      const waitForErrors = run.o.timing > 2 ? limited * UDP_LIMITED : 0;
+      await run.wait((portScanCost(run.o, end - i - silent, silent, ports.length) + waitForErrors) * share);
     }
   }
 
@@ -537,6 +567,135 @@
         }
       }
     }, () => ports.length * hosts.length + ' total ports');
+  }
+
+  /* ------------------------------------------- nmap: service and OS detection */
+
+  const TLS_BASE = { https: 'http', imaps: 'imap', pop3s: 'pop3', smtps: 'smtp', ldaps: 'ldap', ftps: 'ftp', 'domain-s': 'domain' };
+
+  /** What -sV learns from a service record: the SERVICE cell and the VERSION text. */
+  function versionInfo(svc, proto, port) {
+    const extra = svc.tls && svc.extra === 'ssl' ? '' : svc.extra || '';
+    const known = !!(svc.product || svc.version || extra) || svc.name === 'tcpwrapped';
+    const core = [svc.product, svc.version].filter(Boolean).join(' ');
+    return {
+      // An unidentified service keeps its nmap-services name with a question mark.
+      name: (svc.tls ? 'ssl/' : '') + (known ? (svc.tls && TLS_BASE[svc.name]) || svc.name : serviceName(proto, port) + '?'),
+      known, product: svc.product || '', version: svc.version || '', extra, tunnel: svc.tls ? 'ssl' : '',
+      text: core + (extra ? (core ? ' ' : '') + '(' + extra + ')' : ''),
+    };
+  }
+
+  // What identified services give away about the machine behind them.
+  const SERVICE_HINTS = [
+    { match: /OpenSSH.*(Debian|Ubuntu)|Debian Linux|\((Debian|Ubuntu)\)/, os: 'Linux', cpe: 'cpe:/o:linux:linux_kernel' },
+    { match: /^vsftpd/, os: 'Unix' },
+    { match: /^Microsoft /, os: 'Windows', cpe: 'cpe:/o:microsoft:windows' },
+    { match: /LaserJet|JetDirect/, device: 'printer' },
+    { match: /rtspd|IP Camera/i, device: 'webcam' },
+  ];
+
+  /** The "Service Info:" summary line for a host, or '' when the services say nothing about it. */
+  function serviceInfo(t, services) {
+    const found = { host: [], os: [], device: [], cpe: [] };
+    const note = (kind, value) => { if (value && found[kind].indexOf(value) < 0) found[kind].push(value); };
+    for (const svc of services) {
+      const text = [svc.product, svc.version, svc.extra].filter(Boolean).join(' ');
+      const greeting = /^220 (\S+) ESMTP/.exec(svc.banner || '');
+      if (greeting) note('host', greeting[1]);
+      if (/Active Directory|Samba smbd/.test(text) && t.host) note('host', t.host.hostname.toUpperCase());
+      for (const hint of SERVICE_HINTS) {
+        if (!hint.match.test(text)) continue;
+        note('os', hint.os); note('device', hint.device); note('cpe', hint.cpe);
+      }
+    }
+    const part = (kind, one, many) => (found[kind].length ? [(found[kind].length > 1 ? many : one) + ': ' + found[kind].join(', ')] : []);
+    return part('host', 'Host', 'Hosts').concat(part('os', 'OS', 'OSs'), part('device', 'Device', 'Devices'), part('cpe', 'CPE', 'CPE')).join('; ');
+  }
+
+  const openPorts = (t) => t.scans.reduce((all, scan) => all.concat(((scan.states.open || {}).ports || []).map((port) => ({ scan, port, service: scan.services.get(port) }))), []);
+
+  async function serviceScan(run, hosts) {
+    const work = hosts.map((t) => ({ t, open: openPorts(t) })).filter((w) => w.open.length);
+    if (!work.length) return;
+    const count = plural(work.reduce((n, w) => n + w.open.length, 0), 'service', 'services');
+    const where = work.length === 1 ? hostLabel(run.o, work[0].t) : work.length + ' hosts';
+    await phase(run, 'Service scan', count + ' on ' + where, async () => {
+      let quiet = false; let unknown = false;
+      for (const w of work) {
+        for (const entry of w.open) {
+          const info = versionInfo(entry.service, entry.scan.proto, entry.port);
+          entry.scan.versions.set(entry.port, info);
+          if (!entry.service.banner) quiet = true;
+          if (!info.known) unknown = true;
+        }
+        w.t.serviceInfo = serviceInfo(w.t, w.open.map((e) => e.service));
+      }
+      // A service that does not greet is only asked after Nmap has listened for six seconds;
+      // one that matches nothing costs another round of probes.
+      const ms = (quiet ? 6000 : 250) + (unknown ? 5000 : 0) + parseInt(count, 10) * 110 + K.net.jitter(40, 80);
+      await run.wait(ms * SPEED[run.o.timing]);
+    }, () => count + ' on ' + plural(work.length, 'host', 'hosts'));
+  }
+
+  /** What -O concludes about a host from host.os, and how sure it may be given the ports it found. */
+  function osGuess(t) {
+    const tcp = t.scans.find((scan) => scan.proto === 'tcp') || { states: {} };
+    const info = t.host && t.host.os && t.host.os.details ? t.host.os : null;
+    return {
+      info, open: !!tcp.states.open, ideal: !!(tcp.states.open && tcp.states.closed),
+      accuracy: 86 + (U.hash32('os:' + t.ip) % 10),
+      distance: t.method === 'self' ? 0 : t.route.hops.length + 1,
+    };
+  }
+
+  function osRunning(info) {
+    return (info.vendor === info.family ? info.vendor : info.vendor + ' ' + info.family) + (info.gen ? ' ' + info.gen : '');
+  }
+
+  function osLines(os) {
+    const lines = []; const info = os.info;
+    if (!os.ideal) lines.push('Warning: OSScan results may be unreliable because we could not find at least 1 open and 1 closed port');
+    if (!info || !os.open) lines.push('Too many fingerprints match this host to give specific OS details');
+    else if (os.ideal) lines.push('Device type: ' + info.type, 'Running: ' + osRunning(info), 'OS CPE: ' + info.cpe, 'OS details: ' + info.details);
+    else {
+      lines.push('Device type: ' + info.type, 'Running (JUST GUESSING): ' + osRunning(info) + ' (' + os.accuracy + '%)', 'OS CPE: ' + info.cpe,
+        'Aggressive OS guesses: ' + info.details + ' (' + os.accuracy + '%)', 'No exact OS matches for host (test conditions non-ideal).');
+    }
+    lines.push('Network Distance: ' + plural(os.distance, 'hop', 'hops'));
+    return lines;
+  }
+
+  async function osScan(run, hosts) {
+    const share = hosts.length > 1 ? 0.4 : 1;
+    for (const t of hosts) {
+      run.verbose('Initiating OS detection (try #1) against ' + hostLabel(run.o, t));
+      t.os = osGuess(t);
+      run.sent(16, 60); if (t.os.open) run.received(12, 52);
+      await run.wait(K.net.jitter(t.os.ideal ? 1500 : 3200, 500) * SPEED[run.o.timing] * share);
+    }
+  }
+
+  /** --traceroute: the hop table of each host, built from the route the engine reports. */
+  async function traceroute(run, hosts) {
+    await phase(run, 'Traceroute', null, async () => {
+      for (const t of hosts) {
+        if (t.method === 'self') continue;
+        const hops = t.route.hops.map((hop) => (hop.silent ? null : { rtt: K.net.jitter(hop.rtt, hop.rtt * 0.1), label: hop.name ? hop.name + ' (' + hop.ip + ')' : hop.ip }));
+        hops.push({ rtt: t.rtt == null ? t.route.rtt : t.rtt, label: hostLabel(run.o, t) });
+        const rows = [['HOP', 'RTT', 'ADDRESS']];
+        for (let i = 0; i < hops.length; i++) {
+          if (hops[i]) { rows.push([String(i + 1), hops[i].rtt.toFixed(2) + ' ms', hops[i].label]); continue; }
+          let j = i;
+          while (!hops[j + 1]) j++;
+          rows.push([String(i + 1), '...', j > i ? String(j + 1) : '']);
+          i = j;
+        }
+        const open = openPorts(t).find((e) => e.scan.proto === 'tcp');
+        t.trace = [t.route.direct ? 'TRACEROUTE' : 'TRACEROUTE (using port ' + (open ? open.port : 80) + '/tcp)'].concat(alignRows(rows));
+      }
+      await run.wait(K.net.jitter(30, 30) * hosts.length);
+    });
   }
 
   /* ------------------------------------------------------------- nmap: report */
@@ -566,7 +725,7 @@
       const shown = [];
       for (const g of Object.values(scan.states)) {
         if (ignored(g.state)) hidden.push({ count: g.ports.length, state: g.state, proto: scan.proto, reason: g.reason, ports: g.ports });
-        else for (const port of g.ports) shown.push({ port, proto: scan.proto, state: g.state, reason: g.reason, ttl: g.ttl, service: scan.services.get(port) });
+        else for (const port of g.ports) shown.push({ port, proto: scan.proto, state: g.state, reason: g.reason, ttl: g.ttl, version: scan.versions.get(port) });
       }
       rows.push.apply(rows, shown.sort((a, b) => a.port - b.port));
     }
@@ -574,13 +733,16 @@
     return { rows, hidden, total };
   }
 
+  const rowService = (r) => (r.version ? r.version.name : serviceName(r.proto, r.port));
+
   function portTable(o, rows) {
     const cells = rows.map((r) => {
-      const line = [r.port + '/' + r.proto, r.state, serviceName(r.proto, r.port)];
+      const line = [r.port + '/' + r.proto, r.state, rowService(r)];
       if (o.reason) line.push(r.reason + (r.ttl ? ' ttl ' + r.ttl : ''));
+      if (o.detect) line.push(r.version ? r.version.text : '');
       return line;
     });
-    return alignRows([['PORT', 'STATE', 'SERVICE'].concat(o.reason ? ['REASON'] : [])].concat(cells));
+    return alignRows([['PORT', 'STATE', 'SERVICE'].concat(o.reason ? ['REASON'] : [], o.detect ? ['VERSION'] : [])].concat(cells));
   }
 
   /** The lines of one host's report, or [] when --open leaves nothing to say about it. */
@@ -600,8 +762,147 @@
       if (sum.rows.length) lines.push.apply(lines, portTable(o, sum.rows));
     }
     if (t.mac) lines.push('MAC Address: ' + t.mac + ' (' + t.vendor + ')');
+    if (t.os) lines.push.apply(lines, osLines(t.os));
+    if (t.serviceInfo) lines.push('Service Info: ' + t.serviceInfo);
+    if (t.trace) lines.push.apply(lines, [''].concat(t.trace));
     if (t.scans.length) lines.push('');
     return lines;
+  }
+
+  /* ------------------------------------------------------- nmap: output files */
+
+  /** C's ctime() without the newline: "Fri Nov 13 14:30:00 2026". */
+  function ctime(ms) {
+    const d = new Date(ms);
+    return U.DAYS[d.getUTCDay()] + ' ' + U.MONTHS[d.getUTCMonth()] + ' ' + String(d.getUTCDate()).padStart(2) + ' ' +
+      d.toISOString().slice(11, 19) + ' ' + d.getUTCFullYear();
+  }
+
+  const xmlText = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;').replace(/\n/g, '&#xa;');
+  /** attrs({a: 1, b: null}) -> ' a="1"' (attributes without a value are left out). */
+  const attrs = (o) => Object.keys(o).filter((k) => o[k] != null && o[k] !== '').map((k) => ' ' + k + '="' + xmlText(o[k]) + '"').join('');
+
+  const scanStats = (run) => plural(run.total, 'IP address', 'IP addresses') + ' (' + plural(run.up, 'host up', 'hosts up') + ') scanned in ' + (run.elapsed / 1000).toFixed(2) + ' seconds';
+  const commandLine = (run) => run.ctx.argv.join(' ');
+  const initiated = (run) => 'Nmap ' + NMAP_VERSION + ' scan initiated ' + ctime(run.started) + ' as: ' + commandLine(run);
+  /** The protocols a run scanned, as [{proto, kind, ports}]. */
+  const scansOf = (o) => (o.tcp ? [{ proto: 'tcp', kind: o.tcp, ports: o.tcpPorts }] : []).concat(o.udp ? [{ proto: 'udp', kind: 'udp', ports: o.udpPorts }] : []);
+
+  function normalOutput(run) {
+    return ['# ' + initiated(run)].concat(run.normal, ['# Nmap done at ' + ctime(run.now()) + ' -- ' + scanStats(run)]).join('\n') + '\n';
+  }
+
+  /** -oG: one "Status" line per host and one "Ports" line when ports were scanned. */
+  function grepableOutput(run) {
+    const o = run.o; const lines = ['# ' + initiated(run)];
+    if (o.verbose) {
+      const list = (proto) => { const s = scansOf(o).find((x) => x.proto === proto); return '(' + (s ? s.ports.length + ';' + formatRanges(s.ports) : '0;') + ')'; };
+      lines.push('# Ports scanned: TCP' + list('tcp') + ' UDP' + list('udp') + ' SCTP(0;) PROTOCOLS(0;)');
+    }
+    for (const t of run.hosts) {
+      const host = 'Host: ' + t.ip + ' (' + (t.given || t.ptr || '') + ')';
+      lines.push(host + '\tStatus: ' + (t.up ? 'Up' : 'Down'));
+      if (!t.up || !t.scans.length) continue;
+      const sum = portSummary(o, t);
+      if (o.open && !sum.rows.length) continue;
+      const ports = sum.rows.map((r) => [r.port, r.state, r.proto, '', rowService(r).replace(/\?$/, ''), '', r.version ? r.version.text.replace(/\//g, '|') : '', ''].join('/'));
+      const counts = {};
+      for (const h of sum.hidden) counts[h.state] = (counts[h.state] || 0) + h.count;
+      lines.push(host + (ports.length ? '\tPorts: ' + ports.join(', ') : '') + Object.keys(counts).map((state) => '\tIgnored State: ' + state + ' (' + counts[state] + ')').join('') +
+        (t.os && t.os.info && t.os.open ? '\tOS: ' + t.os.info.details : ''));
+    }
+    lines.push('# Nmap done at ' + ctime(run.now()) + ' -- ' + scanStats(run));
+    return lines.join('\n') + '\n';
+  }
+
+  function xmlPorts(o, t) {
+    const sum = portSummary(o, t); const out = [];
+    const states = Array.from(new Set(sum.hidden.map((h) => h.state)));
+    for (const state of states) {
+      const parts = sum.hidden.filter((h) => h.state === state);
+      out.push('<extraports' + attrs({ state, count: parts.reduce((n, h) => n + h.count, 0) }) + '>');
+      for (const h of parts) out.push('<extrareasons' + attrs({ reason: h.reason, count: h.count, proto: h.proto, ports: formatRanges(h.ports) }) + '/>');
+      out.push('</extraports>');
+    }
+    for (const r of sum.rows) {
+      const v = r.version;
+      const service = v
+        ? attrs({ name: v.name.replace(/^ssl\/|\?$/g, ''), product: v.product, version: v.version, extrainfo: v.extra, tunnel: v.tunnel, method: v.known ? 'probed' : 'table', conf: v.known ? 10 : 3 })
+        : attrs({ name: serviceName(r.proto, r.port), method: 'table', conf: 3 });
+      const scripts = (r.scripts || []).map((sc) => '<script' + attrs({ id: sc.id, output: sc.lines.join('\n') }) + '/>').join('');
+      out.push('<port' + attrs({ protocol: r.proto, portid: r.port }) + '><state' + attrs({ state: r.state, reason: r.reason, reason_ttl: r.ttl }) + '/><service' + service + '/>' + scripts + '</port>');
+    }
+    out[0] = '<ports>' + (out[0] || '');
+    return out.concat('</ports>');
+  }
+
+  function xmlOs(os) {
+    const out = ['<os>'];
+    if (os.info && os.open) {
+      const accuracy = os.ideal ? 100 : os.accuracy;
+      out.push('<osmatch' + attrs({ name: os.info.details, accuracy, line: 60000 + (U.hash32(os.info.details) % 40000) }) + '>',
+        '<osclass' + attrs({ type: os.info.type, vendor: os.info.vendor, osfamily: os.info.family, osgen: os.info.gen, accuracy }) + '><cpe>' + xmlText(os.info.cpe) + '</cpe></osclass>',
+        '</osmatch>');
+    }
+    return out.concat('</os>', '<distance' + attrs({ value: os.distance }) + '/>');
+  }
+
+  function xmlHost(run, t) {
+    const status = '<status' + attrs({ state: t.up ? 'up' : 'down', reason: t.reason, reason_ttl: t.showTtl ? t.ttl : 0 }) + '/>';
+    const out = [(t.up ? '<host' + attrs({ starttime: Math.floor(run.started / 1000), endtime: Math.floor(t.finished / 1000) }) + '>' : '<host>') + status,
+      '<address' + attrs({ addr: t.ip, addrtype: 'ipv4' }) + '/>'];
+    if (t.mac) out.push('<address' + attrs({ addr: t.mac, addrtype: 'mac', vendor: t.vendor === 'Unknown' ? null : t.vendor }) + '/>');
+    out.push('<hostnames>');
+    if (t.given) out.push('<hostname' + attrs({ name: t.given, type: 'user' }) + '/>');
+    if (t.ptr) out.push('<hostname' + attrs({ name: t.ptr, type: 'PTR' }) + '/>');
+    out.push('</hostnames>');
+    if (t.up && t.scans.length) out.push.apply(out, xmlPorts(run.o, t));
+    if (t.os) out.push.apply(out, xmlOs(t.os));
+    if (t.trace) {
+      out.push('<trace>');
+      for (const row of t.trace.slice(2)) {
+        const m = /^(\d+) +([\d.]+) ms +(?:(\S+) \()?([\d.]+)\)?$/.exec(row);
+        if (m) out.push('<hop' + attrs({ ttl: m[1], ipaddr: m[4], rtt: m[2], host: m[3] }) + '/>');
+      }
+      out.push('</trace>');
+    }
+    if (t.up && t.rtt != null) out.push('<times' + attrs({ srtt: Math.round(t.rtt * 1000), rttvar: Math.round(t.rtt * 400) + 20, to: 100000 }) + '/>');
+    return out.concat('</host>');
+  }
+
+  /** -oX: the nmaprun document Nmap 7.98 writes (xmloutputversion 1.05). */
+  function xmlOutput(run) {
+    const o = run.o; const end = run.now(); const stats = scanStats(run);
+    const out = ['<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE nmaprun>', '<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>',
+      '<!-- ' + initiated(run) + ' -->',
+      '<nmaprun' + attrs({ scanner: 'nmap', args: commandLine(run), start: Math.floor(run.started / 1000), startstr: ctime(run.started), version: NMAP_VERSION, xmloutputversion: '1.05' }) + '>'];
+    for (const scan of scansOf(o)) out.push('<scaninfo' + attrs({ type: SCAN_TYPES[scan.kind], protocol: scan.proto, numservices: scan.ports.length, services: formatRanges(scan.ports) }) + '/>');
+    out.push('<verbose level="' + o.verbose + '"/>', '<debugging level="0"/>');
+    for (const t of run.hosts) out.push.apply(out, xmlHost(run, t));
+    out.push('<runstats><finished' + attrs({ time: Math.floor(end / 1000), timestr: ctime(end), summary: 'Nmap done at ' + ctime(end) + '; ' + stats, elapsed: (run.elapsed / 1000).toFixed(2), exit: 'success' }) +
+      '/><hosts' + attrs({ up: run.up, down: run.total - run.up, total: run.total }) + '/>', '</runstats>', '</nmaprun>');
+    return out.join('\n') + '\n';
+  }
+
+  const OUTPUTS = { normal: normalOutput, grepable: grepableOutput, xml: xmlOutput };
+  const LOG_NAMES = { normal: 'normal', grepable: 'machine', xml: 'XML' };
+
+  /** Nmap opens its output files before it scans, so a path that cannot be written stops the run early. */
+  function openOutputs(ctx, o) {
+    for (const kind of Object.keys(o.files)) {
+      if (o.files[kind] === '-') continue;
+      try { ctx.fs.write(o.files[kind], ''); } catch (e) {
+        throw quit('Failed to open ' + LOG_NAMES[kind] + ' output file ' + o.files[kind] + ' for writing');
+      }
+    }
+  }
+
+  function writeOutputs(run) {
+    for (const kind of Object.keys(run.o.files)) {
+      const text = OUTPUTS[kind](run);
+      if (run.o.files[kind] === '-') run.ctx.out(text);
+      else run.ctx.fs.write(run.o.files[kind], text);
+    }
   }
 
   /* --------------------------------------------------------------- nmap: main */
@@ -628,7 +929,9 @@
     const skip = (ip) => { const n = U.ipToInt(ip); return excluded.some((spec) => specHas(spec, n)); };
     return (function* () {
       for (const spec of specs) {
-        for (const ip of guardedAddresses(ctx, spec, 'nmap', skip)) yield { ip, given: spec.name && spec.ip === ip ? spec.name : null, scans: [] };
+        for (const ip of guardedAddresses(ctx, spec, 'nmap', skip)) {
+          yield { ip, given: spec.name && spec.ip === ip ? spec.name : null, scans: [], host: K.net.knownHost(ip) };
+        }
       }
     })();
   }
@@ -637,9 +940,19 @@
     const o = run.o;
     await discover(run, group);
     const up = group.filter((t) => t.up);
-    await resolveNames(run, up);
-    if (o.tcp && up.length) await portScan(run, up, o.tcp, o.tcpPorts);
-    for (const t of group) for (const line of hostReport(run, t)) run.report(line);
+    await resolveNames(run, o.alwaysDns ? group : up);
+    if (up.length) {
+      if (o.tcp) await portScan(run, up, o.tcp, o.tcpPorts);
+      if (o.udp) await portScan(run, up, 'udp', o.udpPorts);
+      if (o.detect) await serviceScan(run, up);
+      if (o.os) await osScan(run, up);
+      if (o.traceroute) await traceroute(run, up);
+    }
+    for (const t of group) {
+      t.finished = run.now();
+      for (const line of hostReport(run, t)) run.report(line);
+      if (t.up || o.verbose) run.hosts.push(t);
+    }
     run.total += group.length; run.up += up.length;
   }
 
@@ -647,8 +960,9 @@
 
   async function nmapScan(run) {
     const o = run.o; const targets = nmapTargets(run);
+    openOutputs(run.ctx, o);
     run.say('Starting Nmap ' + NMAP_VERSION + ' ( https://nmap.org ) at ' + ymd(run.started) + ' ' + hhmm(run.started) + ' UTC');
-    for (const w of o.warnings || []) run.ctx.err(w + '\n');
+    for (const w of o.warnings) run.ctx.err(w + '\n');
     await run.wait(K.net.jitter(25, 20));
     let group = [];
     for (const t of targets) {
@@ -659,7 +973,10 @@
     if (!run.total) run.ctx.err('WARNING: No targets were specified, so 0 hosts scanned.\n');
     if (run.total === 1 && !run.up && !o.skipPing) run.report('Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn');
     if (o.verbose) run.say('Read data files from: /usr/share/nmap');
-    run.say('Nmap done: ' + plural(run.total, 'IP address', 'IP addresses') + ' (' + plural(run.up, 'host up', 'hosts up') + ') scanned in ' + (run.elapsed / 1000).toFixed(2) + ' seconds');
+    const detected = [o.os && 'OS', o.detect && 'Service'].filter(Boolean).join(' and ');
+    if (detected) run.report(detected + ' detection performed. Please report any incorrect results at https://nmap.org/submit/ .');
+    run.say('Nmap done: ' + scanStats(run));
+    writeOutputs(run);
     if (o.verbose && o.root) {
       const kb = (bytes) => (bytes / 1000).toFixed(3) + 'KB';
       run.say('           Raw packets sent: ' + run.raw.sent + ' (' + kb(run.raw.sentBytes) + ') | Rcvd: ' + run.raw.rcvd + ' (' + kb(run.raw.rcvdBytes) + ')');
@@ -667,15 +984,19 @@
   }
 
   function newRun(ctx, o) {
+    // "-oG -" and friends put that format on standard output in place of the interactive text.
+    const quiet = Object.keys(o.files).some((kind) => o.files[kind] === '-');
     const run = {
-      ctx, o, started: K.clock.now(), elapsed: 0, total: 0, up: 0,
+      ctx, o, started: K.clock.now(), elapsed: 0, total: 0, up: 0, hosts: [], normal: [],
       raw: { sent: 0, sentBytes: 0, rcvd: 0, rcvdBytes: 0 },
+      sent(packets, bytes) { run.raw.sent += packets; run.raw.sentBytes += packets * bytes; },
+      received(packets, bytes) { run.raw.rcvd += packets; run.raw.rcvdBytes += packets * bytes; },
       now: () => run.started + run.elapsed,
       // Simulated time is counted here rather than read from the clock so the summary is right at any time scale.
       wait(ms) { run.elapsed += ms; return ctx.sleep(ms); },
-      say(line) { ctx.out(line + '\n'); },
-      report(line) { ctx.out(line + '\n'); },
-      verbose(line) { if (o.verbose) ctx.out(line + '\n'); },
+      say(line) { if (!quiet) ctx.out(line + '\n'); },
+      report(line) { run.normal.push(line); run.say(line); },
+      verbose(line) { if (o.verbose) run.say(line); },
     };
     return run;
   }
@@ -692,21 +1013,31 @@
     '  -sn: Ping Scan - disable port scan',
     '  -Pn: Treat all hosts as online -- skip host discovery',
     '  -n/-R: Never do DNS resolution/Always resolve [default: sometimes]',
+    '  --traceroute: Trace hop path to each host',
     'SCAN TECHNIQUES:',
     '  -sS/sT: TCP SYN/Connect() scans',
+    '  -sU: UDP Scan',
     'PORT SPECIFICATION AND SCAN ORDER:',
     '  -p <port ranges>: Only scan specified ports',
     '    Ex: -p22; -p1-65535; -p U:53,111,137,T:21-25,80,139,8080,S:9',
     '  -F: Fast mode - Scan fewer ports than the default scan',
     '  -r: Scan ports sequentially - don\'t randomize',
     '  --top-ports <number>: Scan <number> most common ports',
+    'SERVICE/VERSION DETECTION:',
+    '  -sV: Probe open ports to determine service/version info',
+    'OS DETECTION:',
+    '  -O: Enable OS detection',
     'TIMING AND PERFORMANCE:',
     '  -T<0-5>: Set timing template (higher is faster)',
     'OUTPUT:',
+    '  -oN/-oX/-oG <file>: Output scan in normal, XML,',
+    '     and Grepable format, respectively, to the given filename.',
+    '  -oA <basename>: Output in the three major formats at once',
     '  -v: Increase verbosity level (use -vv or more for greater effect)',
     '  --reason: Display the reason a port is in a particular state',
     '  --open: Only show open (or possibly open) ports',
     'MISC:',
+    '  -A: Enable OS detection, version detection, script scanning, and traceroute',
     '  --unprivileged: Assume the user lacks raw socket privileges',
     '  -V: Print version number',
     '  -h: Print this help summary page.',

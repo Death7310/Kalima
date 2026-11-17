@@ -290,6 +290,143 @@ test('nmap: output works in pipelines and redirections', async () => {
   assert.match((await sim.run('grep -c open /tmp/scan.txt')).out, /^1\n$/);
 });
 
+/* ------------------------------------------- nmap: detection and output files */
+
+test('nmap -sV: VERSION column, Service Info and a longer run', async () => {
+  const sim = await lab();
+  let r = await sim.run('nmap -sV web01.halcyon.lab');
+  assert.deepEqual(portLines(r.out), [
+    'PORT    STATE SERVICE  VERSION',
+    '22/tcp  open  ssh      OpenSSH 10.0p2 Debian 7 (protocol 2.0)',
+    '80/tcp  open  http     nginx 1.26.3',
+    '443/tcp open  ssl/http nginx 1.26.3',
+  ]);
+  assert.match(r.out, /\nService Info: OS: Linux; CPE: cpe:\/o:linux:linux_kernel\n\nService detection performed\. Please report any incorrect results at https:\/\/nmap\.org\/submit\/ \.\nNmap done: /);
+  assert.ok(seconds(r.out) > 6 && seconds(r.out) < 9, 'several seconds longer than a plain scan');
+
+  r = await sim.run('nmap -sV -p 21,111,139,2049 files01.halcyon.lab');
+  assert.deepEqual(portLines(r.out).slice(1), ['21/tcp   open  ftp         vsftpd 3.0.5', '111/tcp  open  rpcbind     2-4 (RPC #100000)', '139/tcp  open  netbios-ssn Samba smbd 4', '2049/tcp open  nfs         3-4 (RPC #100003)']);
+  assert.match(r.out, /\nService Info: Host: FILES01; OS: Unix\n/);
+
+  r = await sim.run('sudo nmap -sV -p 25,389,445,464,636,3000,8080,873 mail01 dc01 dev01 backup01 -n');
+  assert.match(r.out, /25\/tcp +open +smtp +Postfix smtpd\n/);
+  assert.match(r.out, /Service Info: Host: mail01\.halcyon\.lab\n/);
+  assert.match(r.out, /389\/tcp +open +ldap +Microsoft Windows Active Directory LDAP \(Domain: halcyon\.lab\)\n445\/tcp +open +microsoft-ds\?\n464\/tcp +open +kpasswd5\?\n636\/tcp +open +tcpwrapped\n/);
+  assert.match(r.out, /Service Info: Host: DC01; OS: Windows; CPE: cpe:\/o:microsoft:windows\n/);
+  assert.match(r.out, /3000\/tcp open +http +Node\.js Express framework\n8080\/tcp open +http +Jetty 12\.0\.25\n/, 'the name comes from the service, not the port number');
+  assert.match(r.out, /445\/tcp +closed microsoft-ds\n/, 'ports that are not open keep an empty VERSION cell');
+  assert.match(r.out, /873\/tcp +open +rsync +\(protocol version 31\)\n/);
+
+  r = await sim.run('nmap -sV -v -p 22,80 10.10.10.10');
+  assert.match(r.out, /Initiating Service scan at 14:3\d\nScanning 2 services on web01\.halcyon\.lab \(10\.10\.10\.10\)\nCompleted Service scan at 14:3\d, 6\.\d\ds elapsed \(2 services on 1 host\)\n/);
+});
+
+test('nmap -O: needs root and prints the OS block from the host record', async () => {
+  const sim = await lab();
+  let r = await sim.run('nmap -O 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [1, 'TCP/IP fingerprinting (for OS scan) requires root privileges.\nQUITTING!\n']);
+
+  r = await sim.run('sudo nmap -O 10.10.10.10');
+  assert.match(r.out, /\nMAC Address: [0-9A-F:]{17} \(VMware\)\nDevice type: general purpose\nRunning: Linux 6\.X\nOS CPE: cpe:\/o:linux:linux_kernel:6\nOS details: Linux 6\.1 - 6\.12\nNetwork Distance: 1 hop\n\nOS detection performed\. Please report any incorrect results at https:\/\/nmap\.org\/submit\/ \.\nNmap done/);
+
+  r = await sim.run('sudo nmap -O printer.halcyon.lab dc01.halcyon.lab');
+  assert.match(r.out, /Device type: printer\nRunning: HP embedded\nOS CPE: cpe:\/h:hp:laserjet\nOS details: HP LaserJet printer \(JetDirect\)\n/);
+  assert.match(r.out, /Warning: OSScan results may be unreliable because we could not find at least 1 open and 1 closed port\nDevice type: general purpose\nRunning \(JUST GUESSING\): Microsoft Windows 2022 \(\d\d%\)\nOS CPE: cpe:\/o:microsoft:windows_server_2022\nAggressive OS guesses: Microsoft Windows Server 2022 \(\d\d%\)\nNo exact OS matches for host \(test conditions non-ideal\)\.\nNetwork Distance: 1 hop\n/);
+
+  r = await sim.run('sudo nmap -O -p 81 10.10.10.10');
+  assert.match(r.out, /Warning: OSScan results may be unreliable[^\n]*\nToo many fingerprints match this host to give specific OS details\nNetwork Distance: 1 hop\n/);
+});
+
+test('nmap -A and --traceroute', async () => {
+  const sim = await lab();
+  let r = await sim.run('nmap --traceroute 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [1, 'Traceroute has to be run as root\nQUITTING!\n']);
+
+  r = await sim.run('sudo nmap -A -p 22,80,81 web01.halcyon.lab');
+  assert.match(r.out, /22\/tcp open +ssh +OpenSSH 10\.0p2 Debian 7 \(protocol 2\.0\)\n/);
+  assert.match(r.out, /OS details: Linux 6\.1 - 6\.12\nNetwork Distance: 1 hop\nService Info: OS: Linux; CPE: cpe:\/o:linux:linux_kernel\n\nTRACEROUTE\nHOP RTT     ADDRESS\n1   0\.\d\d ms web01\.halcyon\.lab \(10\.10\.10\.10\)\n\nOS and Service detection performed\./);
+
+  r = await sim.run('nmap -A -p 22 web01.halcyon.lab');
+  assert.equal(r.code, 0, 'without root -A leaves out what needs raw sockets');
+  assert.match(r.out, /22\/tcp open  ssh     OpenSSH/);
+  assert.doesNotMatch(r.out, /TRACEROUTE|OS details/);
+  assert.match(r.out, /\nService detection performed\./);
+});
+
+test('nmap -sU: UDP scan as root', async () => {
+  const sim = await lab();
+  let r = await sim.run('nmap -sU 10.10.10.53');
+  assert.deepEqual([r.code, r.err], [1, 'You requested a scan type which requires root privileges.\nQUITTING!\n']);
+
+  r = await sim.run('sudo nmap -sU -p 53,123,161 --reason ns1.halcyon.lab printer.halcyon.lab');
+  assert.match(r.out, /PORT    STATE  SERVICE REASON\n53\/udp  open   domain  udp-response ttl 64\n123\/udp closed ntp     port-unreach ttl 64\n161\/udp closed snmp    port-unreach ttl 64\n/);
+  assert.match(r.out, /161\/udp open   snmp    udp-response ttl 64\n/);
+
+  r = await sim.run('sudo nmap -sU -F dc01.halcyon.lab');
+  assert.match(r.out, /Not shown: 97 open\|filtered udp ports \(no-response\)\nPORT    STATE SERVICE\n53\/udp  open  domain\n88\/udp  open  kerberos-sec\n123\/udp open  ntp\n/);
+
+  r = await sim.run('sudo nmap -sU --top-ports 30 files01.halcyon.lab');
+  assert.match(r.out, /Not shown: 28 closed udp ports \(port-unreach\)\nPORT    STATE SERVICE\n111\/udp open  rpcbind\n137\/udp open  netbios-ns\n/);
+  assert.ok(seconds(r.out) > 15, 'closed UDP ports are slow because the target limits its ICMP errors');
+
+  r = await sim.run('sudo nmap -sS -sU -p T:22,U:53 -sV ns1.halcyon.lab');
+  assert.deepEqual(portLines(r.out), ['PORT   STATE SERVICE VERSION', '22/tcp open  ssh     OpenSSH 10.0p2 Debian 7 (protocol 2.0)', '53/udp open  domain  ISC BIND 9.20.11']);
+
+  r = await sim.run('nmap -p U:53,T:22 ns1.halcyon.lab');
+  assert.equal(r.err, 'WARNING: Your ports include "U:" but you haven\'t specified UDP scan with -sU.\n');
+  assert.deepEqual(portLines(r.out).slice(1), ['22/tcp open  ssh']);
+});
+
+test('nmap -oN, -oG, -oX and -oA write the real file formats', async () => {
+  const sim = await lab();
+  const cat = async (f) => (await sim.run('cat ' + f)).out;
+  let r = await sim.run('cd /tmp && sudo nmap -sV -p 22,80,81 web01.halcyon.lab -oA web');
+  assert.match(r.out, /^Starting Nmap/);
+
+  const normal = (await cat('/tmp/web.nmap')).split('\n');
+  assert.match(normal[0], /^# Nmap 7\.98 scan initiated Fri Nov 13 14:30:\d\d 2026 as: nmap -sV -p 22,80,81 web01\.halcyon\.lab -oA web$/);
+  assert.equal(normal[1], 'Nmap scan report for web01.halcyon.lab (10.10.10.10)');
+  assert.match(normal[normal.length - 2], /^# Nmap done at Fri Nov 13 14:30:\d\d 2026 -- 1 IP address \(1 host up\) scanned in \d\.\d\d seconds$/);
+  assert.deepEqual(normal.slice(1, -2), r.out.split('\n').slice(1, -2), 'the report lines are the ones shown on screen');
+
+  const grep = (await cat('/tmp/web.gnmap')).split('\n');
+  assert.equal(grep[1], 'Host: 10.10.10.10 (web01.halcyon.lab)\tStatus: Up');
+  assert.equal(grep[2], 'Host: 10.10.10.10 (web01.halcyon.lab)\tPorts: 22/open/tcp//ssh//OpenSSH 10.0p2 Debian 7 (protocol 2.0)/, 80/open/tcp//http//nginx 1.26.3/, 81/closed/tcp//hosts2-ns///');
+  assert.match(grep[3], /^# Nmap done at /);
+
+  const xml = await cat('/tmp/web.xml');
+  assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-8"\?>\n<!DOCTYPE nmaprun>\n<\?xml-stylesheet href="file:\/\/\/usr\/share\/nmap\/nmap\.xsl" type="text\/xsl"\?>\n<!-- Nmap 7\.98 scan initiated /);
+  assert.match(xml, /<nmaprun scanner="nmap" args="nmap -sV -p 22,80,81 web01\.halcyon\.lab -oA web" start="\d+" startstr="Fri Nov 13 14:30:\d\d 2026" version="7\.98" xmloutputversion="1\.05">\n<scaninfo type="syn" protocol="tcp" numservices="3" services="22,80-81"\/>\n<verbose level="0"\/>\n<debugging level="0"\/>\n/);
+  assert.match(xml, /<host starttime="\d+" endtime="\d+"><status state="up" reason="arp-response" reason_ttl="0"\/>\n<address addr="10\.10\.10\.10" addrtype="ipv4"\/>\n<address addr="[0-9A-F:]{17}" addrtype="mac" vendor="VMware"\/>\n<hostnames>\n<hostname name="web01\.halcyon\.lab" type="user"\/>\n<hostname name="web01\.halcyon\.lab" type="PTR"\/>\n<\/hostnames>\n<ports><port protocol="tcp" portid="22"><state state="open" reason="syn-ack" reason_ttl="64"\/><service name="ssh" product="OpenSSH" version="10\.0p2 Debian 7" extrainfo="protocol 2\.0" method="probed" conf="10"\/><\/port>\n/);
+  assert.match(xml, /<port protocol="tcp" portid="81"><state state="closed" reason="reset" reason_ttl="64"\/><service name="hosts2-ns" method="table" conf="3"\/><\/port>\n<\/ports>\n<times srtt="\d+" rttvar="\d+" to="100000"\/>\n<\/host>\n<runstats><finished time="\d+" timestr="[^"]+" summary="Nmap done at [^;]+; 1 IP address \(1 host up\) scanned in \d\.\d\d seconds" elapsed="\d\.\d\d" exit="success"\/><hosts up="1" down="0" total="1"\/>\n<\/runstats>\n<\/nmaprun>\n$/);
+
+  r = await sim.run('nmap -oX - 10.10.10.70');
+  assert.match(r.out, /^<\?xml/, '"-" sends that format to standard output instead of the normal text');
+  assert.match(r.out, /<ports><extraports state="closed" count="996">\n<extrareasons reason="conn-refused" count="996" proto="tcp" ports="1,3-4,6-7,[\d,-]+"\/>\n<\/extraports>\n<port protocol="tcp" portid="22">/);
+  assert.match(r.out, /<port protocol="tcp" portid="5432"><state state="filtered" reason="no-response" reason_ttl="0"\/><service name="postgresql" method="table" conf="3"\/><\/port>/);
+
+  r = await sim.run("sudo nmap -sn 10.10.10.0/24 -oG - | grep 'Status: Up' | cut -f1 | cut -d' ' -f2 | tail -3");
+  assert.equal(r.out, '10.10.10.70\n10.10.10.80\n10.10.10.90\n');
+  r = await sim.run('nmap -F 10.10.10.10 -oG /tmp/fast.gnmap >/dev/null; grep -c "Ignored State: closed (97)" /tmp/fast.gnmap');
+  assert.equal(r.out, '1\n');
+  r = await sim.run('nmap -v -sn 10.10.10.9-10 -oG - | grep Down');
+  assert.equal(r.out, 'Host: 10.10.10.9 ()\tStatus: Down\n');
+  r = await sim.run('sudo nmap -O -oG - 10.10.10.60 | grep -o "OS: .*"');
+  assert.equal(r.out, 'OS: HP LaserJet printer (JetDirect)\n');
+
+  r = await sim.run('nmap -oN /etc/scan.txt 10.10.10.10');
+  assert.deepEqual([r.code, r.err, r.out], [1, 'Failed to open normal output file /etc/scan.txt for writing\nQUITTING!\n', '']);
+  r = await sim.run('nmap -oQ x 10.10.10.10');
+  assert.equal(r.code, 255);
+});
+
+test('nmap -R resolves names of hosts that are down too', async () => {
+  const sim = await lab();
+  const r = await sim.run('nmap -v -R -sn 10.10.10.50');
+  assert.match(r.out, /Nmap scan report for dc01\.halcyon\.lab \(10\.10\.10\.50\) \[host down\]\n/);
+  assert.match((await sim.run('nmap -v -sn 10.10.10.50')).out, /Nmap scan report for 10\.10\.10\.50 \[host down\]\n/);
+});
+
 test('nmap: tab completion offers lab hosts and the network in scope', async () => {
   const sim = await lab();
   const complete = (l) => sim.shell.complete(l, l.length).items.map((i) => i.text);
