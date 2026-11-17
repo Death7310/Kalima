@@ -405,8 +405,8 @@ test('ss: nothing established, option errors and version', async () => {
   const sim = await net();
   assert.equal(await sim.out('ss -t'), 'State Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess\n');
   assert.equal(await sim.out('ss -tlnH'), '');
-  const r = await sim.run('ss -z');
-  assert.match(r.err, /^ss: invalid option -- 'z'\nUsage: ss \[ OPTIONS \]/);
+  const r = await sim.run('ss -j');
+  assert.match(r.err, /^ss: invalid option -- 'j'\nUsage: ss \[ OPTIONS \]/);
   assert.equal(r.code, 1);
   assert.match((await sim.run('ss -V')).out, /^ss utility, iproute2-/);
   sim.machine.listeners.push({ port: 4444, proto: 'tcp', addr: '0.0.0.0', prog: 'nc', pid: 4242, name: 'nc' });
