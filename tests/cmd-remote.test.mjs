@@ -239,3 +239,140 @@ test('ssh protocol handler: banner, then any input is refused', async () => {
   assert.equal(s.open, false);
   assert.equal(s.send('again\n'), '');
 });
+
+/** Let a command that is still running take a few steps (virtual time never yields to timers). */
+async function until(condition) {
+  for (let i = 0; i < 2000 && !condition(); i++) await Promise.resolve();
+  assert.equal(condition(), true, 'condition reached');
+}
+
+test('nc: client mode prints the greeting and exchanges lines', async () => {
+  const sim = await boot();
+  let r = await withInput(sim, 'nc -v web01.halcyon.lab 22', ['hello']);
+  assert.equal(r.code, 0);
+  assert.equal(r.err, 'web01.halcyon.lab [10.10.10.10] 22 (ssh) open\n');
+  assert.equal(r.out, 'SSH-2.0-OpenSSH_10.0p2 Debian-7\r\nInvalid SSH identification string.\r\n');
+  assert.equal(r.screen, 'hello\n');
+  r = await sim.run('nc web01.halcyon.lab 22 < /dev/null');
+  assert.equal(r.output, 'SSH-2.0-OpenSSH_10.0p2 Debian-7\r\n', 'quiet without -v');
+  r = await sim.run('printf "GET /robots.txt HTTP/1.0\\r\\n\\r\\n" | nc web01.halcyon.lab 80 | head -1');
+  assert.equal(r.out, 'HTTP/1.1 200 OK\r\n');
+  for (const alias of ['netcat', 'ncat', 'nc.traditional']) {
+    r = await sim.run(alias + ' -vn 10.10.10.10 22 < /dev/null');
+    assert.equal(r.err, '(UNKNOWN) [10.10.10.10] 22 (?) open\n', alias);
+  }
+});
+
+test('nc: failures in netcat-traditional wording', async () => {
+  const sim = await boot();
+  const fail = async (line, text) => {
+    const r = await sim.run(line);
+    assert.equal(r.code, 1, line);
+    assert.equal(r.err, text + '\n', line);
+    assert.equal(r.out, '', line);
+  };
+  await fail('nc -v printer.halcyon.lab 22', 'printer.halcyon.lab [10.10.10.60] 22 (ssh) : Connection refused');
+  await fail('nc -v 10.10.10.10 81', 'web01.halcyon.lab [10.10.10.10] 81 (?) : Connection refused');
+  await fail('nc -v 10.10.10.99 22', '10.10.10.99: inverse host lookup failed: Unknown host\n(UNKNOWN) [10.10.10.99] 22 (ssh) : No route to host');
+  await fail('nc -v nohost.halcyon.lab 22', 'nohost.halcyon.lab: forward host lookup failed: Unknown host');
+  await fail('nc -vn web01.halcyon.lab 22', "Can't parse web01.halcyon.lab as an IP address");
+  await fail('nc web01.halcyon.lab', 'no port[s] to connect to');
+  await fail('nc -v web01 nosuch', 'invalid port nosuch');
+  await fail('nc -w 0 web01 22', 'invalid wait-time 0');
+  await fail('nc -x web01 22', "nc: invalid option -- 'x'\nnc -h for help");
+  await fail('nc -l -p 80', "Can't grab 0.0.0.0:80 with bind : Permission denied");
+  const quiet = await sim.run('nc printer.halcyon.lab 22');
+  assert.deepEqual([quiet.code, quiet.output], [1, ''], 'no -v, no message');
+  const help = await sim.run('nc -h');
+  assert.equal(help.code, 1);
+  assert.match(help.err, /^\[v1\.10-50\]\nconnect to somewhere:\tnc \[-options\] hostname port\[s\] \[ports\] \.\.\. \nlisten for inbound:\tnc -l -p port \[-options\] \[hostname\] \[port\]\n/);
+  // -w bounds how long a silent host is waited for
+  const t0 = sim.K.clock.now();
+  await fail('nc -vn -w 2 10.10.10.90 22', '(UNKNOWN) [10.10.10.90] 22 (?) : Connection timed out');
+  assert.equal(sim.K.clock.now() - t0, 2000);
+});
+
+test('nc -z: port checks, ranges, UDP and the scope guard', async () => {
+  const sim = await boot();
+  let r = await sim.run('nc -zv files01.halcyon.lab 20-25');
+  assert.equal(r.err, 'files01.halcyon.lab [10.10.10.20] 22 (ssh) open\nfiles01.halcyon.lab [10.10.10.20] 21 (ftp) open\n', 'one -v hides refusals in a scan');
+  assert.equal(r.code, 0);
+  r = await sim.run('nc -zvv 10.10.10.10 79-80 443');
+  assert.equal(r.err, 'web01.halcyon.lab [10.10.10.10] 80 (http) open\nweb01.halcyon.lab [10.10.10.10] 79 (finger) : Connection refused\nweb01.halcyon.lab [10.10.10.10] 443 (https) open\n sent 0, rcvd 0\n');
+  r = await sim.run('nc -zv web01 http');
+  assert.deepEqual([r.code, r.err], [0, 'web01.halcyon.lab [10.10.10.10] 80 (http) open\n']);
+  r = await sim.run('nc -z web01 80 && echo open; nc -z web01 81 || echo closed');
+  assert.equal(r.output, 'open\nclosed\n');
+  r = await sim.run('nc -zvu printer.halcyon.lab 161');
+  assert.deepEqual([r.code, r.err], [0, 'printer.halcyon.lab [10.10.10.60] 161 (snmp) open\n']);
+  r = await sim.run('nc -zvu web01.halcyon.lab 161');
+  assert.deepEqual([r.code, r.err], [1, 'web01.halcyon.lab [10.10.10.10] 161 (snmp) : Connection refused\n']);
+
+  // probing is only allowed inside the engagement scope; a plain connection is not probing
+  const seen = [];
+  const off = sim.K.events.on('scope-violation', (e) => seen.push(e));
+  r = await sim.run('nc -zv example.com 80');
+  off();
+  assert.equal(r.code, 1);
+  assert.match(sim.strip(r.err), /Out-of-scope target blocked/);
+  assert.doesNotMatch(r.err, /open\n/);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].tool, 'nc');
+  r = await sim.run('nc -v example.com 80 < /dev/null');
+  assert.match(r.err, /^example\.com \[[\d.]+\] 80 \(http\) open\n$/);
+});
+
+test('nc -l: a listener shows what a client in another terminal sends', async () => {
+  const sim = await boot();
+  const K = sim.K;
+  const listening = () => K.net.listening(sim.machine).some((l) => l.port === 4444);
+  const pending = sim.run('nc -lvnp 4444');
+  await until(listening);
+  const other = new K.Shell({ machine: sim.machine, term: new K.HeadlessTerm(), user: 'kali', interactive: true });
+  await other.init();
+  const sent = await other.capture('echo hello from the other tab | nc -v -q 1 10.10.10.5 4444');
+  assert.equal(sent.err, 'kali [10.10.10.5] 4444 (?) open\n');
+  const r = await pending;
+  assert.equal(r.code, 0);
+  assert.equal(r.out, 'hello from the other tab\n');
+  assert.match(r.err, /^listening on \[any\] 4444 \.\.\.\nconnect to \[10\.10\.10\.5\] from \(UNKNOWN\) \[10\.10\.10\.5\] \d+\n$/);
+  assert.equal(listening(), false, 'the port is released');
+  assert.equal((await other.capture('nc -v localhost 4444')).err, 'localhost [127.0.0.1] 4444 (?) : Connection refused\n');
+
+  // nothing connects: the listener runs until Ctrl-C
+  const waiting = sim.run('nc -lvp 5555');
+  await until(() => K.net.listening(sim.machine).some((l) => l.port === 5555));
+  const busy = await other.capture('nc -lp 5555');
+  assert.equal(busy.err, "Can't grab 0.0.0.0:5555 with bind : Address already in use\n");
+  sim.term.raiseInterrupt();
+  const stopped = await waiting;
+  assert.equal(stopped.code, 130);
+  assert.equal(stopped.err, 'listening on [any] 5555 ...\n');
+  assert.equal(K.net.listening(sim.machine).some((l) => l.port === 5555), false);
+  const timed = await sim.run('nc -lvp 5556 -w 3');
+  assert.deepEqual([timed.code, timed.err], [1, 'listening on [any] 5556 ...\nno connection : Connection timed out\n']);
+});
+
+test('telnet: connection lines and a line session', async () => {
+  const sim = await boot();
+  let r = await withInput(sim, 'telnet web01.halcyon.lab 22', ['hello']);
+  assert.equal(r.out, "Trying 10.10.10.10...\nConnected to web01.halcyon.lab.\nEscape character is '^]'.\nSSH-2.0-OpenSSH_10.0p2 Debian-7\r\nInvalid SSH identification string.\r\n");
+  assert.equal(r.err, 'Connection closed by foreign host.\n');
+  assert.equal(r.code, 1);
+  r = await withInput(sim, 'telnet cam01.halcyon.lab', ['^]', 'bogus', 'quit']);
+  assert.match(r.out, /Escape character is '\^\]'\.\n\r\ncam01 login: \?Invalid command\nConnection closed\.\n$/);
+  assert.equal(r.code, 0);
+  assert.match(r.screen, /telnet> bogus\ntelnet> quit\n$/);
+  r = await sim.run('telnet printer.halcyon.lab');
+  assert.deepEqual([r.code, r.out, r.err], [1, 'Trying 10.10.10.60...\n', 'telnet: Unable to connect to remote host: Connection refused\n']);
+  r = await sim.run('telnet nohost.halcyon.lab');
+  assert.deepEqual([r.code, r.err], [1, 'telnet: could not resolve nohost.halcyon.lab/telnet: Name or service not known\n']);
+  r = await sim.run('telnet web01 nosuchsvc');
+  assert.equal(r.err, 'telnet: could not resolve web01/nosuchsvc: Servname not supported for ai_socktype\n');
+  r = await withInput(sim, 'telnet', ['open web01.halcyon.lab ssh']);
+  assert.match(r.out, /^Trying 10\.10\.10\.10\.\.\.\nConnected to web01\.halcyon\.lab\.\n/);
+  r = await sim.run('telnet -Q');
+  assert.deepEqual([r.code, r.err], [64, "telnet: invalid option -- 'Q'\nTry 'telnet --help' or 'telnet --usage' for more information.\n"]);
+  assert.match((await sim.run('telnet --help')).out, /^Usage: telnet \[OPTION\.\.\.\] \[HOST \[PORT\]\]\nLogin to remote system HOST/);
+  assert.match((await sim.run('telnet --version')).out, /^telnet \(GNU inetutils\) 2\.\d+\n/);
+});

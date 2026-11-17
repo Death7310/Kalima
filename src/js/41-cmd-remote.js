@@ -803,7 +803,7 @@
     if (session.open) await ctx.sleep(nc.quit != null ? nc.quit * 1000 : nc.wait != null ? nc.wait * 1000 : SERVER_IDLE);
   }
 
-  /** Client mode: try each port in turn; returns the exit status (that of the last port). */
+  /** Client mode: try each port in turn; returns the exit status, which only a single port can make non-zero. */
   async function ncConnect(nc, target, ports) {
     const ctx = nc.ctx; const proto = nc.udp ? 'udp' : 'tcp';
     const single = ports.length === 1;
@@ -830,7 +830,7 @@
       }
       if (nc.interval && !single) await ctx.sleep(nc.interval * 1000);
     }
-    return status;
+    return single ? status : 0;
   }
 
   /** Listen mode: take one inbound connection, show what it sends, hand it our piped input. */
@@ -904,7 +904,8 @@
         if (nc.zero && !K.net.guard(ctx, target.ip, ctx.name)) return 1;
         status = await ncConnect(nc, target, list.ports);
       }
-      if (nc.verbose > 1) ctx.err(' sent ' + nc.sent + ', rcvd ' + nc.rcvd + '\n');
+      // The byte counts go out through netcat's bail(), which always exits 1.
+      if (nc.verbose > 1) { ctx.err(' sent ' + nc.sent + ', rcvd ' + nc.rcvd + '\n'); return 1; }
       return status;
     },
   });
