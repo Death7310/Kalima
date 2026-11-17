@@ -829,5 +829,271 @@
   });
 
 
+  /* ============================================== traceroute, tracepath and mtr */
+  /**
+   * What answers a probe sent with this TTL? Intermediate routers come from the
+   * route; the destination answers unless it filters the probe type.
+   * Returns { ip, name, rtt } or null for silence.
+   */
+  function probeHop(ctx, rt, dstIp, ttl, proto, port) {
+    const net = K.net;
+    const hops = rt.hops || [];
+    if (ttl <= hops.length) {
+      const h = hops[ttl - 1];
+      if (h.silent) return null;
+      net.packet({ src: rt.src, dst: dstIp, proto: proto === 'icmp' ? 'ICMP' : proto === 'tcp' ? 'TCP' : 'UDP', dport: port, info: 'ttl ' + ttl, len: 60, dev: rt.dev });
+      return { ip: h.ip, name: h.name, rtt: net.jitter(h.rtt, h.rtt * 0.12 + 0.2) };
+    }
+    const host = rt.host;
+    if (rt.self) return { ip: dstIp, rtt: net.jitter(0.03, 0.03) };
+    if (rt.blackhole || !host || !host.up) return null;
+    if (proto === 'tcp') {
+      const t = net.tcp(ctx.machine, dstIp, port);
+      return t.state === 'filtered' ? null : { ip: dstIp, rtt: t.rtt };
+    }
+    net.packet({ src: rt.src, dst: dstIp, proto: proto === 'icmp' ? 'ICMP' : 'UDP', dport: port, info: proto === 'icmp' ? 'echo request' : 'UDP, length 32', len: 60, dev: rt.dev });
+    if ((host.firewall || {}).icmp === false) return null;
+    if (host.loss && net.rand() < host.loss) return null;
+    return { ip: dstIp, rtt: net.jitter(rt.rtt, host.latency.jitter == null ? 0.3 : host.latency.jitter) };
+  }
+  const hopLabel = (ctx, r, numeric) => {
+    if (numeric) return r.ip;
+    const n = r.name || rdns(ctx, r.ip);
+    return n ? n + ' (' + r.ip + ')' : r.ip + ' (' + r.ip + ')';
+  };
+
+  const TRACEROUTE_VERSION = 'Modern traceroute for Linux, version 2.1.6\nCopyright (c) 2016  Dmitry Butskoy,   License: GPL v2 or any later';
+  const TRACEROUTE_USAGE = [
+    'Usage:', '  traceroute [ -46dFITnreAUDV ] [ -f first_ttl ] [ -g gate,... ] [ -i device ] [ -m max_ttl ] [ -N squeries ] [ -p port ] [ -t tos ] [ -l flow_label ] [ -w MAX,HERE,NEAR ] [ -q nqueries ] [ -s src_addr ] [ -z sendwait ] [ --fwmark=num ] host [ packetlen ]',
+    'Options:',
+    '  -4                          Use IPv4',
+    '  -6                          Use IPv6',
+    '  -f first_ttl  --first=first_ttl',
+    '                              Start from the first_ttl hop (instead from 1)',
+    '  -I  --icmp                  Use ICMP ECHO for tracerouting',
+    '  -T  --tcp                   Use TCP SYN for tracerouting (default port is 80)',
+    '  -i device  --interface=device',
+    '                              Specify a network interface to operate with',
+    '  -m max_ttl  --max-hops=max_ttl',
+    '                              Set the max number of hops (max TTL to be',
+    '                              reached). Default is 30',
+    '  -n                          Do not resolve IP addresses to their domain names',
+    '  -p port  --port=port        Set the destination port to use',
+    '  -w MAX,HERE,NEAR  --wait=MAX,HERE,NEAR',
+    '                              Wait for a probe no more than HERE (default 3)',
+    '                              times longer than a response from the same hop,',
+    '                              or no more than NEAR (default 10) times than some',
+    '                              next hop, or MAX (default 5.0) seconds (float',
+    '                              point values allowed too)',
+    '  -q nqueries  --queries=nqueries',
+    '                              Set the number of probes per each hop. Default is',
+    '                              3',
+    '  -s src_addr  --source=src_addr',
+    '                              Use source src_addr for outgoing packets',
+    '  -U  --udp                   Use UDP to particular port for tracerouting',
+    '  -V  --version               Print version info and exit',
+    '  --help                      Read this help and exit', '',
+    'Arguments:',
+    '+     host          The host to traceroute to',
+    '      packetlen     The full packet length (default is the length of an IP',
+    '                    header plus 40). Can be ignored or increased to a minimal',
+    '                    allowed value', '',
+  ].join('\n');
+
+  async function tracerouteRun(ctx) {
+    const g = K.getopt(ctx.args, { short: '46dFITnreAUDVf:g:i:m:N:p:t:l:w:q:s:z:M:O:P:', long: ['help', 'version', 'icmp', 'tcp', 'udp', 'first=', 'max-hops=', 'queries=', 'wait=', 'port=', 'source=', 'interface=', 'extensions', 'as-path-lookups', 'dont-fragment', 'debug', 'sim-queries=', 'gateway=', 'tos=', 'flowlabel=', 'sendwait=', 'module=', 'options=', 'protocol=', 'sport=', 'fwmark=', 'mtu', 'back', 'dccp'], alias: { icmp: 'I', tcp: 'T', udp: 'U', first: 'f', 'max-hops': 'm', queries: 'q', wait: 'w', port: 'p', source: 's', interface: 'i', version: 'V' } });
+    if (g.err) { ctx.eprintln('Bad option `' + (g.err.match(/'(.)'/) ? '-' + g.err.match(/'(.)'/)[1] : g.err) + "' (with argument)"); ctx.eprintln('Use --help for help'); return 2; }
+    const o = g.opts;
+    if (o.help) { ctx.out(TRACEROUTE_USAGE); return 0; }
+    if (o.V) { ctx.println(TRACEROUTE_VERSION); return 0; }
+    const num = (opt, name, min, max, float) => {
+      if (o[opt] == null) return undefined;
+      const v = float ? parseFloat(String(o[opt]).split(',')[0]) : /^\d+$/.test(o[opt]) ? parseInt(o[opt], 10) : NaN;
+      if (isNaN(v) || v < min || v > max) { ctx.eprintln('Cannot handle `-' + name + "' option with arg `" + o[opt] + "' (argc " + (ctx.args.indexOf(String(o[opt])) + 1) + ')'); return null; }
+      return v;
+    };
+    const first = num('f', 'f', 1, 255); const max = num('m', 'm', 1, 255); const nq = num('q', 'q', 1, 10); const wait = num('w', 'w', 0.001, 60, true);
+    if ([first, max, nq, wait].includes(null)) return 2;
+    if (!g.rest.length) { ctx.eprintln('Specify "host" missing argument.'); return 2; }
+    const target = g.rest[0];
+    if (o.T && !ctx.isRoot) { ctx.eprintln('You do not have enough privileges to use this traceroute method.'); return 1; }
+    const start = first || 1; const maxTtl = max || 30; const queries = nq || 3; const waitMs = (wait || 5) * 1000;
+    if (start > maxTtl) { ctx.eprintln('first hop out of range'); return 2; }
+    const len = g.rest[1] != null ? Math.max(28, parseInt(g.rest[1], 10) || 60) : 60;
+    const dest = lookup(ctx, target);
+    if (dest.err) { ctx.eprintln(target + ': ' + RESOLVE_MSG[dest.err]); ctx.eprintln('Cannot handle "host" cmdline arg `' + target + "' on position 1 (argc " + (ctx.args.indexOf(target) + 1) + ')'); return 2; }
+    const rt = K.net.route(ctx.machine, dest.ip);
+    if (!rt.ok && rt.err === 'ENETUNREACH') { ctx.eprintln('connect: Network is unreachable'); return 2; }
+    ctx.println('traceroute to ' + target + ' (' + dest.ip + '), ' + maxTtl + ' hops max, ' + len + ' byte packets');
+    const proto = o.T ? 'tcp' : o.I ? 'icmp' : 'udp';
+    const port = o.p ? parseInt(o.p, 10) : o.T ? 80 : o.U ? 53 : 33434;
+    if (!rt.ok) {
+      // the local segment cannot resolve the next hop: the first hop reports host unreachable
+      const label = hopLabel(ctx, { ip: rt.src, name: ctx.machine.hostname }, o.n);
+      const t = [0, 1, 2].slice(0, queries).map(() => (3000 + K.net.rand() * 60).toFixed(3) + ' ms !H');
+      await ctx.sleep(3000);
+      ctx.println(padL(start, 2) + '  ' + label + '  ' + t.join('  '));
+      return 0;
+    }
+    for (let ttl = start; ttl <= maxTtl; ttl++) {
+      let line = padL(ttl, 2) + ' '; let lastIp = null; let reached = false;
+      ctx.out(line);
+      for (let q = 0; q < queries; q++) {
+        const r = probeHop(ctx, rt, dest.ip, ttl, proto, proto === 'udp' && !o.U ? port + (ttl - 1) * queries + q : port);
+        if (!r) { await ctx.sleep(waitMs); ctx.out(' *'); continue; }
+        await ctx.sleep(r.rtt);
+        if (r.ip !== lastIp) { ctx.out(' ' + hopLabel(ctx, r, o.n)); lastIp = r.ip; }
+        ctx.out('  ' + r.rtt.toFixed(3) + ' ms');
+        if (r.ip === dest.ip) reached = true;
+      }
+      ctx.out('\n');
+      if (reached) return 0;
+    }
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'traceroute', aliases: ['traceroute.db'], path: '/usr/bin/traceroute', pkg: 'traceroute', section: 8,
+    summary: 'print the route packets trace to network host',
+    synopsis: 'traceroute [-46dFITnreAUDV] [-f first_ttl] [-m max_ttl] [-p port] [-q nqueries] [-w waittime] [-s src_addr] host [packetlen]',
+    man: 'DESCRIPTION\n       traceroute tracks the route packets take from this machine to a destination host by sending probes with small time-to-live (TTL) values. Every router that discards a probe because its TTL ran out answers with an ICMP "time exceeded" message, which reveals its address. The TTL starts at 1 and grows until the destination answers or the maximum number of hops is reached.\n\n       Each line shows the hop number, the router and the round-trip time of three probes. A row of asterisks means the router (or a firewall) did not answer.\n\nOPTIONS\n       -n     Do not resolve addresses to names.\n       -m max_ttl\n              Set the maximum number of hops (default 30).\n       -f first_ttl\n              Start from this hop (default 1).\n       -q nqueries\n              Probes per hop (default 3).\n       -w max\n              Seconds to wait for a response (default 5).\n       -I     Use ICMP ECHO probes instead of UDP datagrams.\n       -T     Use TCP SYN probes (default port 80). Needs root.\n       -U     Use UDP to the single port 53.\n       -p port\n              Destination port (UDP and TCP) of the probes.\n\nEXAMPLES\n       traceroute -n 8.8.8.8\n              Trace the path to a public DNS server without name lookups.\n       sudo traceroute -T -p 443 kali.org\n              Probe with TCP SYN to port 443 to get through ICMP and UDP filters.',
+    run: tracerouteRun,
+    complete: (info) => (info.cur && info.cur[0] === '-' ? [] : hostNames()),
+  });
+
+  /* -------------------------------------------------------------- tracepath */
+  const TRACEPATH_USAGE = 'Usage\n  tracepath [options] <destination>\n\nOptions:\n  -4             use IPv4\n  -6             use IPv6\n  -b             print both name and IP\n  -l <length>    use packet <length>\n  -m <hops>      use maximum <hops>\n  -n             no reverse DNS name resolution\n  -p <port>      use destination <port>\n  -V             print version and exit\n  <destination>  DNS name or IP address\n\nFor more details see tracepath(8).\n';
+
+  async function tracepathRun(ctx) {
+    const g = K.getopt(ctx.args, { short: '46bhnVl:m:p:' });
+    if (g.err || g.opts.h) { if (g.err) ctx.eprintln('tracepath: ' + g.err); ctx.err(TRACEPATH_USAGE); return g.err ? 255 : 255; }
+    if (g.opts.V) { ctx.println('tracepath from iputils 20250605'); return 0; }
+    if (!g.rest.length) { ctx.err(TRACEPATH_USAGE); return 255; }
+    const hopsMax = g.opts.m != null ? parseInt(g.opts.m, 10) : 30;
+    if (!(hopsMax > 0 && hopsMax <= 255)) { ctx.eprintln('tracepath: Invalid argument: ' + g.opts.m); return 255; }
+    const dest = lookup(ctx, g.rest[0]);
+    if (dest.err) { ctx.eprintln('tracepath: ' + g.rest[0] + ': ' + RESOLVE_MSG[dest.err]); return 1; }
+    const rt = K.net.route(ctx.machine, dest.ip);
+    if (!rt.ok && rt.err === 'ENETUNREACH') { ctx.eprintln('connect: Network is unreachable'); return 1; }
+    const iface = ifaceByName(ctx.machine, rt.dev || '') || ctx.machine.primaryIface();
+    const mtu = (iface && iface.mtu) || 1500;
+    const label = (r) => {
+      if (g.opts.n) return r.ip;
+      const n = r.name || rdns(ctx, r.ip);
+      return g.opts.b ? (n ? n + ' (' + r.ip + ')' : r.ip + ' (' + r.ip + ')') : n || r.ip;
+    };
+    const row = (ttl, text, ms, tail) => padL(ttl, 2) + ':  ' + pad(text, 46) + padL(ms.toFixed(3), 9) + 'ms ' + (tail || '');
+    ctx.println(' 1?: ' + pad('[LOCALHOST]', 32) + ' pmtu ' + mtu);
+    let reachedAt = 0;
+    for (let ttl = 1; ttl <= hopsMax; ttl++) {
+      const r = rt.ok ? probeHop(ctx, rt, dest.ip, ttl, 'udp', 44444 + ttl) : null;
+      if (!r) { await ctx.sleep(3000); ctx.println(padL(ttl, 2) + ':  no reply'); continue; }
+      await ctx.sleep(r.rtt);
+      const reached = r.ip === dest.ip;
+      ctx.println(row(ttl, label(r), r.rtt, reached ? 'reached' : ''));
+      if (ttl === 1 && !reached) { const again = probeHop(ctx, rt, dest.ip, 1, 'udp', 44444); if (again) ctx.println(row(1, label(again), again.rtt, '')); }
+      if (reached) { reachedAt = ttl; break; }
+    }
+    if (!reachedAt) { ctx.println('     Too many hops: pmtu ' + mtu); ctx.println('     Resume: pmtu ' + mtu + ' '); return 1; }
+    ctx.println('     Resume: pmtu ' + mtu + ' hops ' + reachedAt + ' back ' + reachedAt + ' ');
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'tracepath', aliases: ['tracepath6'], path: '/usr/bin/tracepath', pkg: 'iputils-tracepath', section: 8,
+    summary: 'traces path to a network host discovering MTU along this path',
+    synopsis: 'tracepath [-4] [-6] [-n] [-b] [-l pktlen] [-m max_hops] [-p port] destination',
+    man: 'DESCRIPTION\n       tracepath traces the network path to destination discovering MTU along this path. It uses UDP port port or some random port. It is similar to traceroute, only it does not require superuser privileges and has no fancy options.\n\nOPTIONS\n       -n     Print primarily IP addresses, no name lookups.\n       -b     Print both host names and IP addresses.\n       -l pktlen\n              Set the initial packet length.\n       -m max_hops\n              Set maximum hops (or maximum TTLs) to max_hops. Default is 30.\n       -p port\n              Sets the initial destination port to use.\n\nEXAMPLES\n       tracepath -n 10.10.10.10\n              Show the path and path MTU to the intranet server.',
+    run: tracepathRun,
+    complete: (info) => (info.cur && info.cur[0] === '-' ? [] : hostNames()),
+  });
+
+  /* -------------------------------------------------------------------- mtr */
+  const MTR_USAGE = 'usage: mtr [-hvbgspxtTUCe46zJ] [--help] [--version] [--report] [--report-wide]\n\t\t[--report-cycles=COUNT] [--no-dns] [--address ADDRESS] [--interval=SECONDS]\n\t\t[--max-ttl=NUM] [--psize=BYTES|-s BYTES] HOSTNAME [PORT]\n\nSee the man page for details.\n';
+  function mtrStats(h) {
+    const a = h.rtts; const n = a.length;
+    const avg = n ? a.reduce((x, y) => x + y, 0) / n : 0;
+    const sd = n > 1 ? Math.sqrt(a.reduce((x, y) => x + (y - avg) * (y - avg), 0) / (n - 1)) : 0;
+    return { loss: h.sent ? (h.sent - n) * 100 / h.sent : 0, last: n ? a[n - 1] : 0, avg, best: n ? Math.min.apply(null, a) : 0, worst: n ? Math.max.apply(null, a) : 0, sd };
+  }
+  function mtrRow(i, label, h, width) {
+    const s = mtrStats(h); const f = (x) => x.toFixed(1);
+    const loss = s.loss >= 100 ? '100.0' : f(s.loss) + '%';
+    return pad(padL(i + 1, 3) + '.|-- ' + label, width) + padL(loss, 5) + padL(h.sent, 6) + padL(f(s.last), 7) + padL(f(s.avg), 6) + padL(f(s.best), 6) + padL(f(s.worst), 6) + padL(f(s.sd), 6);
+  }
+
+  async function mtrRun(ctx) {
+    const g = K.getopt(ctx.args, { short: '46bgspxtTUCeJzhvrwnc:i:m:o:P:a:f:B:S:', long: ['help', 'version', 'report', 'report-wide', 'no-dns', 'show-ips', 'report-cycles=', 'interval=', 'max-ttl=', 'psize=', 'address=', 'curses', 'displaymode=', 'udp', 'tcp', 'json', 'csv'], alias: { help: 'h', version: 'v', report: 'r', 'report-wide': 'w', 'no-dns': 'n', 'show-ips': 'b', 'report-cycles': 'c', interval: 'i', 'max-ttl': 'm', psize: 's' } });
+    if (g.err) { ctx.eprintln('mtr: ' + g.err); ctx.err(MTR_USAGE); return 1; }
+    const o = g.opts;
+    if (o.h) { ctx.out(MTR_USAGE); return 0; }
+    if (o.v) { ctx.println('mtr 0.96'); return 0; }
+    if (!g.rest.length) { ctx.err(MTR_USAGE); return 1; }
+    const cycles = o.c != null ? parseInt(o.c, 10) : 10; const interval = o.i != null ? parseFloat(o.i) : 1; const maxTtl = o.m != null ? parseInt(o.m, 10) : 30;
+    if (!(cycles > 0) || !(interval > 0) || !(maxTtl > 0)) { ctx.eprintln('mtr: Invalid argument'); return 1; }
+    const target = g.rest[0];
+    const dest = lookup(ctx, target);
+    if (dest.err) { ctx.eprintln('mtr: Failed to resolve host: ' + target + ': ' + RESOLVE_MSG[dest.err]); return 1; }
+    const rt = K.net.route(ctx.machine, dest.ip);
+    if (!rt.ok && rt.err === 'ENETUNREACH') { ctx.eprintln('mtr: Failed to start: Network is unreachable'); return 1; }
+    const hopCount = Math.min(maxTtl, rt.ok ? (rt.hops || []).length + 1 : 1);
+    const hops = Array.from({ length: hopCount }, () => ({ sent: 0, rtts: [], ip: null, name: null }));
+    const proto = o.T || o.tcp ? 'tcp' : o.U || o.udp ? 'udp' : 'icmp';
+    const cycle = () => hops.forEach((h, n) => {
+      h.sent++;
+      const r = rt.ok ? probeHop(ctx, rt, dest.ip, n + 1, proto, 80) : null;
+      if (r) { h.rtts.push(r.rtt); h.ip = r.ip; h.name = r.name; }
+    });
+    const label = (h, n) => {
+      if (!h.ip) return '???';
+      const name = h.name || rdns(ctx, h.ip) || (n === hops.length - 1 && h.ip === dest.ip && !dest.literal ? target : null);
+      if (o.n || !name) return h.ip;
+      return o.b ? name + ' (' + h.ip + ')' : name;
+    };
+    const live = ctx.isTTY && !o.r && !o.json && !o.csv;
+    if (live) return mtrLive(ctx, { hops, cycle, label, target, dest, interval, o });
+    for (let c = 0; c < cycles; c++) { cycle(); if (c < cycles - 1) await ctx.sleep(interval * 1000); }
+    await ctx.sleep(Math.min(interval * 1000, 1000));
+    const labels = hops.map(label);
+    const width = Math.max(34, o.w ? 8 + Math.max.apply(null, labels.map((l) => l.length)) + 1 : 0);
+    ctx.println('Start: ' + U.isoDate(K.clock.now()).replace(' ', 'T').slice(0, 19) + '+0000');
+    ctx.println(pad('HOST: ' + ctx.machine.hostname, width) + 'Loss%   Snt   Last   Avg  Best  Wrst StDev');
+    hops.forEach((h, n) => ctx.println(mtrRow(n, labels[n].length > 25 && !o.w ? labels[n].slice(0, 25) : labels[n], h, width)));
+    return 0;
+  }
+
+  /** The curses screen: redrawn every interval until q or Ctrl-C. */
+  async function mtrLive(ctx, s) {
+    let quit = false;
+    const off = ctx.term.onKey((k) => { if (k === 'q' || k === 'Q') quit = true; });
+    try {
+      while (!quit) {
+        s.cycle();
+        const labels = s.hops.map(s.label);
+        const head = ctx.machine.hostname + ' (' + ctx.machine.primaryIp() + ')';
+        const stamp = U.isoDate(K.clock.now()).replace(' ', 'T').slice(0, 19) + '+0000';
+        const lines = [
+          U.padStart('My traceroute  [v0.96]', 48), pad(head, Math.max(40, ctx.cols - stamp.length)) + stamp,
+          'Keys:  Help   Display mode   Restart statistics   Order of fields   quit',
+          U.padStart('Packets               Pings', 62),
+          ' Host' + ' '.repeat(34) + 'Loss%   Snt   Last   Avg  Best  Wrst StDev',
+        ].concat(s.hops.map((h, n) => mtrRow(n, labels[n], h, 40).replace(/^(\s*\d+)\.\|-- /, '$1. ')));
+        ctx.out('\x1b[2J\x1b[H' + lines.join('\n') + '\n');
+        await ctx.sleep(s.interval * 1000);
+      }
+    } finally { off(); }
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'mtr', pkg: 'mtr-tiny', section: 8,
+    summary: 'a network diagnostic tool',
+    synopsis: 'mtr [-hvbgspxtTUCe46zJ] [--report] [--report-wide] [--report-cycles COUNT] [--no-dns] [--interval SECONDS] [--max-ttl NUM] HOSTNAME',
+    man: 'DESCRIPTION\n       mtr combines the functionality of the traceroute and ping programs in a single network diagnostic tool. As mtr starts, it investigates the network connection between the host mtr runs on and HOSTNAME by sending packets with purposely low TTLs, then keeps measuring every hop it found: loss, latency and jitter.\n\n       Without --report mtr runs on the terminal and redraws the table every second; press q or Ctrl-C to leave.\n\nOPTIONS\n       -r, --report\n              Run non-interactively for --report-cycles cycles and print one table.\n       -c COUNT, --report-cycles COUNT\n              Number of pings sent per hop in report mode (default 10).\n       -n, --no-dns\n              Do not resolve host names.\n       -b, --show-ips\n              Show both host names and IP addresses.\n       -w, --report-wide\n              Report mode with the full host names.\n       -i SECONDS, --interval SECONDS\n              Time between pings (default 1).\n       -m NUM, --max-ttl NUM\n              Largest TTL to probe (default 30).\n       -T, --tcp; -u, --udp\n              Probe with TCP SYN or UDP instead of ICMP.\n       -4     Use IPv4 only.\n\nEXAMPLES\n       mtr -rn -c 5 10.10.10.10\n              Five-cycle report without name lookups.\n       mtr kali.org\n              Live view; press q to quit.',
+    run: mtrRun,
+    complete: (info) => (info.cur && info.cur[0] === '-' ? [] : hostNames()),
+  });
+
+
 /*@@END@@*/
 })(typeof globalThis !== 'undefined' ? globalThis : this);

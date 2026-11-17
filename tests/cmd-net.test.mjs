@@ -274,3 +274,98 @@ test('ip: colour with --color=always, json and pipelines', async () => {
   assert.equal(await sim.out('ip -o -4 addr | grep -c inet'), '2\n');
   assert.equal(await sim.out('ip -4 -br a | grep eth0 | tr -s " " | cut -d" " -f3'), '10.10.10.5/24\n');
 });
+
+/* ------------------------------------------------- traceroute, tracepath, mtr */
+
+test('traceroute: header, hop lines and the destination last', async () => {
+  const sim = await net();
+  const r = await sim.run('traceroute -n 8.8.8.8');
+  const lines = r.out.split('\n');
+  assert.equal(lines[0], 'traceroute to 8.8.8.8 (8.8.8.8), 30 hops max, 60 byte packets');
+  assert.match(lines[1], /^ 1  10\.10\.10\.1  \d\.\d{3} ms  \d\.\d{3} ms  \d\.\d{3} ms$/);
+  assert.ok(lines.some((l) => /^ \d  \* \* \*$/.test(l)), 'a silent hop shows * * *');
+  const last = lines[lines.length - 2];
+  assert.match(last, /^10  8\.8\.8\.8  \d+\.\d{3} ms  \d+\.\d{3} ms  \d+\.\d{3} ms$/);
+  assert.equal(r.code, 0);
+});
+
+test('traceroute: names, -m, -q, -f and a destination that never answers', async () => {
+  const sim = await net();
+  let r = await sim.out('traceroute web01.halcyon.lab');
+  assert.match(r, /^traceroute to web01\.halcyon\.lab \(10\.10\.10\.10\), 30 hops max, 60 byte packets\n 1  web01\.halcyon\.lab \(10\.10\.10\.10\)  /);
+  r = await sim.out('traceroute -n -m 3 -q 1 10.10.10.90');
+  assert.equal(r, 'traceroute to 10.10.10.90 (10.10.10.90), 3 hops max, 60 byte packets\n 1  * \n 2  * \n 3  * \n'.replace(/ \n/g, '\n'));
+  r = await sim.out('traceroute -n -f 2 -m 3 -q 1 8.8.8.8');
+  assert.match(r, /\n 2  100\.64\.0\.1  [\d.]+ ms\n 3  \*\n$/);
+  assert.match(await sim.out('traceroute -I -n -q 1 10.10.10.90 -m 1'), /^traceroute to/);
+});
+
+test('traceroute: errors, privileges and version', async () => {
+  const sim = await net();
+  let r = await sim.run('traceroute nosuch.halcyon.lab');
+  assert.equal(r.err, "nosuch.halcyon.lab: Name or service not known\nCannot handle \"host\" cmdline arg `nosuch.halcyon.lab' on position 1 (argc 1)\n");
+  assert.equal(r.code, 2);
+  r = await sim.run('traceroute -T 10.10.10.10');
+  assert.equal(r.err, 'You do not have enough privileges to use this traceroute method.\n');
+  assert.equal(r.code, 1);
+  r = await sim.run('sudo traceroute -T -n 10.10.10.10');
+  assert.match(r.out, / 1  10\.10\.10\.10  /);
+  sim.machine.routes.length = 0;
+  assert.equal((await sim.run('traceroute 8.8.8.8')).err, 'connect: Network is unreachable\n');
+  assert.match((await sim.run('traceroute -V')).out, /^Modern traceroute for Linux, version 2\.1\.6/);
+  assert.equal((await sim.run('traceroute')).err, 'Specify "host" missing argument.\n');
+});
+
+test('traceroute: a dead host on the local segment reports !H', async () => {
+  const sim = await net();
+  sim.K.net.hostById('web01').up = false;
+  const r = await sim.out('traceroute -n 10.10.10.10');
+  assert.match(r, / 1  10\.10\.10\.5  30\d\d\.\d{3} ms !H  30\d\d\.\d{3} ms !H  30\d\d\.\d{3} ms !H\n$/);
+});
+
+test('tracepath: hop lines, no reply, resume line', async () => {
+  const sim = await net();
+  const r = await sim.run('tracepath -n 8.8.8.8');
+  const lines = r.out.split('\n');
+  assert.match(lines[0], /^ 1\?: \[LOCALHOST\] +pmtu 1500$/);
+  assert.match(lines[1], /^ 1:  10\.10\.10\.1 +\d\.\d{3}ms $/);
+  assert.match(lines[2], /^ 1:  10\.10\.10\.1 +\d\.\d{3}ms $/);
+  assert.ok(lines.includes(' 3:  no reply'));
+  assert.match(lines[lines.length - 3], /^10:  8\.8\.8\.8 +\d+\.\d{3}ms reached$/);
+  assert.equal(lines[lines.length - 2], '     Resume: pmtu 1500 hops 10 back 10 ');
+  assert.equal((await sim.run('tracepath')).code, 255);
+  assert.equal((await sim.run('tracepath nosuch.halcyon.lab')).err, 'tracepath: nosuch.halcyon.lab: Name or service not known\n');
+});
+
+test('mtr: report mode table', async () => {
+  const sim = await net();
+  const r = await sim.run('mtr -r -n -c 4 8.8.8.8');
+  const lines = r.out.split('\n');
+  assert.match(lines[0], /^Start: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+0000$/);
+  assert.equal(lines[1], 'HOST: kali                        Loss%   Snt   Last   Avg  Best  Wrst StDev');
+  assert.match(lines[2], /^  1\.\|-- 10\.10\.10\.1 +0\.0% +4 +\d\.\d +\d\.\d +\d\.\d +\d\.\d +\d\.\d$/);
+  assert.ok(lines.some((l) => /^  3\.\|-- \?\?\? +100\.0 +4 +0\.0 +0\.0 +0\.0 +0\.0 +0\.0$/.test(l)));
+  assert.match(lines[11], /^ 10\.\|-- 8\.8\.8\.8 /);
+  assert.equal((await sim.run('mtr --version')).out, 'mtr 0.96\n');
+  assert.match((await sim.run('mtr -r nosuch.halcyon.lab')).err, /^mtr: Failed to resolve host: nosuch\.halcyon\.lab: Name or service not known/);
+});
+
+test('mtr: live view redraws until q', async () => {
+  const sim = await net();
+  sim.term.isTTY = true;
+  const { K, shell, term } = sim;
+  K.clock.useReal(); K.settings.timeScale = 0.01;
+  term.take();
+  const run = shell.runLine('mtr -n 10.10.10.10');
+  setTimeout(() => term.pressKey('q'), 60);
+  const code = await run;
+  const out = K.util.stripAnsi(term.take());
+  assert.equal(code, 0);
+  assert.match(out, /My traceroute  \[v0\.96\]/);
+  assert.match(out, / Host +Loss% +Snt +Last +Avg +Best +Wrst StDev/);
+});
+
+test('traceroute works in a pipeline', async () => {
+  const sim = await net();
+  assert.equal(await sim.out('traceroute -n -q 1 10.10.10.10 | grep -c "10.10.10.10"'), '2\n');
+});
