@@ -198,8 +198,11 @@
 
   /* ---------------------------------------------------------- files-manage */
   const WORK = '/home/kali/practice/files';
-  /** The line took the learner into the working directory (a cd of any spelling, or the path typed as a command). */
-  const inWork = { cwd: WORK, any: [{ cmd: 'cd' }, { line: /practice\/files/ }] };
+  /**
+   * The line took the learner into the working directory (a cd of any spelling, or the path typed as a command).
+   * In the check engine `any` is exclusive: conditions written beside it are ignored, so it always sits inside `all`.
+   */
+  const inWork = { all: [{ cwd: WORK }, { any: [{ cmd: 'cd' }, { line: /practice\/files/ }] }] };
   const exists = (path, type) => ({ file: type ? { path, type } : { path } });
   const gone = (path) => ({ file: { path, exists: false } });
   /** Is `path` itself a symbolic link (not the file it points to)? */
@@ -311,7 +314,7 @@
         ),
         hint: 'The shape is `cp -r SOURCE DESTINATION`, and the destination is a name that does not exist yet. If `backup` is left over from an earlier attempt, remove it first with `rm -r backup`.',
         solution: 'cp -r ' + DATA + '/logs backup',
-        check: { cmd: 'cp', any: [exists(WORK + '/backup/access.log'), exists(WORK + '/backup/logs/access.log')] },
+        check: { all: [{ cmd: 'cp' }, { any: [exists(WORK + '/backup/access.log'), exists(WORK + '/backup/logs/access.log')] }] },
       },
       {
         id: 'rm',
@@ -587,7 +590,7 @@
         ),
         hint: 'Run the same `wc -l` command as in the last step. Send its output to the notes file either with `>>`, or through a pipe to `tee -a`.',
         solution: 'wc -l ' + LOGS + '/*.log >> ~/engagement/notes.md',
-        check: { any: [{ line: />>/ }, { cmd: 'tee', args: ['-a'] }], file: { path: NOTES, contains: /926\s+total/ } },
+        check: { all: [{ any: [{ line: />>\s*\S*notes\.md/ }, { cmd: 'tee', args: ['-a'], argsRe: /notes\.md/ }] }, has(NOTES, /926\s+total/)] },
       },
     ],
     quiz: [
