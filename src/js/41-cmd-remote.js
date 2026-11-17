@@ -256,6 +256,9 @@
   /** Stand-in for the HMAC-SHA1 of a hashed known_hosts name. */
   const hostHash = (salt, name) => b64enc(noiseBytes(U.prng('known_hosts:' + salt + ':' + name), 20));
 
+  /** Has -q or a LogLevel below INFO silenced ssh's warnings and its closing line? */
+  const sshQuiet = (conf) => /^(quiet|fatal|error)$/i.test(conf.loglevel || '');
+
   /** Parsed known_hosts entries: [{ n (line number), names | null when hashed, salt, hash, type, blob }] */
   function readKnownHosts(fs, path) {
     let text;
@@ -329,7 +332,7 @@
     try {
       if (!ctx.fs.exists(K.VFS.dirname(file))) ctx.fs.mkdir(K.VFS.dirname(file), { mode: 0o700 });
       ctx.fs.append(file, first + ' ssh-ed25519 ' + blob + '\n', { mode: 0o600 });
-      say("Warning: Permanently added '" + name + "' (ED25519) to the list of known hosts.");
+      if (!sshQuiet(conf)) say("Warning: Permanently added '" + name + "' (ED25519) to the list of known hosts.");
     } catch (e) {
       say('Failed to add the host to the list of known hosts (' + file + ').');
     }
@@ -340,7 +343,12 @@
 
   const DEFAULT_IDENTITIES = ['id_rsa', 'id_ecdsa', 'id_ed25519'];
   const SSH_KEYWORDS = ['hostname', 'user', 'port', 'identityfile', 'stricthostkeychecking', 'userknownhostsfile', 'hashknownhosts',
-    'batchmode', 'connecttimeout', 'numberofpasswordprompts', 'preferredauthentications', 'pubkeyauthentication', 'passwordauthentication'];
+    'batchmode', 'connecttimeout', 'numberofpasswordprompts', 'preferredauthentications', 'pubkeyauthentication', 'passwordauthentication', 'loglevel'];
+  // Real keywords that change nothing a learner can see here; they are accepted and otherwise ignored.
+  const SSH_KEYWORDS_IGNORED = ['addkeystoagent', 'addressfamily', 'checkhostip', 'ciphers', 'compression', 'connectionattempts', 'controlmaster', 'controlpath', 'controlpersist',
+    'escapechar', 'forwardagent', 'forwardx11', 'globalknownhostsfile', 'gssapiauthentication', 'hostbasedauthentication', 'hostkeyalgorithms', 'hostkeyalias', 'identitiesonly',
+    'kbdinteractiveauthentication', 'kexalgorithms', 'macs', 'pubkeyacceptedalgorithms', 'requesttty', 'sendenv', 'serveralivecountmax', 'serveraliveinterval', 'setenv',
+    'tcpkeepalive', 'updatehostkeys', 'verifyhostkeydns', 'visualhostkey'];
 
   /** "-o Keyword=value" arguments as a lower-cased map: { conf } or { err } for a keyword ssh does not have. */
   function cliOptions(list) {
@@ -348,7 +356,7 @@
     for (const item of list) {
       const m = /^\s*([A-Za-z]+)\s*[=\s]\s*(.*?)\s*$/.exec(item);
       const key = m ? m[1].toLowerCase() : item;
-      if (!m || !SSH_KEYWORDS.includes(key)) return { err: 'command-line: line 0: Bad configuration option: ' + key };
+      if (!m || !SSH_KEYWORDS.concat(SSH_KEYWORDS_IGNORED).includes(key)) return { err: 'command-line: line 0: Bad configuration option: ' + key };
       conf[key] = m[2];
     }
     return { conf };
@@ -709,12 +717,13 @@
       if (port != null && !(/^\d+$/.test(port) && +port > 0 && +port < 65536)) { ctx.err("Bad port '" + port + "'\n"); return 255; }
       const cli = cliOptions(every('o'));
       if (cli.err) { ctx.err(cli.err + '\n'); return 255; }
+      if (opt('q')) cli.conf.loglevel = 'QUIET';
       const command = after.rest.join(' ');
       const login = await sshLogin(ctx, {
         host: dest.host, user: opt('l') || dest.user, port, identities: every('i'), options: cli.conf, configFile: opt('F'), verbose: !!opt('v'),
       });
       if (!login) return 255;
-      const closed = () => { if (!opt('q')) ctx.err('Connection to ' + login.target.host + ' closed.\n'); };
+      const closed = () => { if (!sshQuiet(login.target.conf)) ctx.err('Connection to ' + login.target.host + ' closed.\n'); };
       try {
         if (command) {
           const status = await remoteCommand(ctx, login, command, ctx.stdin);
@@ -953,7 +962,7 @@
       '       -t ecdsa | ed25519 | rsa\n              Type of key to create. The default is ed25519.\n       -y     Read a private key file and print the public key to stdout.\n\n' +
       "EXAMPLES\n       ssh-keygen\n              Create an Ed25519 key pair, answering the questions about the file and the passphrase.\n       ssh-keygen -t rsa -b 4096 -f ~/.ssh/lab_rsa -N '' -C 'kali@lab'\n              Create an RSA key without any questions.\n       ssh-keygen -lv -f ~/.ssh/id_ed25519.pub\n              Show a key's fingerprint and randomart image.\n       ssh-keygen -R web01.halcyon.lab\n              Forget the stored host key of web01.",
     async run(ctx) {
-      const g = bsdGetopt(ctx.args, 'lqvyb:C:E:f:N:R:t:');
+      const g = bsdGetopt(ctx.args, 'loqvya:b:C:E:f:N:R:t:'); // -a (KDF rounds) and -o (new format, long the default) change nothing here
       if (g.err || g.rest.length) { ctx.err((g.err || 'Too many arguments.') + '\n' + KEYGEN_USAGE); return 1; }
       const o = g.opts;
       const alg = String(o.E || 'sha256').toLowerCase();

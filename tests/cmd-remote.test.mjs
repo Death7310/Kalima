@@ -193,6 +193,11 @@ test('ssh: ~/.ssh/config and -v', async () => {
   assert.match(r.err, /debug1: Trying private key: \/home\/kali\/\.ssh\/id_ed25519\ndebug1: Next authentication method: password\nAuthenticated to web01\.halcyon\.lab \(\[10\.10\.10\.10\]:22\) using "password"\.\n/);
   r = await withInput(sim, 'ssh -i /tmp/nokey web true', ['student']);
   assert.match(r.err, /^Warning: Identity file \/tmp\/nokey not accessible: No such file or directory\.\n/);
+  // options often seen in lab write-ups: a throw-away known_hosts file and no warnings
+  r = await withInput(sim, 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ServerAliveInterval=30 student@db01.halcyon.lab hostname', ['student']);
+  assert.deepEqual([r.code, r.out, r.err], [0, 'db01\n', '']);
+  r = await withInput(sim, 'ssh -q -o StrictHostKeyChecking=accept-new student@dev01.halcyon.lab hostname', ['student']);
+  assert.deepEqual([r.out, r.err], ['dev01\n', '']);
 });
 
 test("ssh: Kali's own sshd only answers while something listens on port 22", async () => {
