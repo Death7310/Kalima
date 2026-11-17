@@ -225,7 +225,8 @@
       document.addEventListener('keydown', (e) => this._strayKey(e));
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') this._saveHome(); });
       root.addEventListener('pagehide', () => this._saveHome());
-      root.addEventListener('beforeunload', (e) => { if (this.tabs.some((t) => t.term.unsaved)) e.preventDefault(); });   // an editor has unsaved text
+      // Ctrl+W belongs to the browser and closes the page: ask first when that would interrupt an editor or a half-typed line
+      root.addEventListener('beforeunload', (e) => { if (this.tabs.some((t) => t.term.busy)) e.preventDefault(); });
       this._followViewport();
     }
 
@@ -808,6 +809,9 @@
             h('button', { type: 'button', class: 'k-btn', 'aria-label': 'Smaller text', onclick: () => resize(-1) }, 'A−'), sizeOut,
             h('button', { type: 'button', class: 'k-btn', 'aria-label': 'Larger text', onclick: () => resize(1) }, 'A+'))),
         choice('On-screen terminal keys', 'k-keybar', KEYBARS, this.settings.keybar, (v) => this.setKeybar(v)),
+        document.documentElement.requestFullscreen && h('fieldset', { class: 'k-field' }, h('legend', null, 'Browser shortcuts'),
+          h('button', { type: 'button', class: 'k-btn', onclick: () => { dlg.close(); this.toggleFullscreen(); } }, document.fullscreenElement ? 'Leave full screen' : 'Full screen'),
+          h('p', { class: 'k-field-note' }, 'The browser keeps a few keys for itself: Ctrl+W closes this page before the terminal sees it. In full screen, Chromium browsers pass these keys to the terminal. Hold Esc to leave full screen.')),
         h('fieldset', { class: 'k-field' }, h('legend', null, 'Simulator'),
           h('div', { class: 'k-action' }, h('button', { type: 'button', class: 'k-btn', onclick: () => { dlg.close(); this.restart({ notice: 'The simulator restarted. Your files and progress were kept.' }); } }, 'Restart simulator'),
             h('p', { class: 'k-field-note' }, 'Reboots the simulated Kali machine and the lab network. Files and lesson progress are kept.')),
@@ -816,6 +820,15 @@
         h('p', { class: 'k-about' }, 'Kalima ' + K.version + ', a simulator of ' + K.distro.name + ' ' + K.distro.release +
           '. Everything is simulated and offline. In real work, use these tools only on systems you are authorized to test.'));
       const dlg = this._dialog('Settings', body);
+    }
+
+    /** In full screen, Chromium browsers let the page have Ctrl+W, Ctrl+T, Ctrl+N and Esc, which otherwise act on the browser. */
+    async toggleFullscreen() {
+      try {
+        if (document.fullscreenElement) { await document.exitFullscreen(); return; }
+        await document.documentElement.requestFullscreen();
+        if (navigator.keyboard && navigator.keyboard.lock) await navigator.keyboard.lock(['KeyW', 'KeyT', 'KeyN', 'Escape']);
+      } catch (e) { this.toast('Full screen is not available here.'); }
     }
 
     setTimeScale(value) { this.settings.timeScale = K.settings.timeScale = value; this._saveSettings(); }

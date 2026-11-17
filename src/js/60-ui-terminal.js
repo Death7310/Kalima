@@ -437,8 +437,8 @@
     }
     /** 'read' while a line is being read, 'run' while a command runs, or 'pager', 'nano', 'vim'. */
     get mode() { return this._overlay ? this._overlay.kind : this._read ? 'read' : 'run'; }
-    /** True while an editor holds unsaved changes. */
-    get unsaved() { return !!(this._overlay && this._overlay.dirty); }
+    /** True while a full-screen program is open or a line is half typed: closing the page now would be a surprise. */
+    get busy() { return !!(this._overlay || (this._read && this._read.buf)); }
 
     _schedule() {
       if (this._raf || this._disposed) return;
@@ -624,7 +624,7 @@
       this._stick = true;
       if (this._overlay) { this._overlay.paste(text); return; }
       const r = this._read;
-      if (!r) { if (!this._subs.size) this._pending += text; return; }
+      if (!r) { if (!this._subs.size) { this._pending += text; this.buf.write(visible(text)); this._schedule(); } return; }
       if (r.search) this._searchEnd(true);
       const nl = text.indexOf('\n');
       if (nl < 0) { this._edit(r.buf.slice(0, r.pos) + text + r.buf.slice(r.pos), r.pos + text.length); return; }
@@ -743,9 +743,13 @@
         return true;
       }
       if (!k.ctrl && !k.alt) {
-        if (key === 'Enter') { this._pending += '\n'; return true; }
-        if (key === 'Backspace') { if (this._pending && !this._pending.endsWith('\n')) this._pending = this._pending.slice(0, -1); return true; }
-        if (key.length === 1 || key.length === 2 && key.codePointAt(0) > 0xffff) { this._pending += key; return true; }
+        // type-ahead: the tty echoes it now and the next prompt reads it
+        if (key === 'Enter') { this._pending += '\n'; this.buf.write('\n'); return true; }
+        if (key === 'Backspace') {
+          if (this._pending && !this._pending.endsWith('\n')) { this._pending = this._pending.slice(0, -1); this.buf.write('\b \b'); }
+          return true;
+        }
+        if (isText(key)) { this._pending += key; this.buf.write(visible(key)); return true; }
         return key === 'Tab';
       }
       return k.ctrl && !k.alt && OWNED_CTRL.indexOf(lk) >= 0;

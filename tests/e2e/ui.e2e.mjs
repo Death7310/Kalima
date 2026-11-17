@@ -271,7 +271,7 @@ group('terminal: reverse search, suggestions and continuation lines', async ({ p
   // zsh-autosuggestions: the rest of the newest matching history line, accepted with Right
   await page.keyboard.type('echo sea');
   assert.equal(await page.evaluate(() => K.app.term._read.suggest), 'rch-target-one');
-  assert.equal(await page.locator('.kt-suggest').first().isVisible(), true);
+  await page.locator('.kt-suggest').first().waitFor();
   await page.keyboard.press('ArrowRight');
   assert.equal(await typed(page), 'echo search-target-one');
   await page.keyboard.press('Control+w');
