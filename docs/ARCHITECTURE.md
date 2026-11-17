@@ -266,6 +266,13 @@ See the header of `35-lessons.js` for the full schema. Rules for lesson authors:
   from a fresh boot plus the earlier steps' solutions). `tests/lessons.test.mjs`
   replays every solution and fails if a check does not pass.
 - Steps that need typed input (passwords) list it in `input: ['kali']`.
+- A step whose real solution needs the interactive editor (which a headless
+  terminal cannot drive) also gives `testSolution`: a command line that produces
+  the same outcome, used only by the replay test. The check must test the outcome
+  (file content), not the editor command.
+- Practice files that lessons need are seeded read-only under
+  `/usr/share/kalima/` with `K.fsSeeds` (the learner's home directory is restored
+  from saved state, so new seeds there would not reach returning learners).
 - Checks test the *outcome* the step teaches, loosely enough that any correct
   approach passes, tightly enough that the wrong command does not.
 - Text is "markdown-lite": paragraphs, `- ` lists, `` `code` ``, `**bold**`,

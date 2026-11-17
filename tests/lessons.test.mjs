@@ -66,7 +66,10 @@ async function playLesson(sim, lessonId, { strict }) {
         assert.ok(!events.some((e) => K.lessons.check(step.check, e)), `${where}: check passes before the learner has done anything`);
       }
       events = [];
-      const lines = Array.isArray(step.solution) ? step.solution : [step.solution];
+      // testSolution replaces solution in this replay only, for steps whose real
+      // solution needs something a headless terminal cannot do (the interactive editor)
+      const sol = step.testSolution != null ? step.testSolution : step.solution;
+      const lines = Array.isArray(sol) ? sol : [sol];
       if (step.input) sim.term.feed(...step.input);
       let transcript = '';
       for (const line of lines) {
