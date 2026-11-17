@@ -427,6 +427,81 @@ test('nmap -R resolves names of hosts that are down too', async () => {
   assert.match((await sim.run('nmap -v -sn 10.10.10.50')).out, /Nmap scan report for 10\.10\.10\.50 \[host down\]\n/);
 });
 
+/* ------------------------------------------------------------- nmap: scripts */
+
+test('nmap -sC: default scripts report what the services publish', async () => {
+  const sim = await lab();
+  let r = await sim.run('nmap -sC web01.halcyon.lab');
+  const out = r.out.split('\n');
+  const at = out.indexOf('22/tcp  open  ssh');
+  assert.equal(out[at + 1], '| ssh-hostkey: ');
+  assert.match(out[at + 2], /^\|   3072 ([0-9a-f]{2}:){15}[0-9a-f]{2} \(RSA\)$/);
+  assert.match(out[at + 3], /^\|   256 ([0-9a-f]{2}:){15}[0-9a-f]{2} \(ECDSA\)$/);
+  assert.match(out[at + 4], /^\|_  256 ([0-9a-f]{2}:){15}[0-9a-f]{2} \(ED25519\)$/);
+  assert.deepEqual(out.slice(at + 5, at + 16), [
+    '80/tcp  open  http',
+    '| http-robots.txt: 2 disallowed entries ',
+    '|_/staff/ /backup/',
+    '|_http-title: Halcyon Freight Intranet',
+    '443/tcp open  https',
+    '| http-robots.txt: 2 disallowed entries ',
+    '|_/staff/ /backup/',
+    '|_http-title: Halcyon Freight Intranet',
+    '| ssl-cert: Subject: commonName=web01.halcyon.lab',
+    '| Subject Alternative Name: DNS:web01.halcyon.lab, DNS:www.halcyon.lab, DNS:intranet.halcyon.lab',
+    '| Not valid before: 2026-09-01T00:00:00',
+  ]);
+  assert.equal(out[at + 16], '|_Not valid after:  2026-11-30T23:59:59');
+  assert.ok((await sim.run('nmap -sC -p 22 web01.halcyon.lab')).out.includes(out[at + 2] + '\n'), 'a host keeps its simulated fingerprint');
+  assert.ok(!(await sim.run('nmap -sC -p 22 db01.halcyon.lab')).out.includes(out[at + 2]), 'and every host has its own');
+
+  r = await sim.run('nmap --script=default -p 21,25 files01.halcyon.lab mail01.halcyon.lab');
+  assert.match(r.out, /21\/tcp open +ftp\n\| ftp-anon: Anonymous FTP login allowed \(FTP code 230\)\n\|_drwxr-xr-x +\d+ 0 +0 +4096 \w{3} \d\d [\d:]+ pub\n/);
+  assert.match(r.out, /25\/tcp open +smtp\n\|_smtp-commands: mail01\.halcyon\.lab, PIPELINING, SIZE 10240000, [A-Z0-9, ]+\n/);
+});
+
+test('nmap --script: named scripts, -sV adds http-server-header, anything else is declined', async () => {
+  const sim = await lab();
+  let r = await sim.run('nmap --script banner -p 21,22,80 files01.halcyon.lab dev01.halcyon.lab');
+  assert.match(r.out, /21\/tcp open +ftp\n\|_banner: 220 \(vsFTPd 3\.0\.5\)\n22\/tcp open +ssh\n\|_banner: SSH-2\.0-OpenSSH_10\.0p2 Debian-7\n80\/tcp closed http\n/);
+  assert.match(r.out, /\|_banner: SSH-2\.0-OpenSSH_9\.6p1 Ubuntu-3ubuntu13\.14\n/);
+
+  r = await sim.run('nmap --script http-title -p 80,3000,8080 cam01.halcyon.lab dev01.halcyon.lab printer.halcyon.lab');
+  assert.match(r.out, /80\/tcp +open +http\n\|_http-title: 401 Unauthorized\n/);
+  assert.match(r.out, /3000\/tcp open +ppp\n\|_http-title: Shipment Tracker \(dev\)\n8080\/tcp open +http-proxy\n\|_http-title: Site doesn't have a title \(text\/html; charset=utf-8\)\.\n/);
+  assert.match(r.out, /\|_http-title: HP LaserJet M507 &nbsp; printer\.halcyon\.lab\n/);
+
+  r = await sim.run('nmap -sC -sV -p 80 web01.halcyon.lab');
+  assert.match(r.out, /80\/tcp open  http    nginx 1\.26\.3\n\| http-robots\.txt: 2 disallowed entries \n\|_\/staff\/ \/backup\/\n\|_http-server-header: nginx\/1\.26\.3\n\|_http-title: Halcyon Freight Intranet\n/);
+  assert.doesNotMatch((await sim.run('nmap -sC -p 80 web01.halcyon.lab')).out, /http-server-header/);
+
+  r = await sim.run('nmap --script vuln,http-title -p 80 gw.halcyon.lab');
+  assert.equal(r.err, "NSE: 'vuln' is not part of this simulation, which only has these informational scripts: banner, ftp-anon, http-robots.txt, http-server-header, http-title, smtp-commands, ssh-hostkey, ssl-cert.\n");
+  assert.match(r.out, /80\/tcp open  http\n\|_http-title: gw - LuCI\n/);
+  r = await sim.run('nmap --script ssh-brute -p 22 web01.halcyon.lab');
+  assert.match(r.err, /^NSE: 'ssh-brute' is not part of this simulation/);
+  assert.doesNotMatch(r.out, /\|/, 'the scan itself still runs, without script output');
+  assert.match(r.out, /22\/tcp open  ssh\n/);
+
+  r = await sim.run('nmap -v --script "http-*" -p 80 web01.halcyon.lab');
+  assert.match(r.out, /^Starting Nmap[^\n]*\nNSE: Loaded 3 scripts for scanning\.\n/);
+  assert.match(r.out, /NSE: Script scanning 10\.10\.10\.10\.\nInitiating NSE at 14:3\d\nCompleted NSE at 14:3\d, \d\.\d\ds elapsed\n/);
+
+  r = await sim.run('nmap -sC -p 80 web01.halcyon.lab -oX - | grep -o "<script[^>]*>"');
+  assert.equal(r.out, '<script id="http-robots.txt" output="2 disallowed entries &#xa;/staff/ /backup/"/>\n<script id="http-title" output="Halcyon Freight Intranet"/>\n');
+});
+
+test('nmap scripts behave like clients: requests reach the server logs', async () => {
+  const sim = await lab();
+  const seen = [];
+  sim.K.net.bus.on('http', (e) => seen.push(e.request.method + ' ' + e.request.path + ' ' + e.request.headers['user-agent']));
+  await sim.run('nmap -sC -p 80 web01.halcyon.lab');
+  assert.deepEqual(seen, [
+    'GET /robots.txt Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)',
+    'GET / Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)',
+  ]);
+});
+
 test('nmap: tab completion offers lab hosts and the network in scope', async () => {
   const sim = await lab();
   const complete = (l) => sim.shell.complete(l, l.length).items.map((i) => i.text);

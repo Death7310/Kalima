@@ -259,9 +259,9 @@
   const badOption = (text) => new Fatal('nmap: ' + text + '\nSee the output of nmap -h for a summary of options.\n', 255);
 
   // Long options: 1 = takes an argument.
-  const NMAP_LONG = { help: 0, version: 0, open: 0, reason: 0, 'top-ports': 1, exclude: 1, unprivileged: 0, traceroute: 0 };
+  const NMAP_LONG = { help: 0, version: 0, open: 0, reason: 0, 'top-ports': 1, exclude: 1, unprivileged: 0, traceroute: 0, script: 1 };
   const NMAP_FLAGS = { n: 'noDns', R: 'alwaysDns', F: 'fast', r: 'sequential', h: 'help', V: 'version', O: 'os', A: 'aggressive' };
-  const SCAN_LETTERS = { S: 'syn', T: 'connect', U: 'udp', V: 'detect', n: 'pingOnly', P: 'pingOnly' };
+  const SCAN_LETTERS = { S: 'syn', T: 'connect', U: 'udp', V: 'detect', C: 'scripts', n: 'pingOnly', P: 'pingOnly' };
   const OUTPUT_KINDS = { N: ['normal'], G: ['grepable'], X: ['xml'], A: ['normal', 'grepable', 'xml'] };
   const OUTPUT_SUFFIX = { normal: '.nmap', grepable: '.gnmap', xml: '.xml' };
 
@@ -379,6 +379,7 @@
     if (o.traceroute && !o.root) throw quit('Traceroute has to be run as root');
     if (o.aggressive) Object.assign(o, { os: o.root, traceroute: o.root }); // -A quietly leaves out what needs root
     o.detect = !!(o.scans.detect || o.aggressive);
+    o.scripts = o.scans.pingOnly ? [] : chosenScripts(ctx, o);
     if (o.fast && o.portSpec) {
       throw quit('You cannot use -F (fast scan) with -p (explicit port selection) but see --top-ports and --port-ratio to fast scan a range of ports');
     }
@@ -408,7 +409,7 @@
     const o = run.o; const machine = run.ctx.machine;
     const rt = K.net.route(machine, t.ip);
     const host = rt.host;
-    t.route = rt;
+    Object.assign(t, { route: rt, host: host || null });
     t.ttl = host && !rt.self ? (host.os.ttl || 64) - rt.hops.length : 64;
     if (rt.self) {
       // A privileged Nmap recognises its own address and does not ping it, so a ping scan has no latency to show.
@@ -698,6 +699,174 @@
     });
   }
 
+  /* -------------------------------------------------------- nmap: script scan */
+
+  const NSE_AGENT = 'Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)';
+  const DN_NAMES = { C: 'countryName', ST: 'stateOrProvinceName', L: 'localityName', O: 'organizationName', OU: 'organizationalUnitName', CN: 'commonName' };
+  // The validity K.net.http reports for a host without its own certificate data.
+  const DEFAULT_VALIDITY = { notBefore: 'Sep  1 00:00:00 2026 GMT', notAfter: 'Nov 30 23:59:59 2026 GMT' };
+
+  const isHttp = (svc) => svc.handler === 'http' || /^https?$/.test(svc.name);
+
+  /** One HTTP request as the http library of NSE makes it; null when the server does not answer. */
+  function nseGet(run, t, e, path) {
+    const url = (e.service.tls ? 'https' : 'http') + '://' + (t.given || t.ip) + ':' + e.port + path;
+    try { return K.net.http(run.ctx.machine, { url, ip: t.ip, headers: { 'User-Agent': NSE_AGENT, Host: (t.given || t.ip) + ':' + e.port } }); }
+    catch (err) { if (err instanceof K.NetError) return null; throw err; }
+  }
+
+  /** The front page of a web port, fetched once and shared by the scripts that read it. */
+  function frontPage(run, t, e) {
+    if (e.front === undefined) e.front = nseGet(run, t, e, '/');
+    return e.front;
+  }
+
+  /** A short conversation with a line-based service: returns { greeting, ask(line) } or null. */
+  function dialogue(run, t, e) {
+    let session;
+    try { session = K.net.connect(run.ctx.machine, t.ip, e.port); }
+    catch (err) { if (err instanceof K.NetError) return null; throw err; }
+    return { session, greeting: session.greeting, ask: (line) => session.send(line + '\r\n') };
+  }
+
+  function simulatedFingerprint(seed) {
+    const next = U.prng('nse-hostkey:' + seed);
+    return Array.from({ length: 16 }, () => Math.floor(next() * 256).toString(16).padStart(2, '0')).join(':');
+  }
+
+  const certDate = (text) => {
+    const m = /^(\w{3}) +(\d+) (\d\d:\d\d:\d\d) (\d{4})/.exec(text);
+    return m[4] + '-' + U.pad2(U.MONTHS.indexOf(m[1]) + 1) + '-' + U.pad2(+m[2]) + 'T' + m[3];
+  };
+
+  // The informational scripts of this simulation: which ports each one looks at and what it reports.
+  const NSE_SCRIPTS = {
+    banner: {
+      on: (e) => e.scan.proto === 'tcp',
+      run(run, t, e) {
+        const talk = dialogue(run, t, e);
+        if (!talk) return null;
+        talk.session.close();
+        const text = talk.greeting.trim().replace(/\r/g, '\\x0D').replace(/\n/g, '\\x0A');
+        return text ? [text] : null;
+      },
+    },
+    'ftp-anon': {
+      on: (e) => e.service.name === 'ftp',
+      run(run, t, e) {
+        const talk = dialogue(run, t, e);
+        if (!talk) return null;
+        talk.ask('USER anonymous');
+        const login = /^230/.test(talk.ask('PASS IEUser@'));
+        let listing = [];
+        if (login) {
+          talk.session.state.data = ''; // the data connection of the simulated FTP server
+          talk.ask('PASV');
+          if (/^150/.test(talk.ask('LIST'))) listing = talk.session.state.data.split('\r\n').filter(Boolean).slice(0, 20);
+        }
+        talk.ask('QUIT');
+        talk.session.close();
+        return login ? ['Anonymous FTP login allowed (FTP code 230)'].concat(listing) : null;
+      },
+    },
+    'http-robots.txt': {
+      on: (e) => isHttp(e.service),
+      run(run, t, e) {
+        const res = nseGet(run, t, e, '/robots.txt');
+        if (!res || res.status !== 200) return null;
+        const paths = res.body.split(/\r?\n/).map((line) => /^\s*disallow:\s*(\S+)/i.exec(line)).filter(Boolean).map((m) => m[1]);
+        return paths.length ? [plural(paths.length, 'disallowed entry', 'disallowed entries') + ' ', paths.join(' ')] : null;
+      },
+    },
+    'http-server-header': {
+      on: (e) => isHttp(e.service),
+      run(run, t, e) {
+        const res = frontPage(run, t, e);
+        return res && res.headers.server ? [res.headers.server] : null;
+      },
+    },
+    'http-title': {
+      on: (e) => isHttp(e.service),
+      run(run, t, e) {
+        let res = frontPage(run, t, e); let moved = null;
+        if (!res) return null;
+        // NSE follows a redirect only when it stays on the host it was asked to look at.
+        for (let hops = 0; res.status >= 301 && res.status <= 308 && res.headers.location && hops < 5; hops++) {
+          const where = /^(?:https?:\/\/([^/:]+)(?::\d+)?)?(\/.*)?$/.exec(res.headers.location);
+          if (!where || (where[1] && where[1] !== t.given && where[1] !== t.ip)) return ['Did not follow redirect to ' + res.headers.location];
+          moved = res.headers.location;
+          res = nseGet(run, t, e, where[2] || '/');
+          if (!res) return null;
+        }
+        const title = /<title[^>]*>([^<]*)<\/title>/i.exec(res.body);
+        const text = title ? title[1].replace(/\s+/g, ' ').trim() : "Site doesn't have a title" + (res.headers['content-type'] ? ' (' + res.headers['content-type'] + ').' : '.');
+        return [text].concat(moved ? ['Requested resource was ' + moved] : []);
+      },
+    },
+    'smtp-commands': {
+      on: (e) => /^(smtp|smtps|submission)$/.test(e.service.name),
+      run(run, t, e) {
+        const talk = dialogue(run, t, e);
+        if (!talk) return null;
+        const words = talk.ask('EHLO nmap.scanme.org').split(/\r?\n/).map((line) => /^250[- ](.*)$/.exec(line)).filter(Boolean).map((m) => m[1]);
+        talk.ask('QUIT');
+        talk.session.close();
+        return words.length ? [words.join(', ')] : null;
+      },
+    },
+    'ssh-hostkey': {
+      on: (e) => e.service.name === 'ssh',
+      run(run, t) {
+        const id = t.host ? t.host.id : t.ip;
+        return [''].concat([[3072, 'RSA'], [256, 'ECDSA'], [256, 'ED25519']].map((k) => '  ' + k[0] + ' ' + simulatedFingerprint(id + ':' + k[1]) + ' (' + k[1] + ')'));
+      },
+    },
+    'ssl-cert': {
+      on: (e) => !!e.service.tls,
+      run(run, t) {
+        const name = (t.host && t.host.fqdn) || t.given || t.ip;
+        const cert = Object.assign({ subject: 'CN=' + name }, DEFAULT_VALIDITY, t.host && t.host.web && t.host.web.tls);
+        const subject = cert.subject.split(/,\s*/).map((part) => { const kv = part.split('='); return (DN_NAMES[kv[0]] || kv[0]) + '=' + kv.slice(1).join('='); }).reverse().join('/');
+        const names = [name].concat((t.host && t.host.aliases) || []).filter((n) => !U.isIPv4(n));
+        return ['Subject: ' + subject].concat(names.length ? ['Subject Alternative Name: ' + names.map((n) => 'DNS:' + n).join(', ')] : [],
+          ['Not valid before: ' + certDate(cert.notBefore), 'Not valid after:  ' + certDate(cert.notAfter)]);
+      },
+    },
+  };
+  const NSE_DEFAULT = ['ftp-anon', 'http-robots.txt', 'http-title', 'smtp-commands', 'ssh-hostkey', 'ssl-cert'];
+
+  /** The scripts a command line asks for. Anything outside this simulation is named once and left out. */
+  function chosenScripts(ctx, o) {
+    const chosen = new Set(o.scans.scripts || o.aggressive ? NSE_DEFAULT : []);
+    for (const word of String(o.script || '').split(',').map((w) => w.trim().replace(/\.nse$/, '')).filter(Boolean)) {
+      const matches = word === 'default' ? NSE_DEFAULT : Object.keys(NSE_SCRIPTS).filter((id) => U.globToRe(word).test(id));
+      if (!matches.length) ctx.err("NSE: '" + word + "' is not part of this simulation, which only has these informational scripts: " + Object.keys(NSE_SCRIPTS).join(', ') + '.\n');
+      matches.forEach((id) => chosen.add(id));
+    }
+    // http-server-header belongs to the "version" category: it comes along when -sV and the default scripts meet.
+    if (o.detect && NSE_DEFAULT.every((id) => chosen.has(id))) chosen.add('http-server-header');
+    return Array.from(chosen).sort();
+  }
+
+  async function scriptScan(run, hosts) {
+    for (const t of hosts) run.verbose('NSE: Script scanning ' + t.ip + '.');
+    await phase(run, 'NSE', null, async () => {
+      let results = 0;
+      for (const t of hosts) {
+        for (const e of openPorts(t)) {
+          const found = [];
+          for (const id of run.o.scripts) {
+            const lines = NSE_SCRIPTS[id].on(e) ? NSE_SCRIPTS[id].run(run, t, e) : null;
+            if (lines) found.push({ id, lines });
+          }
+          if (found.length) e.scan.scripts.set(e.port, found);
+          results += found.length;
+        }
+      }
+      await run.wait((120 + results * 70 + K.net.jitter(40, 60)) * SPEED[run.o.timing]);
+    });
+  }
+
   /* ------------------------------------------------------------- nmap: report */
 
   /** "name (address)" as Nmap prints a host: the name typed on the command line, else its PTR record. */
@@ -725,7 +894,11 @@
       const shown = [];
       for (const g of Object.values(scan.states)) {
         if (ignored(g.state)) hidden.push({ count: g.ports.length, state: g.state, proto: scan.proto, reason: g.reason, ports: g.ports });
-        else for (const port of g.ports) shown.push({ port, proto: scan.proto, state: g.state, reason: g.reason, ttl: g.ttl, version: scan.versions.get(port) });
+        else {
+          for (const port of g.ports) {
+            shown.push({ port, proto: scan.proto, state: g.state, reason: g.reason, ttl: g.ttl, version: scan.versions.get(port), scripts: scan.scripts.get(port) || [] });
+          }
+        }
       }
       rows.push.apply(rows, shown.sort((a, b) => a.port - b.port));
     }
@@ -742,7 +915,18 @@
       if (o.detect) line.push(r.version ? r.version.text : '');
       return line;
     });
-    return alignRows([['PORT', 'STATE', 'SERVICE'].concat(o.reason ? ['REASON'] : [], o.detect ? ['VERSION'] : [])].concat(cells));
+    const lines = alignRows([['PORT', 'STATE', 'SERVICE'].concat(o.reason ? ['REASON'] : [], o.detect ? ['VERSION'] : [])].concat(cells));
+    return rows.reduce((out, r, i) => out.concat(lines[i + 1], scriptLines(r.scripts)), [lines[0]]);
+  }
+
+  /** NSE output under a port: every line of a result starts with "| ", its last one with "|_". */
+  function scriptLines(results) {
+    const out = [];
+    for (const result of results) {
+      const text = [result.id + ': ' + result.lines[0]].concat(result.lines.slice(1));
+      text.forEach((line, i) => out.push((i === text.length - 1 ? '|_' : '| ') + line));
+    }
+    return out;
   }
 
   /** The lines of one host's report, or [] when --open leaves nothing to say about it. */
@@ -829,7 +1013,7 @@
       const service = v
         ? attrs({ name: v.name.replace(/^ssl\/|\?$/g, ''), product: v.product, version: v.version, extrainfo: v.extra, tunnel: v.tunnel, method: v.known ? 'probed' : 'table', conf: v.known ? 10 : 3 })
         : attrs({ name: serviceName(r.proto, r.port), method: 'table', conf: 3 });
-      const scripts = (r.scripts || []).map((sc) => '<script' + attrs({ id: sc.id, output: sc.lines.join('\n') }) + '/>').join('');
+      const scripts = r.scripts.map((sc) => '<script' + attrs({ id: sc.id, output: sc.lines.join('\n') }) + '/>').join('');
       out.push('<port' + attrs({ protocol: r.proto, portid: r.port }) + '><state' + attrs({ state: r.state, reason: r.reason, reason_ttl: r.ttl }) + '/><service' + service + '/>' + scripts + '</port>');
     }
     out[0] = '<ports>' + (out[0] || '');
@@ -930,7 +1114,7 @@
     return (function* () {
       for (const spec of specs) {
         for (const ip of guardedAddresses(ctx, spec, 'nmap', skip)) {
-          yield { ip, given: spec.name && spec.ip === ip ? spec.name : null, scans: [], host: K.net.knownHost(ip) };
+          yield { ip, given: spec.name && spec.ip === ip ? spec.name : null, scans: [] };
         }
       }
     })();
@@ -947,6 +1131,7 @@
       if (o.detect) await serviceScan(run, up);
       if (o.os) await osScan(run, up);
       if (o.traceroute) await traceroute(run, up);
+      if (o.scripts.length) await scriptScan(run, up);
     }
     for (const t of group) {
       t.finished = run.now();
@@ -963,6 +1148,7 @@
     openOutputs(run.ctx, o);
     run.say('Starting Nmap ' + NMAP_VERSION + ' ( https://nmap.org ) at ' + ymd(run.started) + ' ' + hhmm(run.started) + ' UTC');
     for (const w of o.warnings) run.ctx.err(w + '\n');
+    if (o.scripts.length) run.verbose('NSE: Loaded ' + plural(o.scripts.length, 'script', 'scripts') + ' for scanning.');
     await run.wait(K.net.jitter(25, 20));
     let group = [];
     for (const t of targets) {
@@ -1025,6 +1211,10 @@
     '  --top-ports <number>: Scan <number> most common ports',
     'SERVICE/VERSION DETECTION:',
     '  -sV: Probe open ports to determine service/version info',
+    'SCRIPT SCAN:',
+    '  -sC: equivalent to --script=default',
+    '  --script=<Lua scripts>: <Lua scripts> is a comma separated list of',
+    '           directories, script-files or script-categories',
     'OS DETECTION:',
     '  -O: Enable OS detection',
     'TIMING AND PERFORMANCE:',
