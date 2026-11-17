@@ -884,4 +884,449 @@
       return status;
     },
   });
+
+  /* ----------------------------------------------------- system information */
+
+  const HOSTNAME_USAGE = 'Usage: hostname [-b] {hostname|-F file}         set host name (from file)\n       hostname [-a|-A|-d|-f|-i|-I|-s|-y]       display formatted name\n' +
+    '       hostname                                 display host name\n\n       {yp,nis,}domainname {nisdomain|-F file}  set NIS domain name (from file)\n' +
+    '       {yp,nis,}domainname                      display NIS domain name\n\n       dnsdomainname                            display dns domain name\n\n' +
+    '       hostname -V|--version|-h|--help          print info and exit\n\nProgram name:\n       {yp,nis,}domainname=hostname -y\n       dnsdomainname=hostname -d\n\nProgram options:\n' +
+    '    -a, --alias            alias names\n    -A, --all-fqdns        all long host names (FQDNs)\n    -b, --boot             set default hostname if none available\n' +
+    '    -d, --domain           DNS domain name\n    -f, --fqdn, --long     long host name (FQDN)\n    -F, --file             read host name or NIS domain name from given file\n' +
+    '    -i, --ip-address       addresses for the host name\n    -I, --all-ip-addresses all addresses for the host\n    -s, --short            short host name\n' +
+    '    -y, --yp, --nis        NIS/YP domain name\n\nDescription:\n   This command can get or set the host name or the NIS domain name. You can\n' +
+    '   also get the DNS domain or the FQDN (fully qualified domain name).\n   Unless you are using bind or NIS for host lookups you can change the\n' +
+    '   FQDN (Fully Qualified Domain Name) and the DNS domain name (which is\n   part of the FQDN) in the /etc/hosts file.\n';
+
+  function setHostname(ctx, name) {
+    if (!ctx.isRoot) return ctx.fail('you must be root to change the host name');
+    if (!name || name.length > 64 || !/^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(name)) return ctx.fail('the specified hostname is invalid');
+    ctx.machine.hostname = name;
+    return 0;
+  }
+
+  reg({
+    name: 'hostname', aliases: ['dnsdomainname'], pkg: 'hostname', summary: 'show or set the system\'s host name', synopsis: 'hostname [-a|-A|-d|-f|-i|-I|-s|-y] [-b] [-F file] [name]',
+    man: 'DESCRIPTION\n       Hostname is used to display the system\'s DNS name, and to display or set its hostname. When called without any arguments, the program displays the current name. When called with one argument or with the --file option, the command sets the host name; only the super-user may do that.\n\nOPTIONS\n       -d, --domain\n              Display the name of the DNS domain.\n\n       -f, --fqdn, --long\n              Display the FQDN (Fully Qualified Domain Name).\n\n       -F, --file filename\n              Read the host name from the specified file.\n\n       -i, --ip-address\n              Display the network address(es) of the host name.\n\n       -I, --all-ip-addresses\n              Display all network addresses of the host, on all configured interfaces. The loopback interface is omitted.\n\n       -s, --short\n              Display the short host name. This is the host name cut at the first dot.\n\nEXAMPLES\n       hostname\n              Print the name of this machine.\n       hostname -I\n              Print the IP addresses of this machine: a quick way to find your own address in the lab.\n       sudo hostname pentest\n              Rename the machine until the next reboot.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'aAbdfF:iIsyhV', long: ['alias', 'all-fqdns', 'boot', 'domain', 'fqdn', 'long', 'file=', 'ip-address', 'all-ip-addresses', 'short', 'yp', 'nis', 'help', 'version'],
+        alias: { alias: 'a', 'all-fqdns': 'A', boot: 'b', domain: 'd', fqdn: 'f', long: 'f', file: 'F', 'ip-address': 'i', 'all-ip-addresses': 'I', short: 's', yp: 'y', nis: 'y', help: 'h', version: 'V' } });
+      const m = ctx.machine;
+      if (g.err) { ctx.err('hostname: ' + g.err + '\n' + HOSTNAME_USAGE); return 255; }
+      if (g.opts.h) { ctx.out(HOSTNAME_USAGE); return 0; }
+      if (g.opts.V) { ctx.out('hostname 3.25\n'); return 0; }
+      if (g.rest.length > 1) { ctx.err(HOSTNAME_USAGE); return 255; }
+      if (g.opts.F != null) {
+        let text;
+        try { text = ctx.fs.read(g.opts.F); } catch (e) { return ctx.fail(e.message); }
+        const line = U.lines(text).find((l) => l.trim() && l[0] !== '#');
+        return setHostname(ctx, (line || '').trim());
+      }
+      if (g.rest.length) return setHostname(ctx, g.rest[0]);
+      // the last display option wins, as in the real tool
+      const mode = ctx.name === 'dnsdomainname' ? 'd' : ctx.args.join(' ').replace(/--(domain|fqdn|long|ip-address|all-ip-addresses|short|alias|all-fqdns|yp|nis)/g, (x, n) => ({ domain: '-d', fqdn: '-f', long: '-f', 'ip-address': '-i', 'all-ip-addresses': '-I', short: '-s', alias: '-a', 'all-fqdns': '-A', yp: '-y', nis: '-y' })[n]).replace(/[^aAdfiIsy]/g, '').slice(-1);
+      switch (mode) {
+        case 'd': if (m.domain) ctx.println(m.domain); return 0;
+        case 'f': ctx.println(m.fqdn()); return 0;
+        case 's': ctx.println(m.hostname.split('.')[0]); return 0;
+        case 'i': { const r = K.net.resolve(m, m.hostname); if (!r) return ctx.fail('Name or service not known'); ctx.println(r.ip); return 0; }
+        case 'I': ctx.println(m.ifaces.filter((i) => i.kind !== 'loopback' && i.ip && i.state !== 'DOWN').map((i) => i.ip + ' ').join('')); return 0;
+        case 'a': ctx.println(''); return 0;
+        case 'A': ctx.println(m.domain ? m.fqdn() + ' ' : ''); return 0;
+        case 'y': return ctx.fail('Local domain name not set');
+        default: ctx.println(m.hostname); return 0;
+      }
+    },
+  });
+
+  const UNAME_HELP = 'Usage: uname [OPTION]...\nPrint certain system information.  With no OPTION, same as -s.\n\n  -a, --all                print all information, in the following order,\n' +
+    '                             except omit -p and -i if unknown:\n  -s, --kernel-name        print the kernel name\n  -n, --nodename           print the network node hostname\n' +
+    '  -r, --kernel-release     print the kernel release\n  -v, --kernel-version     print the kernel version\n  -m, --machine            print the machine hardware name\n' +
+    '  -p, --processor          print the processor type (non-portable)\n  -i, --hardware-platform  print the hardware platform (non-portable)\n' +
+    '  -o, --operating-system   print the operating system\n      --help        display this help and exit\n      --version     output version information and exit\n';
+
+  reg({
+    name: 'uname', pkg: 'coreutils', summary: 'print system information', synopsis: 'uname [OPTION]...',
+    man: 'DESCRIPTION\n       Print certain system information. With no OPTION, same as -s.\n\nOPTIONS\n       -a, --all\n              print all information, in the following order, except omit -p and -i if unknown:\n\n       -s, --kernel-name\n              print the kernel name\n\n       -n, --nodename\n              print the network node hostname\n\n       -r, --kernel-release\n              print the kernel release\n\n       -v, --kernel-version\n              print the kernel version\n\n       -m, --machine\n              print the machine hardware name\n\n       -p, --processor\n              print the processor type (non-portable)\n\n       -i, --hardware-platform\n              print the hardware platform (non-portable)\n\n       -o, --operating-system\n              print the operating system\n\nEXAMPLES\n       uname -a\n              Kernel name, host name, kernel release and build, architecture and operating system on one line.\n       uname -r\n              Only the kernel release, the value you compare against a list of kernel vulnerabilities.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'asnrvmpio', long: ['all', 'kernel-name', 'nodename', 'kernel-release', 'kernel-version', 'machine', 'processor', 'hardware-platform', 'operating-system', 'help', 'version'],
+        alias: { all: 'a', 'kernel-name': 's', nodename: 'n', 'kernel-release': 'r', 'kernel-version': 'v', machine: 'm', processor: 'p', 'hardware-platform': 'i', 'operating-system': 'o' } });
+      if (g.err) return usageError(ctx, g.err);
+      const o = g.opts; const os = ctx.machine.os;
+      if (o.help) { ctx.out(coreutilsHelp('uname', UNAME_HELP)); return 0; }
+      if (o.version) { ctx.out(coreutilsVersion('uname', 'David MacKenzie')); return 0; }
+      if (g.rest.length) return usageError(ctx, "extra operand '" + g.rest[0] + "'");
+      // Debian builds coreutils without the processor patch that Ubuntu carries
+      const cpu = /ubuntu/i.test(os.pretty) ? os.arch : 'unknown';
+      const fields = [['s', 'Linux'], ['n', ctx.machine.hostname], ['r', os.kernel], ['v', os.kernelBuild], ['m', os.arch], ['p', cpu], ['i', cpu], ['o', 'GNU/Linux']];
+      const none = !fields.some(([k]) => o[k]) && !o.a;
+      const picked = fields.filter(([k, v]) => (o.a ? !(v === 'unknown' && (k === 'p' || k === 'i')) : o[k] || (none && k === 's')));
+      ctx.println(picked.map((f) => f[1]).join(' '));
+      return 0;
+    },
+  });
+
+  const loadAverage = (machine) => { try { return machine.vfs.read('/proc/loadavg').split(' ').slice(0, 3); } catch (e) { return ['0.00', '0.00', '0.00']; } };
+  const clockTime = (ms) => U.isoDate(ms).slice(11);
+  const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+
+  /** The line shared by uptime, w and the first line of top: " 14:30:00 up  3:17,  1 user,  load average: ..." */
+  function uptimeLine(machine) {
+    const now = K.clock.now(); const up = Math.max(0, Math.floor((now - K.getBootTime()) / 1000));
+    const days = Math.floor(up / 86400); const hours = Math.floor(up / 3600) % 24; const mins = Math.floor(up / 60) % 60;
+    const users = (machine.state.logins || []).length;
+    return ' ' + clockTime(now) + ' up ' + (days ? days + (days > 1 ? ' days, ' : ' day, ') : '') + (hours ? U.padStart(hours, 2) + ':' + U.pad2(mins) + ', ' : mins + ' min, ') +
+      U.padStart(users, 2) + (users > 1 ? ' users' : ' user') + ',  load average: ' + loadAverage(machine).join(', ');
+  }
+  const UPTIME_USAGE = '\nUsage:\n uptime [options]\n\nOptions:\n -p, --pretty   show uptime in pretty format\n -h, --help     display this help and exit\n -s, --since    system up since\n -V, --version  output version information and exit\n\nFor more details see uptime(1).\n';
+
+  reg({
+    name: 'uptime', pkg: 'procps', summary: 'Tell how long the system has been running.', synopsis: 'uptime [options]',
+    man: 'DESCRIPTION\n       uptime gives a one line display of the following information. The current time, how long the system has been running, how many users are currently logged on, and the system load averages for the past 1, 5, and 15 minutes.\n\n       System load averages is the average number of processes that are either in a runnable or uninterruptable state.\n\nOPTIONS\n       -p, --pretty\n              show uptime in pretty format\n\n       -s, --since\n              system up since, in yyyy-mm-dd HH:MM:SS format\n\n       -h, --help\n              display this help text\n\n       -V, --version\n              display version information and exit\n\nEXAMPLES\n       uptime\n              One line: time, uptime, logged-in users and load.\n       uptime -s\n              The moment the machine booted. Log entries older than this come from an earlier boot.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'pshV', long: ['pretty', 'since', 'help', 'version'], alias: { pretty: 'p', since: 's', help: 'h', version: 'V' } });
+      if (g.err) { ctx.err('uptime: ' + g.err + '\n' + UPTIME_USAGE); return 1; }
+      if (g.opts.h) { ctx.out(UPTIME_USAGE); return 0; }
+      if (g.opts.V) { ctx.out('uptime from procps-ng 4.0.4\n'); return 0; }
+      if (g.rest.length) { ctx.err(UPTIME_USAGE); return 1; }
+      const boot = K.getBootTime();
+      if (g.opts.s) { ctx.println(U.isoDate(boot)); return 0; }
+      if (g.opts.p) {
+        const mins = Math.floor((K.clock.now() - boot) / MIN);
+        const parts = [[Math.floor(mins / 10080), 'week'], [Math.floor(mins / 1440) % 7, 'day'], [Math.floor(mins / 60) % 24, 'hour'], [mins % 60, 'minute']].filter((x) => x[0]);
+        ctx.println('up ' + (parts.length ? parts.map((x) => plural(x[0], x[1])).join(', ') : '0 minutes'));
+        return 0;
+      }
+      ctx.println(uptimeLine(ctx.machine));
+      return 0;
+    },
+  });
+
+  /* -------------------------------------------------------------------- date */
+
+  const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const floorMod = (a, b) => ((a % b) + b) % b;
+  const dayStart = (ms) => Math.floor(ms / DAY) * DAY;
+
+  /** ISO 8601 week number and the year it belongs to. */
+  function isoWeek(ms) {
+    const thursday = dayStart(ms) + (3 - floorMod(new Date(ms).getUTCDay() + 6, 7)) * DAY;
+    const year = new Date(thursday).getUTCFullYear();
+    return { year, week: Math.floor((thursday - Date.UTC(year, 0, 1)) / (7 * DAY)) + 1 };
+  }
+
+  /**
+   * strftime with the GNU extensions date(1) documents: flags - _ 0 ^ #, a field
+   * width, and %N %s %:z. The clock is UTC. `en` selects the en_US forms of %c %x %X.
+   */
+  function strftime(fmt, ms, en) {
+    const d = new Date(ms);
+    const Y = d.getUTCFullYear(); const mon = d.getUTCMonth(); const day = d.getUTCDate(); const H = d.getUTCHours(); const wd = d.getUTCDay();
+    const yday = Math.floor((dayStart(ms) - Date.UTC(Y, 0, 1)) / DAY);
+    const iso = isoWeek(ms);
+    const num = (n, width, pad) => ({ n, width, pad: pad || '0' });
+    const expand = (f) => strftime(f, ms, en);
+    const conv = {
+      a: () => U.DAYS[wd], A: () => DAY_NAMES[wd], b: () => U.MONTHS[mon], h: () => U.MONTHS[mon], B: () => MONTH_NAMES[mon],
+      c: () => expand(en ? '%a %d %b %Y %r %Z' : '%a %b %e %H:%M:%S %Y'), C: () => num(Math.floor(Y / 100), 2), d: () => num(day, 2), D: () => expand('%m/%d/%y'),
+      e: () => num(day, 2, ' '), F: () => expand('%Y-%m-%d'), g: () => num(iso.year % 100, 2), G: () => num(iso.year, 1), H: () => num(H, 2), I: () => num(H % 12 || 12, 2),
+      j: () => num(yday + 1, 3), k: () => num(H, 2, ' '), l: () => num(H % 12 || 12, 2, ' '), m: () => num(mon + 1, 2), M: () => num(d.getUTCMinutes(), 2), n: () => '\n',
+      N: () => num(floorMod(ms, 1000) * 1e6, 9), p: () => (H < 12 ? 'AM' : 'PM'), P: () => (H < 12 ? 'am' : 'pm'), q: () => num(Math.floor(mon / 3) + 1, 1),
+      r: () => expand('%I:%M:%S %p'), R: () => expand('%H:%M'), s: () => num(Math.floor(ms / 1000), 1), S: () => num(d.getUTCSeconds(), 2), t: () => '\t', T: () => expand('%H:%M:%S'),
+      u: () => num(wd || 7, 1), U: () => num(Math.floor((yday + 7 - wd) / 7), 2), V: () => num(iso.week, 2), w: () => num(wd, 1), W: () => num(Math.floor((yday + 7 - floorMod(wd + 6, 7)) / 7), 2),
+      x: () => expand(en ? '%m/%d/%Y' : '%m/%d/%y'), X: () => expand(en ? '%r' : '%T'), y: () => num(Y % 100, 2), Y: () => num(Y, 1), Z: () => 'UTC', '%': () => '%',
+    };
+    return fmt.replace(/%([-_0^#]*)(\d*)(:{0,3})([A-Za-z%])/g, (all, flags, width, colons, c) => {
+      if (c === 'z') return colons.length === 1 ? '+00:00' : colons.length === 2 ? '+00:00:00' : colons.length === 3 ? '+00' : '+0000';
+      if (colons || !conv[c]) return all;
+      const v = conv[c]();
+      let text; let pad = ' ';
+      if (typeof v === 'string') text = v;
+      else {
+        pad = flags.indexOf('_') >= 0 ? ' ' : flags.indexOf('0') >= 0 ? '0' : v.pad;
+        const w = flags.indexOf('-') >= 0 ? 0 : width ? +width : v.width;
+        text = String(v.n).padStart(c === 'N' ? 9 : 0, '0');
+        if (c === 'N' && width) return text.slice(0, +width);
+        return text.padStart(w, pad);
+      }
+      if (flags.indexOf('^') >= 0) text = text.toUpperCase();
+      else if (flags.indexOf('#') >= 0) text = c === 'Z' || c === 'p' ? text.toLowerCase() : text.toUpperCase();
+      return width && flags.indexOf('-') < 0 ? text.padStart(+width, flags.indexOf('0') >= 0 ? '0' : pad) : text;
+    });
+  }
+
+  const usesEnglishLocale = (env) => /^en_/.test(env.LC_ALL || env.LC_TIME || env.LANG || '');
+
+  const UNIT_MS = { sec: SEC, second: SEC, min: MIN, minute: MIN, hour: HOUR, day: DAY, week: 7 * DAY, fortnight: 14 * DAY };
+  const shortName = (list, word) => list.findIndex((n) => word.length >= 3 && n.toLowerCase().indexOf(word) === 0);
+
+  /**
+   * The subset of GNU date's free-form input that people type: ISO dates and
+   * times, @epoch, now/today/tomorrow/yesterday, weekday names and relative
+   * items such as "2 days ago" or "next month". Returns ms, or null if invalid.
+   */
+  function parseDateString(input, now) {
+    const text = String(input).trim().toLowerCase();
+    if (/^@-?\d+(\.\d+)?$/.test(text)) return Math.round(parseFloat(text.slice(1)) * 1000);
+    if (!text) return dayStart(now);
+    const base = new Date(now);
+    let date = null; let time = null; let shiftMs = 0; let months = 0; let weekday = null;
+    const words = text.replace(/(\d)t(\d)/, '$1 $2').replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i]; let m;
+      if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(w)) || (m = /^(\d{4})(\d{2})(\d{2})$/.exec(w))) { date = [+m[1], +m[2] - 1, +m[3]]; continue; }
+      if ((m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(w))) { date = [+m[3], +m[1] - 1, +m[2]]; continue; }
+      if ((m = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?(z|[+-]\d{2}:?\d{2})?$/.exec(w))) {
+        let h = +m[1];
+        const half = /^[ap]m$/.test(words[i + 1] || '') ? words[++i] : null;
+        if (half) h = (h % 12) + (half === 'pm' ? 12 : 0);
+        time = [h, +m[2], +(m[3] || 0)];
+        if (m[4] && m[4] !== 'z') shiftMs -= (m[4][0] === '-' ? -1 : 1) * (+m[4].slice(1, 3) * HOUR + +m[4].slice(-2) * MIN);
+        continue;
+      }
+      if (w === 'now' || w === 'today' || w === 'utc' || w === 'gmt' || w === 'z') continue;
+      if (w === 'tomorrow') { shiftMs += DAY; continue; }
+      if (w === 'yesterday') { shiftMs -= DAY; continue; }
+      if (w === 'midnight') { time = [0, 0, 0]; continue; }
+      if (w === 'noon') { time = [12, 0, 0]; continue; }
+      // relative item: [+-]N unit [ago] | next unit | last unit | a unit
+      let count = null;
+      if (/^[+-]?\d+$/.test(w)) count = parseInt(w, 10);
+      else if (w === 'next' || w === 'a' || w === 'an') count = 1;
+      else if (w === 'last') count = -1;
+      const word = count == null ? w : words[i + 1] || '';
+      const dow = shortName(DAY_NAMES, word);
+      if (dow >= 0 && (count == null || w === 'next' || w === 'last')) { weekday = { dow, dir: count == null ? 0 : count }; if (count != null) i++; continue; }
+      const mon = shortName(MONTH_NAMES, word);
+      if (mon >= 0 && (count == null || /^\d+$/.test(w))) {
+        // "13 nov [2026]" or "nov 13 [2026]"
+        const dayWord = count != null ? w : words[i + 1];
+        if (!/^\d{1,2}$/.test(dayWord || '')) return null;
+        i += 1;
+        const year = /^\d{4}$/.test(words[i + 1] || '') ? +words[++i] : base.getUTCFullYear();
+        date = [year, mon, +dayWord];
+        continue;
+      }
+      if (count == null) return null;
+      const unit = word.replace(/s$/, '');
+      const ago = words[i + 2] === 'ago' ? -1 : 1;
+      if (UNIT_MS[unit]) shiftMs += count * ago * UNIT_MS[unit];
+      else if (unit === 'month') months += count * ago;
+      else if (unit === 'year') months += 12 * count * ago;
+      else return null;
+      i += ago < 0 ? 2 : 1;
+    }
+    if (date && (date[1] > 11 || date[2] < 1 || date[2] > 31)) return null;
+    if (time && (time[0] > 23 || time[1] > 59 || time[2] > 59)) return null;
+    const d = date || [base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate()];
+    // a bare date or weekday means midnight; relative items keep the time of day
+    const t = time || (date || weekday ? [0, 0, 0] : [base.getUTCHours(), base.getUTCMinutes(), base.getUTCSeconds()]);
+    let ms = Date.UTC(d[0], d[1] + months, d[2], t[0], t[1], t[2]) + (date || time || weekday ? 0 : floorMod(now, 1000));
+    if (date && new Date(ms).getUTCDate() !== d[2] && !months) return null;
+    if (weekday) {
+      const today = new Date(ms).getUTCDay();
+      let delta = floorMod(weekday.dow - today, 7);
+      if (weekday.dir > 0 && delta === 0) delta = 7;
+      if (weekday.dir < 0) delta = delta === 0 ? -7 : delta - 7;
+      ms += delta * DAY;
+    }
+    return ms + shiftMs;
+  }
+
+  const ISO_FORMATS = { hours: '%Y-%m-%dT%H%:z', minutes: '%Y-%m-%dT%H:%M%:z', date: '%Y-%m-%d', seconds: '%Y-%m-%dT%H:%M:%S%:z', ns: '%Y-%m-%dT%H:%M:%S,%N%:z' };
+  const RFC3339_FORMATS = { date: '%Y-%m-%d', seconds: '%Y-%m-%d %H:%M:%S%:z', ns: '%Y-%m-%d %H:%M:%S.%N%:z' };
+  function chooseFormat(ctx, table, value, option) {
+    const names = Object.keys(table).filter((n) => n.indexOf(value) === 0);
+    if (value && names.length === 1) return table[names[0]];
+    ctx.err("date: " + (names.length > 1 ? 'ambiguous' : 'invalid') + " argument '" + value + "' for '--" + option + "'\nValid arguments are:\n" + Object.keys(table).map((n) => "  - '" + n + "'\n").join('') + "Try 'date --help' for more information.\n");
+    return null;
+  }
+
+  const DATE_HELP = 'Usage: date [OPTION]... [+FORMAT]\n  or:  date [-u|--utc|--universal] [MMDDhhmm[[CC]YY][.ss]]\nDisplay date and time in the given FORMAT.\nWith -s, or with [MMDDhhmm[[CC]YY][.ss]], set the date and time.\n\n' +
+    'Mandatory arguments to long options are mandatory for short options too.\n  -d, --date=STRING          display time described by STRING, not \'now\'\n' +
+    '  -I[FMT], --iso-8601[=FMT]  output date/time in ISO 8601 format.\n                               FMT=\'date\' for date only (the default),\n                               \'hours\', \'minutes\', \'seconds\', or \'ns\'\n' +
+    '                               for date and time to the indicated precision.\n                               Example: 2006-08-14T02:34:56-06:00\n' +
+    '  -R, --rfc-email            output date and time in RFC 5322 format.\n                               Example: Mon, 14 Aug 2006 02:34:56 -0600\n' +
+    '      --rfc-3339=FMT         output date/time in RFC 3339 format.\n                               FMT=\'date\', \'seconds\', or \'ns\'\n                               for date and time to the indicated precision.\n' +
+    '                               Example: 2006-08-14 02:34:56-06:00\n  -r, --reference=FILE       display the last modification time of FILE\n' +
+    '  -s, --set=STRING           set time described by STRING\n  -u, --utc, --universal     print or set Coordinated Universal Time (UTC)\n' +
+    '      --help        display this help and exit\n      --version     output version information and exit\n\nFORMAT controls the output.  Interpreted sequences are:\n\n' +
+    '  %%   a literal %\n  %a   locale\'s abbreviated weekday name (e.g., Sun)\n  %A   locale\'s full weekday name (e.g., Sunday)\n  %b   locale\'s abbreviated month name (e.g., Jan)\n' +
+    '  %B   locale\'s full month name (e.g., January)\n  %c   locale\'s date and time (e.g., Thu Mar  3 23:05:25 2005)\n  %d   day of month (e.g., 01)\n  %D   date; same as %m/%d/%y\n' +
+    '  %e   day of month, space padded; same as %_d\n  %F   full date; like %+4Y-%m-%d\n  %H   hour (00..23)\n  %I   hour (01..12)\n  %j   day of year (001..366)\n  %m   month (01..12)\n' +
+    '  %M   minute (00..59)\n  %n   a newline\n  %N   nanoseconds (000000000..999999999)\n  %p   locale\'s equivalent of either AM or PM; blank if not known\n  %R   24-hour hour and minute; same as %H:%M\n' +
+    '  %s   seconds since the Epoch (1970-01-01 00:00 UTC)\n  %S   second (00..60)\n  %T   time; same as %H:%M:%S\n  %u   day of week (1..7); 1 is Monday\n  %y   last two digits of year (00..99)\n' +
+    '  %Y   year\n  %z   +hhmm numeric time zone (e.g., -0400)\n  %Z   alphabetic time zone abbreviation (e.g., EDT)\n\nExamples:\nConvert seconds since the Epoch (1970-01-01 UTC) to a date\n  $ date --date=\'@2147483647\'\n\n' +
+    'Show the local time for 9AM next Friday on the west coast of the US\n  $ date --date=\'TZ="America/Los_Angeles" 09:00 next Fri\'\n';
+
+  reg({
+    name: 'date', pkg: 'coreutils', summary: 'print or set the system date and time', synopsis: 'date [OPTION]... [+FORMAT]',
+    man: 'DESCRIPTION\n       Display date and time in the given FORMAT. With -s, set the date and time.\n\nOPTIONS\n       -d, --date=STRING\n              display time described by STRING, not \'now\'\n\n       -I[FMT], --iso-8601[=FMT]\n              output date/time in ISO 8601 format. FMT=\'date\' for date only (the default), \'hours\', \'minutes\', \'seconds\', or \'ns\' for date and time to the indicated precision.\n\n       -R, --rfc-email\n              output date and time in RFC 5322 format. Example: Mon, 14 Aug 2006 02:34:56 -0600\n\n       -r, --reference=FILE\n              display the last modification time of FILE\n\n       -u, --utc, --universal\n              print or set Coordinated Universal Time (UTC)\n\n       FORMAT controls the output. Common sequences: %Y year, %m month, %d day, %H hour, %M minute, %S second, %F full date (%Y-%m-%d), %T time (%H:%M:%S), %s seconds since the Epoch, %a and %A weekday name, %b and %B month name, %j day of year, %Z time zone.\n\nDATE STRING\n       The --date=STRING is a mostly free format human readable date string such as "2026-11-13 14:30", "tomorrow", "2 days ago", "next Friday" or "@1794580200" (seconds since the Epoch).\n\nEXAMPLES\n       date +%F_%H%M\n              A timestamp that sorts well in file names, for example for scan output.\n       date -d @1794580200\n              Convert the epoch seconds found in a log file to a readable date.\n       date -u -d "2 hours ago" +%T\n              The time two hours ago.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'd:I::r:Rs:u', long: ['date=', 'iso-8601=?', 'reference=', 'rfc-email', 'rfc-2822', 'rfc-822', 'rfc-3339=', 'set=', 'utc', 'universal', 'help', 'version'],
+        alias: { date: 'd', 'iso-8601': 'I', reference: 'r', 'rfc-email': 'R', 'rfc-2822': 'R', 'rfc-822': 'R', set: 's', utc: 'u', universal: 'u' } });
+      if (g.err) return usageError(ctx, g.err);
+      const o = g.opts; const en = usesEnglishLocale(ctx.env);
+      if (o.help) { ctx.out(coreutilsHelp('date', DATE_HELP)); return 0; }
+      if (o.version) { ctx.out(coreutilsVersion('date', 'David MacKenzie')); return 0; }
+      const operands = g.rest.filter((a) => a[0] === '+');
+      const stray = g.rest.find((a) => a[0] !== '+');
+      if (operands.length > 1) return usageError(ctx, "extra operand '" + operands[1] + "'");
+      if (stray != null) return ctx.fail("invalid date '" + stray + "'");
+      let format = operands.length ? operands[0].slice(1) : null;
+      const preset = (o.I != null ? 1 : 0) + (o.R ? 1 : 0) + (o['rfc-3339'] != null ? 1 : 0);
+      if (preset + (format != null ? 1 : 0) > 1) return ctx.fail('multiple output formats specified');
+      if (o.I != null) format = o.I === true ? ISO_FORMATS.date : chooseFormat(ctx, ISO_FORMATS, o.I, 'iso-8601');
+      else if (o.R) format = '%a, %d %b %Y %H:%M:%S %z';
+      else if (o['rfc-3339'] != null) format = chooseFormat(ctx, RFC3339_FORMATS, o['rfc-3339'], 'rfc-3339');
+      if (format == null && preset) return 1;
+      if (format == null) format = en ? '%a %b %e %r %Z %Y' : '%a %b %e %H:%M:%S %Z %Y';
+
+      const sources = (o.d != null ? 1 : 0) + (o.r != null ? 1 : 0) + (o.s != null ? 1 : 0);
+      if (sources > 1) return usageError(ctx, 'the options to specify dates for printing are mutually exclusive');
+      let when = K.clock.now();
+      if (o.r != null) {
+        try { when = ctx.fs.stat(o.r).mtime; } catch (e) { return ctx.fail(o.r + ': ' + e.message); }
+      } else if (o.d != null || o.s != null) {
+        const text = o.d != null ? o.d : o.s;
+        when = parseDateString(text, K.clock.now());
+        if (when == null || isNaN(when)) return ctx.fail("invalid date '" + text + "'");
+      }
+      // The simulated clock follows the host: like a VM whose time is kept in sync, it cannot be set.
+      if (o.s != null) ctx.err('date: cannot set date: Operation not permitted\n');
+      ctx.println(strftime(format, when, en));
+      return o.s != null ? 1 : 0;
+    },
+  });
+
+  const SLEEP_HELP = "Usage: sleep NUMBER[SUFFIX]...\n  or:  sleep OPTION\nPause for NUMBER seconds.  SUFFIX may be 's' for seconds (the default),\n'm' for minutes, 'h' for hours or 'd' for days.  NUMBER need not be an\n" +
+    'integer.  Given two or more arguments, pause for the amount of time\nspecified by the sum of their values.\n\n      --help        display this help and exit\n      --version     output version information and exit\n';
+
+  reg({
+    name: 'sleep', pkg: 'coreutils', summary: 'delay for a specified amount of time', synopsis: 'sleep NUMBER[SUFFIX]...',
+    man: 'DESCRIPTION\n       Pause for NUMBER seconds. SUFFIX may be \'s\' for seconds (the default), \'m\' for minutes, \'h\' for hours or \'d\' for days. NUMBER need not be an integer. Given two or more arguments, pause for the amount of time specified by the sum of their values.\n\nOPTIONS\n       --help display this help and exit\n\n       --version\n              output version information and exit\n\nEXAMPLES\n       sleep 5\n              Wait five seconds.\n       sleep 0.5; echo done\n              Wait half a second, then print.\n       sleep 1m 30s\n              Wait a minute and a half. Press Ctrl-C to stop waiting.',
+    async run(ctx) {
+      const first = ctx.args[0];
+      if (first === '--help') { ctx.out(coreutilsHelp('sleep', SLEEP_HELP)); return 0; }
+      if (first === '--version') { ctx.out(coreutilsVersion('sleep', 'Jim Meyering and Paul Eggert')); return 0; }
+      const args = first === '--' ? ctx.args.slice(1) : ctx.args;
+      if (!args.length) return usageError(ctx, 'missing operand');
+      if (/^-[^\d.]/.test(args[0]) || /^-\d/.test(args[0])) return usageError(ctx, /^--/.test(args[0]) ? "unrecognized option '" + args[0] + "'" : "invalid option -- '" + args[0][1] + "'");
+      let total = 0; let bad = false;
+      for (const a of args) {
+        const m = /^(\d+\.?\d*(?:e[+-]?\d+)?|\.\d+|inf|infinity)([smhd]?)$/i.exec(a);
+        if (!m) { ctx.err("sleep: invalid time interval '" + a + "'\n"); bad = true; continue; }
+        total += (/^inf/i.test(m[1]) ? Infinity : parseFloat(m[1])) * { '': 1, s: 1, m: 60, h: 3600, d: 86400 }[m[2].toLowerCase()];
+      }
+      if (bad) { ctx.err("Try 'sleep --help' for more information.\n"); return 1; }
+      // "sleep infinity" waits in day-long steps until interrupted
+      while (total === Infinity) await ctx.sleep(DAY);
+      await ctx.sleep(total * 1000);
+      return 0;
+    },
+  });
+
+  /* -------------------------------------------------------------- environment */
+
+  const ENV_HELP = 'Usage: env [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]\nSet each NAME to VALUE in the environment and run COMMAND.\n\nMandatory arguments to long options are mandatory for short options too.\n' +
+    '  -i, --ignore-environment  start with an empty environment\n  -0, --null           end each output line with NUL, not newline\n  -u, --unset=NAME     remove variable from the environment\n' +
+    '  -C, --chdir=DIR      change working directory to DIR\n  -S, --split-string=S  process and split S into separate arguments;\n                        used to pass multiple arguments on shebang lines\n' +
+    '  -v, --debug          print verbose information for each processing step\n      --help        display this help and exit\n      --version     output version information and exit\n\n' +
+    'A mere - implies -i.  If no COMMAND, print the resulting environment.\n\nExit status:\n  125  if the env command itself fails\n  126  if COMMAND is found but cannot be invoked\n' +
+    '  127  if COMMAND cannot be found\n  -    the exit status of COMMAND otherwise\n';
+  // Builtins of the simulated shell that exist as real programs too, so env and friends may run them.
+  const PROGRAM_BUILTINS = /^(echo|printf|test|\[|true|false|pwd|kill)$/;
+
+  /** Run argv in a child shell whose exported environment is exactly `env`. Returns the exit status env reports. */
+  async function runWithEnv(ctx, env, cwd, argv) {
+    const sh = ctx.shell; const name = argv[0];
+    const child = sh.child({ env, cwd });
+    for (const k of ['HOME', 'USER', 'LOGNAME', 'PWD']) if (!(k in env)) child.unsetVar(k);
+    if (!('PATH' in env)) child.exported.delete('PATH'); // still searched, like execvp's default path
+    try {
+      if (name.indexOf('/') >= 0) {
+        let st;
+        try { st = ctx.fs.stat(name); } catch (e) { ctx.err("env: '" + name + "': " + e.message + '\n'); return 127; }
+        if (st.isDir || !ctx.fs.can(name, 'x')) { ctx.err("env: '" + name + "': Permission denied\n"); return 126; }
+      } else if (!child.which(name)) {
+        if (!PROGRAM_BUILTINS.test(name)) { ctx.err("env: '" + name + "': No such file or directory\n"); return 127; }
+        return await child.execArgv(argv, ctx.io);
+      }
+      return await child.execArgv(argv, ctx.io, { external: true });
+    } catch (e) {
+      if (e instanceof K.ExitSignal) return e.code;
+      throw e;
+    } finally { child.dispose(); }
+  }
+
+  reg({
+    name: 'env', pkg: 'coreutils', summary: 'run a program in a modified environment', synopsis: 'env [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]',
+    man: 'DESCRIPTION\n       Set each NAME to VALUE in the environment and run COMMAND.\n\nOPTIONS\n       -i, --ignore-environment\n              start with an empty environment\n\n       -0, --null\n              end each output line with NUL, not newline\n\n       -u, --unset=NAME\n              remove variable from the environment\n\n       -C, --chdir=DIR\n              change working directory to DIR\n\n       A mere - implies -i. If no COMMAND, print the resulting environment.\n\nEXIT STATUS\n       125    if the env command itself fails\n\n       126    if COMMAND is found but cannot be invoked\n\n       127    if COMMAND cannot be found\n\n       -      the exit status of COMMAND otherwise\n\nEXAMPLES\n       env\n              Print every exported variable.\n       env | grep -i proxy\n              Check whether a proxy is configured for command-line tools.\n       env LANG=C date\n              Run one command with a variable changed, leaving your shell untouched.',
+    async run(ctx) {
+      const env = Object.assign({}, ctx.env);
+      let cwd = null; let nul = false;
+      const args = ctx.args.slice();
+      const fail = (msg) => usageError(ctx, msg, 125);
+      const clear = () => { for (const k of Object.keys(env)) delete env[k]; };
+      let i = 0;
+      for (; i < args.length; i++) {
+        const a = args[i];
+        if (a === '--') { i++; break; }
+        if (a === '-' ) { clear(); continue; }
+        if (a[0] !== '-') break;
+        if (a === '--help') { ctx.out(coreutilsHelp('env', ENV_HELP)); return 0; }
+        if (a === '--version') { ctx.out(coreutilsVersion('env', 'Richard Mlynarik, David MacKenzie, and Assaf Gordon')); return 0; }
+        if (a === '--ignore-environment') { clear(); continue; }
+        if (a === '--null') { nul = true; continue; }
+        if (a === '--debug') continue;
+        const long = /^--(unset|chdir|split-string)(?:=(.*))?$/.exec(a);
+        if (long) {
+          const value = long[2] != null ? long[2] : args[++i];
+          if (value == null) return fail("option '--" + long[1] + "' requires an argument");
+          if (long[1] === 'unset') delete env[value]; else if (long[1] === 'chdir') cwd = value; else args.splice(i + 1, 0, ...value.split(/\s+/).filter(Boolean));
+          continue;
+        }
+        if (a.startsWith('--')) return fail("unrecognized option '" + a + "'");
+        for (let j = 1; j < a.length; j++) {
+          const c = a[j];
+          if (c === 'i') clear(); else if (c === '0') nul = true; else if (c === 'v') continue;
+          else if (c === 'u' || c === 'C' || c === 'S') {
+            const value = a.slice(j + 1) || args[++i];
+            if (value == null) return fail("option requires an argument -- '" + c + "'");
+            if (c === 'u') delete env[value]; else if (c === 'C') cwd = value; else args.splice(i + 1, 0, ...value.split(/\s+/).filter(Boolean));
+            break;
+          } else return fail("invalid option -- '" + c + "'");
+        }
+      }
+      for (; i < args.length && /^[^=]+=/.test(args[i]); i++) { const eq = args[i].indexOf('='); env[args[i].slice(0, eq)] = args[i].slice(eq + 1); }
+      const command = args.slice(i);
+      if (!command.length) {
+        if (cwd != null) return fail('must specify command with --chdir (-C)');
+        ctx.out(Object.keys(env).map((k) => k + '=' + env[k] + (nul ? '\0' : '\n')).join(''));
+        return 0;
+      }
+      if (nul) return fail('cannot specify --null (-0) with command');
+      if (cwd != null && !ctx.fs.isDir(cwd)) { ctx.err("env: cannot change directory to '" + cwd + "': " + (ctx.fs.exists(cwd) ? 'Not a directory' : 'No such file or directory') + '\n'); return 125; }
+      return runWithEnv(ctx, env, cwd == null ? ctx.cwd : ctx.path(cwd), command);
+    },
+  });
+
+  reg({
+    name: 'printenv', pkg: 'coreutils', summary: 'print all or part of environment', synopsis: 'printenv [OPTION]... [VARIABLE]...',
+    man: 'DESCRIPTION\n       Print the values of the specified environment VARIABLE(s). If no VARIABLE is specified, print name and value pairs for them all.\n\nOPTIONS\n       -0, --null\n              end each output line with NUL, not newline\n\n       --help display this help and exit\n\n       --version\n              output version information and exit\n\nEXIT STATUS\n       0 if all variables were found, 1 if at least one was missing, 2 on a usage error.\n\nEXAMPLES\n       printenv PATH\n              Show the directories searched for commands.\n       printenv HOME SHELL\n              Print the values of two variables, one per line.',
+    run(ctx) {
+      const g = ctx.getopt({ short: '0', long: ['null', 'help', 'version'], alias: { null: '0' } });
+      if (g.err) return usageError(ctx, g.err, 2);
+      if (g.opts.help) { ctx.out(coreutilsHelp('printenv', 'Usage: printenv [OPTION]... [VARIABLE]...\nPrint the values of the specified environment VARIABLE(s).\nIf no VARIABLE is specified, print name and value pairs for them all.\n\n  -0, --null     end each output line with NUL, not newline\n      --help        display this help and exit\n      --version     output version information and exit\n\nNOTE: your shell may have its own version of printenv, which usually supersedes\nthe version described here.  Please refer to your shell\'s documentation\nfor details about the options it supports.\n')); return 0; }
+      if (g.opts.version) { ctx.out(coreutilsVersion('printenv', 'David MacKenzie and Richard Mlynarik')); return 0; }
+      const end = g.opts['0'] ? '\0' : '\n';
+      if (!g.rest.length) { ctx.out(Object.keys(ctx.env).map((k) => k + '=' + ctx.env[k] + end).join('')); return 0; }
+      let status = 0;
+      for (const name of g.rest) {
+        if (name in ctx.env && name.indexOf('=') < 0) ctx.out(ctx.env[name] + end); else status = 1;
+      }
+      return status;
+    },
+  });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
