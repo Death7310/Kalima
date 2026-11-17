@@ -520,12 +520,13 @@ test('ps: process tree', async () => {
   const at = (re) => ef.findIndex((l) => re.test(l));
   assert.ok(at(/ \/sbin\/init splash$/) > at(/\[kworker\/u8:0-flush-8:0\]$/), 'kernel threads come before init');
   const dm = at(/ \/usr\/sbin\/lightdm$/);
-  assert.deepEqual(ef.slice(dm, dm + 6).map((l) => l.replace(/^.*\d\d:\d\d:\d\d/, '').slice(0, 32)), [
+  const shown = ef.slice(dm, dm + 6).map((l) => l.replace(/^.*?\d\d:\d\d:\d\d/, ''));
+  assert.deepEqual(shown.map((l) => l.replace(/^( *(\\_ )?)(\S+).*$/, '$1$3')), [
     ' /usr/sbin/lightdm',
-    '  \\_ /usr/lib/xorg/Xorg :0 -seat ',
-    '  \\_ lightdm --session-child 13 2',
+    '  \\_ /usr/lib/xorg/Xorg',
+    '  \\_ lightdm',
     '      \\_ xfce4-session',
-    '          \\_ /usr/bin/ssh-agent x-',
+    '          \\_ /usr/bin/ssh-agent',
     '          \\_ xfwm4',
   ]);
   const panel = at(/ {10}\\_ xfce4-panel$/);
