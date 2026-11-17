@@ -1,6 +1,7 @@
 /* Kalima — remote login, file transfer and plain TCP clients.
  *
  *   remote login        ssh
+ *   plain TCP clients   nc (netcat, ncat) telnet
  *   protocol handlers   ssh (what a raw connection to that port answers)
  *
  * Every connection goes through K.net, so nothing leaves the simulator.
@@ -36,21 +37,67 @@
   const CONNECT_WAIT = { ETIMEDOUT: 130000, EHOSTUNREACH: 3100 };
 
   /**
-   * Open a TCP connection with the waiting a real client sees. `limitMs` is the
-   * caller's own timeout. Returns the session; rethrows K.NetError after the wait.
+   * Open a TCP connection with the waiting a real client sees. `limitMs` is the caller's own
+   * timeout; `probeOnly` checks the port without opening a session (and resolves null).
+   * Returns the session; throws K.NetError after the wait.
    */
-  async function dial(ctx, ip, port, limitMs) {
-    let session;
-    try { session = K.net.connect(ctx.machine, ip, port); }
-    catch (e) {
+  async function dial(ctx, ip, port, limitMs, probeOnly) {
+    let session = null; let rtt;
+    try {
+      if (probeOnly) {
+        const t = K.net.tcp(ctx.machine, ip, port);
+        const code = !t.route.ok ? t.route.err : t.state === 'open' ? null : t.state === 'closed' ? 'ECONNREFUSED' : 'ETIMEDOUT';
+        if (code) throw new K.NetError(code);
+        rtt = t.rtt;
+      } else {
+        session = K.net.connect(ctx.machine, ip, port);
+        rtt = session.rtt;
+      }
+    } catch (e) {
       if (!(e instanceof K.NetError)) throw e;
       const wait = CONNECT_WAIT[e.code] || 1;
       if (limitMs == null || wait <= limitMs) { await ctx.sleep(wait); throw e; }
       await ctx.sleep(limitMs);
       throw new K.NetError('ETIMEDOUT');
     }
-    await ctx.sleep(session.rtt);
+    await ctx.sleep(rtt);
     return session;
+  }
+
+  /** /etc/services on this machine, as getservbyport(3) and getservbyname(3) read it. */
+  function servicesFile(machine) {
+    try { return machine.vfs.read('/etc/services'); } catch (e) { return ''; }
+  }
+  function serviceName(machine, port, proto) {
+    const m = new RegExp('^(\\S+)\\s+' + port + '/' + proto + '\\b', 'm').exec(servicesFile(machine));
+    return m ? m[1] : null;
+  }
+  /** A port given as a number or a service name; 0 when it is neither. */
+  function portNumber(machine, text, proto) {
+    if (/^\d+$/.test(text)) return +text < 65536 ? +text : 0;
+    const m = new RegExp('^' + U.escapeRe(text) + '\\s+(\\d+)/' + proto + '\\b', 'm').exec(servicesFile(machine));
+    return m ? +m[1] : 0;
+  }
+  const ephemeralPort = () => 32768 + Math.floor(K.net.rand() * 28232);
+
+  /** What gets sent: piped input exactly as given (a last line may lack its newline), or lines typed at the terminal. */
+  function lineSource(ctx) {
+    if (ctx.stdin == null) return async () => { const line = await ctx.readLine(''); return line == null ? null : line + '\n'; };
+    const chunks = ctx.stdin.match(/[^\n]*\n|[^\n]+$/g) || [];
+    return async () => (chunks.length ? chunks.shift() : null);
+  }
+
+  /**
+   * Open a listening socket. Lab servers answer from the world's static service table,
+   * so a listener started on one has to appear there too.
+   */
+  function openListener(machine, listener) {
+    const stop = K.net.listen(machine, listener);
+    const host = K.net.hostOf(machine);
+    if (!host || host.dynamic) return stop;
+    const svc = { port: listener.port, proto: listener.proto, name: listener.name, listener };
+    host.services.push(svc);
+    return () => { stop(); host.services.splice(host.services.indexOf(svc), 1); };
   }
 
   /** K.getopt with BSD getopt's wording, which the OpenSSH tools print. Parsing stops at the first operand. */
@@ -387,7 +434,7 @@
     const seen = /\[(\d+)\]: Connection from (\S+) port (\d+) on /.exec(last);
     const mine = seen && seen[2] === session.client;
     const pid = mine ? +seen[1] : machine.nextPid();
-    const from = session.client + ' port ' + (mine ? seen[3] : 32768 + Math.floor(K.net.rand() * 28232));
+    const from = session.client + ' port ' + (mine ? seen[3] : ephemeralPort());
     return { machine, from, log: (msg) => authLog(machine, ident, pid, msg) };
   }
 
@@ -536,7 +583,7 @@
    */
   function remoteShell(ctx, login, tty) {
     const acct = login.account; const m = login.machine;
-    const clientPort = 32768 + Math.floor(K.net.rand() * 28232);
+    const clientPort = ephemeralPort();
     const env = {
       SHELL: acct.shell, LANG: ctx.env.LANG || 'en_US.UTF-8',
       PATH: acct.uid === 0 ? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' : '/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games',
@@ -678,5 +725,283 @@
   K.net.services.register('ssh', {
     greet(s) { return (s.svc.banner || 'SSH-2.0-' + SSH_VERSION) + '\r\n'; },
     data(s) { s.open = false; return 'Invalid SSH identification string.\r\n'; },
+  });
+
+  /* ================================================================= netcat */
+
+  const NC_HELP = [
+    '[v1.10-50]', 'connect to somewhere:\tnc [-options] hostname port[s] [ports] ... ', 'listen for inbound:\tnc -l -p port [-options] [hostname] [port]', 'options:',
+    "\t-c shell commands\tas `-e'; use /bin/sh to exec [dangerous!!]", '\t-e filename\t\tprogram to exec after connect [dangerous!!]', '\t-b\t\t\tallow broadcasts',
+    '\t-g gateway\t\tsource-routing hop point[s], up to 8', '\t-G num\t\t\tsource-routing pointer: 4, 8, 12, ...', '\t-h\t\t\tthis cruft',
+    '\t-i secs\t\t\tdelay interval for lines sent, ports scanned', '        -k                      set keepalive option on socket', '\t-l\t\t\tlisten mode, for inbound connects',
+    '\t-n\t\t\tnumeric-only IP addresses, no DNS', '\t-o file\t\t\thex dump of traffic', '\t-p port\t\t\tlocal port number', '\t-r\t\t\trandomize local and remote ports',
+    '\t-q secs\t\t\tquit after EOF on stdin and delay of secs', '\t-s addr\t\t\tlocal source address', '\t-T tos\t\t\tset Type Of Service', '\t-t\t\t\tanswer TELNET negotiation',
+    '\t-u\t\t\tUDP mode', '\t-v\t\t\tverbose [use twice to be more verbose]', '\t-w secs\t\t\ttimeout for connects and final net reads', '\t-C\t\t\tSend CRLF as line-ending',
+    '\t-z\t\t\tzero-I/O mode [used for scanning]', 'port numbers can be individual or ranges: lo-hi [inclusive];', "hyphens in port names must be backslash escaped (e.g. 'ftp\\-data').", '',
+  ].join('\n');
+  // Servers drop a client that says nothing; netcat itself would wait for that for ever.
+  const SERVER_IDLE = 300000;
+
+  /** h_errno text for a failed lookup. */
+  const lookupFailure = (machine, name) => (/^Temporary/.test(resolveFailure(machine, name)) ? 'Host name lookup failure' : 'Unknown host');
+
+  /**
+   * netcat's host lookup: { name, ip }, printing its DNS cross-check warnings when verbose.
+   * Returns null after the fatal message.
+   */
+  function ncLookup(nc, text) {
+    const ctx = nc.ctx; const m = ctx.machine;
+    const warn = (s) => { if (nc.verbose) ctx.err(s + '\n'); };
+    const literal = U.isIPv4(text) ? text : /^\d+$/.test(text) ? U.intToIp(+text) : null; // inet_aton takes a bare number too
+    if (nc.numeric && !literal) { ctx.err("Can't parse " + text + ' as an IP address\n'); return null; }
+    if (literal) {
+      const ptr = nc.numeric || !nc.verbose ? null : K.net.reverse(m, literal);
+      if (!ptr && !nc.numeric) warn(text + ': inverse host lookup failed: ' + lookupFailure(m, text));
+      return { name: ptr || '(UNKNOWN)', ip: literal };
+    }
+    const res = K.net.resolve(m, text);
+    if (!res) { ctx.err(text + ': forward host lookup failed: ' + lookupFailure(m, text) + '\n'); return null; }
+    const ptr = nc.verbose ? K.net.reverse(m, res.ip) : res.name;
+    if (!ptr) warn('Warning: inverse host lookup failed for ' + res.ip + ': Unknown host');
+    else if (ptr.toLowerCase() !== res.name.toLowerCase()) warn('DNS fwd/rev mismatch: ' + res.name + ' != ' + ptr);
+    return { name: res.name, ip: res.ip };
+  }
+
+  /** Expand port arguments: numbers, service names and lo-hi ranges (walked from the top down). { ports } or { bad }. */
+  function ncPorts(nc, args) {
+    const proto = nc.udp ? 'udp' : 'tcp'; const number = (t) => portNumber(nc.ctx.machine, nc.numeric && !/^\d+$/.test(t) ? '' : t, proto);
+    const ports = [];
+    for (const arg of args) {
+      const dash = arg.indexOf('-');
+      const lo = number(dash > 0 ? arg.slice(0, dash) : arg);
+      const hi = dash > 0 ? number(arg.slice(dash + 1)) : lo;
+      if (!hi) return { bad: arg.slice(dash + 1) };
+      if (!lo) return { bad: dash > 0 ? arg.slice(0, dash) : arg };
+      for (let p = Math.max(lo, hi); p >= lo; p--) ports.push(p);
+    }
+    if (nc.random) for (let i = ports.length - 1; i > 0; i--) { const j = Math.floor(K.net.rand() * (i + 1)); [ports[i], ports[j]] = [ports[j], ports[i]]; }
+    return { ports };
+  }
+
+  /** Shovel data between our input and the session until one side ends. */
+  async function ncRelay(nc, session) {
+    const ctx = nc.ctx;
+    const show = (text) => { ctx.out(text); nc.rcvd += U.byteLen(text); };
+    const next = lineSource(ctx);
+    show(session.greeting);
+    while (session.open) {
+      let line = await next();
+      if (line == null) break;
+      if (nc.crlf) line = line.replace(/\r?\n$/, '\r\n');
+      if (nc.interval) await ctx.sleep(nc.interval * 1000);
+      nc.sent += U.byteLen(line);
+      const reply = session.send(line);
+      await ctx.sleep(session.rtt);
+      show(reply);
+    }
+    // After local end of input netcat keeps reading until the peer hangs up or -q / -w runs out.
+    if (session.open) await ctx.sleep(nc.quit != null ? nc.quit * 1000 : nc.wait != null ? nc.wait * 1000 : SERVER_IDLE);
+  }
+
+  /** Client mode: try each port in turn; returns the exit status (that of the last port). */
+  async function ncConnect(nc, target, ports) {
+    const ctx = nc.ctx; const proto = nc.udp ? 'udp' : 'tcp';
+    const single = ports.length === 1;
+    let status = 1;
+    for (const port of ports) {
+      const label = target.name + ' [' + target.ip + '] ' + port + ' (' + ((!nc.numeric && serviceName(ctx.machine, port, proto)) || '?') + ')';
+      let session = null; let failure = null;
+      try {
+        if (!nc.udp) session = await dial(ctx, target.ip, port, nc.wait == null ? null : nc.wait * 1000, nc.zero);
+        else if (K.net.udp(ctx.machine, target.ip, port).state === 'closed') failure = 'Connection refused';
+      } catch (e) {
+        if (!(e instanceof K.NetError)) throw e;
+        failure = e.message;
+      }
+      status = failure ? 1 : 0;
+      // At one -v a scan of several ports keeps quiet about the closed ones.
+      if (failure && (single || nc.verbose > 1 || failure !== 'Connection refused')) nc.holler(label + ' : ' + failure);
+      if (!failure) nc.holler(label + ' open');
+      if (session) {
+        try { await ncRelay(nc, session); } finally { session.close(); }
+      } else if (!failure && nc.udp && !nc.zero) {
+        // UDP has no session to read from: datagrams go out and nothing in the lab answers them.
+        for (let line = await ctx.readLine(''); line != null; line = await ctx.readLine('')) { nc.sent += U.byteLen(line) + 1; K.net.udp(ctx.machine, target.ip, port); }
+      }
+      if (nc.interval && !single) await ctx.sleep(nc.interval * 1000);
+    }
+    return status;
+  }
+
+  /** Listen mode: take one inbound connection, show what it sends, hand it our piped input. */
+  async function ncListen(nc, allowed) {
+    const ctx = nc.ctx; const m = ctx.machine; const proto = nc.udp ? 'udp' : 'tcp';
+    const port = nc.localPort || ephemeralPort();
+    const taken = K.net.listening(m).some((l) => l.port === port && (l.proto || 'tcp') === proto);
+    if (taken || (port < 1024 && !ctx.isRoot)) { ctx.err("Can't grab 0.0.0.0:" + port + ' with bind : ' + (taken ? 'Address already in use' : 'Permission denied') + '\n'); return 1; }
+    let peer = null; let refused = false;
+    const handlerObj = {
+      greet(session) {
+        if (peer) { session.open = false; return ''; }
+        peer = session;
+        const from = (nc.numeric ? null : K.net.reverse(m, session.client)) || '(UNKNOWN)';
+        const where = '[' + session.ip + '] from ' + from + ' [' + session.client + '] ' + ephemeralPort();
+        refused = !!allowed && allowed.ip !== session.client;
+        nc.holler((refused ? 'invalid connection to ' : 'connect to ') + where);
+        if (refused) session.open = false;
+        return refused || ctx.stdin == null ? '' : ctx.stdin;
+      },
+      data(session, input) { ctx.out(input); nc.rcvd += U.byteLen(input); return ''; },
+    };
+    const stop = openListener(m, { port, proto, addr: '0.0.0.0', prog: 'nc', pid: ctx.pid, handlerObj });
+    nc.holler('listening on [any] ' + port + ' ...');
+    try {
+      for (let waited = 0; !peer || peer.open; waited += 200) {
+        if (!peer && nc.wait != null && waited >= nc.wait * 1000) { ctx.err('no connection : Connection timed out\n'); return 1; }
+        await ctx.sleep(200);
+      }
+    } finally { stop(); }
+    return refused ? 1 : 0;
+  }
+
+  K.cmd.register({
+    name: 'nc', aliases: ['netcat', 'ncat', 'nc.traditional'], pkg: 'netcat-traditional', section: 1,
+    summary: 'TCP/IP swiss army knife',
+    synopsis: 'nc [-options] hostname port[s] [ports] ...\n       nc -l -p port [-options] [hostname] [port]',
+    man: 'DESCRIPTION\n       netcat is a simple unix utility which reads and writes data across network connections, using TCP or UDP protocol. In the simplest usage, "nc host port" creates a TCP connection to the given port on the given target host. Your standard input is then sent to the host, and anything that comes back across the connection is sent to your standard output. This continues until the network side of the connection shuts down.\n\n' +
+      '       netcat can also function as a server, by listening for inbound connections on arbitrary ports and then doing the same reading and writing.\n\n' +
+      'OPTIONS\n       -C     Send CRLF as line-ending\n       -h     display help\n       -i secs\n              delay interval for lines sent, ports scanned\n       -l     listen mode, for inbound connects\n       -n     numeric-only IP addresses, no DNS\n' +
+      '       -p port\n              local port number (port numbers can be individual or ranges: lo-hi [inclusive])\n       -q seconds\n              after EOF on stdin, wait the specified number of seconds and then quit\n       -r     randomize local and remote ports\n' +
+      '       -u     UDP mode\n       -v     verbose [use twice to be more verbose]\n       -w secs\n              timeout for connects and final net reads\n       -z     zero-I/O mode [used for scanning]\n\n' +
+      'NOTES\n       Checking ports with -z is active probing: the simulator only allows it against targets inside the engagement scope. Kali ships the traditional netcat; a listener needs both -l and -p.\n\n' +
+      'EXAMPLES\n       nc -v web01.halcyon.lab 22\n              Connect to the SSH port and read its banner.\n       nc -zv files01.halcyon.lab 20-25\n              Check which ports in a range accept connections.\n       nc -lvnp 4444\n              Wait for one inbound connection on port 4444 and print what it sends.',
+    async run(ctx) {
+      let args = ctx.args;
+      if (!args.length) args = ((await ctx.readLine('Cmd line: ')) || '').trim().split(/\s+/).filter(Boolean);
+      const g = K.getopt(args, { short: 'Chklnruvzi:p:q:w:' });
+      const bail = (msg) => { ctx.err(msg + '\n'); return 1; };
+      if (g.err) return bail(ctx.name + ': ' + g.err + '\nnc -h for help');
+      const o = g.opts;
+      if (o.h) { ctx.err(NC_HELP); return 1; }
+      const seconds = (v) => (v == null ? null : parseInt(v, 10) || 0);
+      const nc = {
+        ctx, verbose: g.count.v || 0, numeric: !!o.n, udp: !!o.u, zero: !!o.z, crlf: !!o.C, random: !!o.r,
+        wait: seconds(o.w), quit: seconds(o.q), interval: seconds(o.i), sent: 0, rcvd: 0,
+        holler: (s) => { if (nc.verbose) ctx.err(s + '\n'); },
+      };
+      if (o.w != null && nc.wait <= 0) return bail('invalid wait-time ' + o.w);
+      if (o.i != null && nc.interval <= 0) return bail('invalid interval time ' + o.i);
+      if (o.p != null && !(nc.localPort = portNumber(ctx.machine, o.p, nc.udp ? 'udp' : 'tcp'))) return bail('invalid local port ' + o.p);
+      const target = g.rest.length ? ncLookup(nc, g.rest[0]) : null;
+      if (g.rest.length && !target) return 1;
+      let status;
+      if (o.l) status = await ncListen(nc, target);
+      else {
+        if (!target) return bail('no destination');
+        if (g.rest.length < 2) return bail('no port[s] to connect to');
+        const list = ncPorts(nc, g.rest.slice(1));
+        if (list.bad != null) return bail('invalid port ' + list.bad);
+        if (nc.zero && !K.net.guard(ctx, target.ip, ctx.name)) return 1;
+        status = await ncConnect(nc, target, list.ports);
+      }
+      if (nc.verbose > 1) ctx.err(' sent ' + nc.sent + ', rcvd ' + nc.rcvd + '\n');
+      return status;
+    },
+  });
+
+  /* ================================================================= telnet */
+
+  const TELNET_HELP = [
+    'Usage: telnet [OPTION...] [HOST [PORT]]', 'Login to remote system HOST (optionally, on service port PORT)', '', ' General options:', '',
+    '  -4, --ipv4                 use only IPv4', '  -6, --ipv6                 use only IPv6', '  -8, --binary               use an 8-bit data transmission',
+    '  -a, --login                attempt automatic login', '  -b, --bind=ADDRESS         bind to specific local ADDRESS', "  -c, --no-rc                do not read the user's .telnetrc file",
+    '  -d, --debug                turn on debugging', '  -e, --escape=CHAR          use CHAR as an escape character', '  -E, --no-escape            use no escape character',
+    '  -K, --no-login             do not automatically login to the remote system', '  -l, --user=USER            attempt automatic login as USER',
+    '  -L, --binary-output        use an 8-bit data transmission for output only', '  -n, --trace=FILE           record trace information into FILE',
+    '  -r, --rlogin               use a user-interface similar to rlogin', '', ' Encryption control:', '', '  -x, --encrypt              encrypt the data stream, if possible', '',
+    ' Authentication and Kerberos options:', '', '  -k, --realm=REALM          obtain tickets for the given REALM instead of the', "                             remote host's realm",
+    '  -X, --disable-auth=ATYPE   disable type ATYPE authentication', '', '  -?, --help                 give this help list', '      --usage                give a short usage message',
+    '  -V, --version              print program version', '', 'Mandatory or optional arguments to long options are also mandatory or optional', 'for any corresponding short options.', '',
+    'Report bugs to <bug-inetutils@gnu.org>.', '',
+  ].join('\n');
+  const TELNET_USAGE = [
+    'Usage: telnet [-468acdEKLrx?V] [-b ADDRESS] [-e CHAR] [-k REALM] [-l USER]', '            [-n FILE] [-X ATYPE] [--ipv4] [--ipv6] [--binary] [--login]',
+    '            [--bind=ADDRESS] [--no-rc] [--debug] [--escape=CHAR] [--no-escape]', '            [--realm=REALM] [--no-login] [--user=USER] [--binary-output]',
+    '            [--trace=FILE] [--rlogin] [--encrypt] [--disable-auth=ATYPE]', '            [--help] [--usage] [--version] [HOST [PORT]]', '',
+  ].join('\n');
+  const TELNET_VERSION = 'telnet (GNU inetutils) 2.6\nCopyright (C) 2025 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\n' +
+    'This is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by many authors.\n';
+
+  /** The "telnet> " prompt reached with the escape character. Resolves true when the user quits. */
+  async function telnetEscape(ctx) {
+    for (;;) {
+      const line = await ctx.readLine('telnet> ');
+      const word = (line || '').trim().split(/\s+/)[0];
+      if (line == null || /^(q|qu|qui|quit|c|cl|clo|clos|close)$/.test(word)) return true;
+      if (!word) return false;
+      ctx.out('?Invalid command\n');
+    }
+  }
+
+  /** Connect and run a line-at-a-time session. Returns the exit status. */
+  async function telnetOpen(ctx, host, portText) {
+    const res = K.net.resolve(ctx.machine, host);
+    const port = portNumber(ctx.machine, portText || 'telnet', 'tcp');
+    if (!res || !port) {
+      ctx.err('telnet: could not resolve ' + host + '/' + (portText || 'telnet') + ': ' + (res ? 'Servname not supported for ai_socktype' : resolveFailure(ctx.machine, host)) + '\n');
+      return 1;
+    }
+    await ctx.sleep(res.ms);
+    ctx.out('Trying ' + res.ip + '...\n');
+    let session;
+    try { session = await dial(ctx, res.ip, port); }
+    catch (e) {
+      if (!(e instanceof K.NetError)) throw e;
+      ctx.err('telnet: Unable to connect to remote host: ' + e.message + '\n');
+      return 1;
+    }
+    ctx.out('Connected to ' + host + ".\nEscape character is '^]'.\n" + session.greeting);
+    const next = lineSource(ctx);
+    try {
+      while (session.open) {
+        const line = await next();
+        if (line == null) break;
+        if (line.trim() === '^]') {
+          if (await telnetEscape(ctx)) { ctx.out('Connection closed.\n'); return 0; }
+          continue;
+        }
+        const reply = session.send(line.replace(/\r?\n$/, '\r\n'));
+        await ctx.sleep(session.rtt);
+        ctx.out(reply);
+      }
+    } finally { session.close(); }
+    ctx.err('Connection closed by foreign host.\n');
+    return 1;
+  }
+
+  K.cmd.register({
+    name: 'telnet', pkg: 'inetutils-telnet', section: 1,
+    summary: 'user interface to the TELNET protocol',
+    synopsis: 'telnet [OPTION...] [HOST [PORT]]',
+    man: 'DESCRIPTION\n       Login to remote system HOST (optionally, on service port PORT). telnet also makes a handy plain TCP client: every line you type is sent to the service, followed by CR LF, and whatever the service answers is printed.\n\n' +
+      '       Nothing in a TELNET session is encrypted. Use ssh for real remote logins.\n\n' +
+      'OPTIONS\n       -4, --ipv4\n              use only IPv4\n       -?, --help\n              give this help list\n       --usage\n              give a short usage message\n       -V, --version\n              print program version\n\n' +
+      "COMMANDS\n       Type the escape character ^] on a line of its own to reach the telnet> prompt; quit or close ends the session there.\n\n" +
+      'EXAMPLES\n       telnet cam01.halcyon.lab\n              Connect to the camera\'s TELNET service.\n       telnet mail01.halcyon.lab 25\n              Talk to the mail server by hand: try HELO kali, then QUIT.',
+    async run(ctx) {
+      const g = K.getopt(ctx.args, { short: '4V?', long: ['ipv4', 'help', 'usage', 'version'], alias: { ipv4: '4', help: '?', version: 'V' } });
+      if (g.err) { ctx.err('telnet: ' + g.err + "\nTry 'telnet --help' or 'telnet --usage' for more information.\n"); return 64; }
+      if (g.opts['?']) { ctx.out(TELNET_HELP); return 0; }
+      if (g.opts.usage) { ctx.out(TELNET_USAGE); return 0; }
+      if (g.opts.V) { ctx.out(TELNET_VERSION); return 0; }
+      if (g.rest.length) return telnetOpen(ctx, g.rest[0], g.rest[1]);
+      for (;;) {
+        const line = await ctx.readLine('telnet> ');
+        const words = (line || '').trim().split(/\s+/).filter(Boolean);
+        if (line == null || /^(q|qu|qui|quit)$/.test(words[0] || '')) return 0;
+        if (/^(o|op|ope|open)$/.test(words[0] || '') && words[1]) return telnetOpen(ctx, words[1], words[2]);
+        if (words.length) ctx.out(/^o/.test(words[0]) ? 'usage: open [-l user] [-a] host-name [port]\n' : '?Invalid command\n');
+      }
+    },
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

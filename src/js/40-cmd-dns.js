@@ -1090,4 +1090,224 @@
     man: 'DESCRIPTION\n       whois searches for an object in a RFC 3912 database. This version of the whois client tries to guess the right server to ask for the specified object: the registry of the top-level domain for a domain name, a regional Internet registry (ARIN, RIPE, APNIC) for an IP address. If no guess can be made it prints "No whois server is known for this kind of object."\n\n       Registries only know registered domains (halcyonfreight.example), not host names below them, and nothing about private names such as the lab domain. The records in this lab are simulated: registrars are named as simulated and contact details are redacted.\n\nOPTIONS\n       -h HOST, --host HOST\n              Connect to HOST.\n       -p PORT, --port PORT\n              Connect to PORT.\n       -H     Do not display the legal disclaimers some registries like to show you.\n       -I     First query whois.iana.org and then follow its referral to the whois server authoritative for that request.\n       --verbose\n              Be verbose.\n       --help, --version\n              Display the usage or the version and exit.\n\n       Other options are passed to RIPE-like servers.\n\nEXIT STATUS\n       0 after a reply, 1 for a usage error, 2 when the server could not be reached.\n\nEXAMPLES\n       whois halcyonfreight.example\n              Registration record of the client\'s public domain: registrar, dates, name servers.\n       whois 203.0.113.10\n              Who is responsible for the network an address belongs to.',
     run: whoisRun,
   });
+  /* --------------------------------------------------------- resolvectl */
+  const SYSTEMD_VERSION = 'systemd 257 (257.9-1)\n+PAM +AUDIT +SELINUX +APPARMOR +IMA +IPE +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD ' +
+    '+LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK +XKBCOMMON +UTMP +SYSVINIT +LIBARCHIVE\n';
+  const RESOLVECTL_HELP = 'resolvectl [OPTIONS...] COMMAND ...\n\n' +
+    'Send control commands to the network name resolution manager, or\nresolve domain names, IPv4 and IPv6 addresses, DNS records, and services.\n\n' +
+    'Commands:\n' +
+    '  query HOSTNAME|ADDRESS...    Resolve domain names, IPv4 and IPv6 addresses\n' +
+    '  status [LINK...]             Show link and server status\n' +
+    '  flush-caches                 Flush all local DNS caches\n' +
+    '  dns [LINK]                   Get per-interface DNS server address\n' +
+    '  domain [LINK]                Get per-interface search domain\n\n' +
+    'Options:\n' +
+    '  -h --help                    Show this help\n' +
+    '     --version                 Show package version\n' +
+    '     --no-pager                Do not pipe output into a pager\n' +
+    '  -4                           Resolve IPv4 addresses\n' +
+    '  -6                           Resolve IPv6 addresses\n' +
+    '  -t --type=TYPE               Query RR with DNS type\n' +
+    '     --legend=BOOL             Print headers and additional info (default: yes)\n\n' +
+    'See the resolvectl(1) man page for details.\n';
+
+  /* systemd-resolved numbers links the way the kernel does: lo is 1, the first NIC 2. */
+  const links = (machine) => machine.ifaces.map((i, n) => Object.assign({ index: n + 1 }, i)).filter((i) => i.kind !== 'loopback');
+  const linkUp = (i) => !!i.ip && i.state !== 'DOWN';
+
+  /** Right-aligned "Field: value" rows under a heading, as `resolvectl status` prints them. */
+  function statusBlock(ctx, heading, rows) {
+    const width = Math.max.apply(null, rows.map((r) => r[0].length));
+    return (ctx.isTTY ? K.c.sgr('0;1;39', heading) : heading) + '\n' + rows.map((r) => r[0].padStart(width) + ': ' + r[1] + '\n').join('');
+  }
+  function linkStatus(ctx, link) {
+    const m = ctx.machine; const dns = linkUp(link) ? m.dns : [];
+    const rows = [['Current Scopes', linkUp(link) ? (dns.length ? 'DNS ' : '') + 'LLMNR/IPv4' : 'none'],
+      ['Protocols', (dns.length ? '+' : '-') + 'DefaultRoute +LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported']];
+    if (dns.length) rows.push(['Current DNS Server', dns[0]], ['DNS Servers', dns.join(' ')]);
+    if (dns.length && m.search.length) rows.push(['DNS Domain', m.search.join(' ')]);
+    return statusBlock(ctx, 'Link ' + link.index + ' (' + link.name + ')', rows);
+  }
+  function globalStatus(ctx) {
+    const m = ctx.machine;
+    const rows = [['Protocols', '+LLMNR +mDNS -DNSOverTLS DNSSEC=no/unsupported'], ['resolv.conf mode', 'foreign']];
+    if (m.dns.length) rows.push(['Current DNS Server', m.dns[0]], ['DNS Servers', m.dns.join(' ')]);
+    if (m.search.length) rows.push(['DNS Domain', m.search.join(' ')]);
+    return statusBlock(ctx, 'Global', rows);
+  }
+
+  function hostsFileAddress(machine, name) {
+    let text = '';
+    try { text = machine.vfs.read('/etc/hosts'); } catch (e) { return null; }
+    for (const line of text.split('\n')) {
+      const f = line.replace(/#.*/, '').trim().split(/\s+/);
+      if (U.isIPv4(f[0]) && f.slice(1).some((n) => n.toLowerCase() === name)) return f[0];
+    }
+    return null;
+  }
+
+  /* format_timespan() with 100us accuracy: "2.3ms", "3ms", "640us" */
+  function timespan(us) {
+    if (us < 1000) return us + 'us';
+    const tenth = Math.floor((us % 1000) / 100);
+    return Math.floor(us / 1000) + (us % 1000 ? '.' + tenth : '') + 'ms';
+  }
+
+  /** resolvectl query for one name or address. True when it resolved. */
+  async function resolvedQuery(ctx, name, o) {
+    const m = ctx.machine; const net = ctx.net;
+    const grey = (text) => (ctx.isTTY ? K.c.sgr('0;38;5;245', text) : text);
+    const bright = (text) => (ctx.isTTY ? K.c.sgr('0;1;39', text) : text);
+    const fail = (why) => { ctx.eprintln(name + ': resolve call failed: ' + why); return false; };
+    const uplink = (links(m).find(linkUp) || {}).name;
+    /* values on consecutive lines, the "-- link" comment starting in column 60 */
+    const show = (label, values, via, synthetic, us, canonical) => {
+      let out = values.map((v, n) => {
+        const head = label === null ? '' : (n ? ' '.repeat(label.length + 1) : label + ':') + ' ';
+        return head + bright(v) + (via ? ' '.repeat(Math.max(60 - head.length - v.length, 1)) + grey('-- link: ' + via) : '') + '\n';
+      }).join('');
+      if (canonical) out += ' '.repeat(label.length + 2) + '(' + canonical + ')\n';
+      if (o.legend) {
+        out += '\n' + grey('-- Information acquired via protocol DNS in ' + timespan(us) + '.') + '\n' +
+          grey('-- Data is authenticated: ' + (synthetic ? 'yes' : 'no') + '; Data was acquired via local or encrypted transport: ' + (synthetic ? 'yes' : 'no')) + '\n' +
+          grey('-- Data from: ' + (synthetic ? 'synthetic' : 'network')) + '\n';
+      }
+      ctx.out(out);
+      return true;
+    };
+    const lower = name.toLowerCase().replace(/\.$/, '');
+    const local = o.type || U.isIPv4(lower) ? null : lower === 'localhost' ? '127.0.0.1' : hostsFileAddress(m, lower);
+    if (local) return show(name, [local], lower === 'localhost' ? 'lo' : null, true, 300 + Math.floor(net.rand() * 9) * 100);
+    if (!m.dns.length || !uplink) return fail('No appropriate name servers or networks for name found');
+
+    let us = 0;
+    /* one question to the configured server; null (after the message) when it fails outright */
+    const put = async (qname, type) => {
+      const res = query(ctx, qname, type, m.dns[0]);
+      if (res.status === 'TIMEOUT') { await ctx.sleep(10000); fail('All attempts to contact name servers or networks failed'); return null; }
+      await ctx.sleep(res.ms);
+      us += res.ms * 1000 + Math.floor(net.rand() * 10) * 100;
+      if (res.status === 'NOERROR' || res.status === 'NXDOMAIN') return res;
+      fail("Could not resolve '" + qname + "', server or network returned error " + res.status);
+      return null;
+    };
+    const noRecord = (qname) => fail("Name '" + qname + "' does not have any RR of the requested type");
+
+    if (o.type || U.isIPv4(lower)) {
+      const qname = o.type ? lower : reverseName(lower);
+      const type = o.type || 'PTR';
+      const res = await put(qname, type);
+      if (!res) return false;
+      if (res.status === 'NXDOMAIN') return fail("Name '" + qname + "' not found");
+      if (!res.answers.length) return noRecord(qname);
+      if (!o.type) return show(name, res.answers.map((r) => r.data), uplink, false, us);
+      return show(null, res.answers.map((r) => r.name + ' IN ' + r.type + ' ' + (r.type === 'MX' ? r.prio + ' ' : '') + r.data), uplink, false, us);
+    }
+
+    let names = lower.indexOf('.') >= 0 ? [lower] : m.search.map((domain) => lower + '.' + domain);
+    let canonical = lower; const addresses = [];
+    for (const type of o.families) {
+      let res = null;
+      for (const qname of names) {
+        res = await put(qname, type);
+        if (!res) return false;
+        if (res.status === 'NOERROR') { names = [qname]; break; }
+      }
+      if (!res || res.status === 'NXDOMAIN') return fail("Name '" + lower + "' not found");
+      canonical = canonicalName(res);
+      for (const r of res.answers) if (r.type === type) addresses.push(r.data);
+    }
+    if (!addresses.length) return noRecord(names[0]);
+    return show(name, addresses, uplink, false, us, canonical === lower ? null : canonical);
+  }
+
+  async function resolvectlRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'h46t:', long: ['help', 'version', 'no-pager', 'type=', 'legend='], alias: { help: 'h', type: 't' } });
+    if (g.err) { ctx.eprintln('resolvectl: ' + g.err); return 1; }
+    if (g.opts.h) { ctx.out(RESOLVECTL_HELP); return 0; }
+    if (g.opts.version) { ctx.out(SYSTEMD_VERSION); return 0; }
+    const m = ctx.machine;
+    const verb = g.rest[0] || 'status'; const rest = g.rest.slice(1);
+    const pick = (name) => {
+      const link = links(m).find((i) => i.name === name || String(i.index) === name);
+      if (!link) ctx.eprintln('Failed to resolve interface "' + name + '": No such device');
+      return link;
+    };
+    const head = (text) => (ctx.isTTY ? K.c.sgr('0;1;39', text) : text);
+    if (verb === 'status') {
+      if (!rest.length) { ctx.out([globalStatus(ctx)].concat(links(m).map((l) => linkStatus(ctx, l))).join('\n')); return 0; }
+      const chosen = rest.map(pick);
+      if (chosen.some((l) => !l)) return 1;
+      ctx.out(chosen.map((l) => linkStatus(ctx, l)).join('\n'));
+      return 0;
+    }
+    if (verb === 'dns' || verb === 'domain') {
+      const value = (link) => (!link || linkUp(link) ? (verb === 'dns' ? m.dns : m.search) : []).map((v) => ' ' + v).join('');
+      if (rest.length > 1) { ctx.eprintln('Too many arguments.'); return 1; }
+      const only = rest.length ? pick(rest[0]) : null;
+      if (rest.length && !only) return 1;
+      const rows = only ? [only] : [null].concat(links(m));
+      ctx.out(rows.map((l) => head(l ? 'Link ' + l.index + ' (' + l.name + ')' : 'Global') + ':' + value(l) + '\n').join(''));
+      return 0;
+    }
+    if (verb === 'flush-caches') return rest.length ? (ctx.eprintln('Too many arguments.'), 1) : 0;
+    if (verb !== 'query') { ctx.eprintln("Unknown command verb '" + verb + "'."); return 1; }
+    if (!rest.length) { ctx.eprintln('Too few arguments.'); return 1; }
+    const o = { type: null, families: g.opts['4'] ? ['A'] : g.opts['6'] ? ['AAAA'] : ['A', 'AAAA'], legend: !/^(no|false|0|off)$/i.test(g.opts.legend || 'yes') };
+    if (g.opts.t !== undefined) {
+      if (!isType(g.opts.t) || /^(AXFR|ANY)$/i.test(g.opts.t)) { ctx.eprintln('Failed to parse RR record type ' + g.opts.t); return 1; }
+      o.type = g.opts.t.toUpperCase();
+    }
+    let ok = true;
+    for (const name of rest) ok = await resolvedQuery(ctx, name, o) && ok;
+    return ok ? 0 : 1;
+  }
+
+  K.cmd.register({
+    name: 'resolvectl', pkg: 'systemd-resolved', section: 1, only: 'kali',
+    summary: 'Resolve domain names, IPv4 and IPv6 addresses, DNS resource records, and services; introspect and reconfigure the DNS resolver',
+    synopsis: 'resolvectl [OPTIONS...] {COMMAND} [NAME...]',
+    man: 'DESCRIPTION\n       resolvectl may be used to resolve domain names, IPv4 and IPv6 addresses and DNS resource records with the systemd-resolved resolver service, and to show which DNS servers and search domains the system uses. Unlike dig it resolves the way programs on this machine do: /etc/hosts first, then the configured DNS servers, with the search domains applied to single-label names.\n\nCOMMANDS\n       query HOSTNAME|ADDRESS...\n              Resolve domain names and IPv4 addresses. Each result shows the link it was learned on.\n       status [LINK...]\n              Show the global and per-link DNS settings: servers, search domains and protocols. This is the default command.\n       dns [LINK], domain [LINK]\n              Show the DNS servers or the search domains.\n       flush-caches\n              Flush all local DNS caches.\n\nOPTIONS\n       -4, -6 Resolve only IPv4 or only IPv6 addresses.\n       -t TYPE, --type=TYPE\n              Look up the resource records of this type (A, MX, NS, TXT, ...) instead of addresses.\n       --legend=BOOL\n              Whether to print the "-- Information acquired" lines.\n       -h, --help; --version\n              Print a short help text or the version and exit.\n\nEXAMPLES\n       resolvectl status\n              Which DNS server and search domain is this machine using?\n       resolvectl query web01.halcyon.lab\n              Resolve a lab host through the system resolver.',
+    run: resolvectlRun,
+    complete(info) {
+      if (info.index === 1) return ['query', 'status', 'dns', 'domain', 'flush-caches'];
+      if (info.words[1] === 'query') return info.words[info.index - 1] === '-t' ? typesFor(info.cur) : knownNames();
+      return links(info.machine).map((l) => l.name);
+    },
+  });
+
+  /* --------------------------------------------------------- completion */
+  /** Every name the simulated DNS can answer for: zone owners first, then the curated internet sites. */
+  function knownNames() {
+    const world = K.net.world; const names = [];
+    for (const zone of Object.keys(world.dns.zones)) {
+      names.push(zone);
+      for (const r of world.dns.zones[zone].records) if (r.name !== '@') names.push(r.name + '.' + zone);
+    }
+    return Array.from(new Set(names.concat(world.internet.sites.map((s) => s.name)))).sort();
+  }
+  const knownServers = () => Object.keys(K.net.world.dns.servers).sort((a, b) => U.ipToInt(a) - U.ipToInt(b));
+  /* Record types in the case the learner started typing. */
+  const typesFor = (cur) => (/^[a-z]/.test(cur) ? RR_TYPES.map((t) => t.toLowerCase()) : RR_TYPES);
+  const positionals = (info) => info.words.slice(1, info.index).filter((w) => w[0] !== '-' && info.words[info.words.indexOf(w) - 1] !== '-t').length;
+
+  K.cmd.get('dig').complete = (info) => {
+    const cur = info.cur; const prev = info.words[info.index - 1];
+    if (cur[0] === '@') return knownServers().map((ip) => '@' + ip);
+    if (cur[0] === '+') return DIG_KEYWORDS.filter((k) => digPlus(digDefaults(), {}, k + '=1') === null).map((k) => '+' + k);
+    if (prev === '-t') return typesFor(cur);
+    if (prev === '-x') return K.net.world.hosts.map((h) => h.ip);
+    return knownNames().concat(typesFor(cur));
+  };
+  K.cmd.get('host').complete = (info) => {
+    if (info.words[info.index - 1] === '-t') return typesFor(info.cur);
+    return positionals(info) ? knownServers() : knownNames();
+  };
+  K.cmd.get('nslookup').complete = (info) => {
+    const option = /^(-(?:type|querytype|query|q)=)/i.exec(info.cur);
+    if (option) return typesFor(info.cur.slice(option[1].length)).map((t) => option[1] + t);
+    return positionals(info) ? knownServers() : knownNames();
+  };
+  K.cmd.get('whois').complete = () => Object.keys(K.net.world.internet.whois)
+    .concat(K.net.world.internet.sites.map((s) => s.name).filter((n) => registrable(n) === n && K.net._publicName(n))).sort();
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -17,7 +17,8 @@
  *   K.sys.unit(machine, name) finds a unit ('ssh', 'ssh.service', 'sshd').
  *
  * machine.procs — processes seeded here carry extra optional fields used by ps
- *   and top: vsz and rss (KiB), time (CPU seconds), unit (owning unit name).
+ *   and top: vsz and rss (KiB), time (CPU seconds), unit (owning unit name),
+ *   comm (short name, when it differs from the basename of the command).
  *
  * machine.state.journal — [{ ts, ident, pid, msg, facility, prio (0-7), unit }]
  *   K.syslog(machine, { ident, pid, msg, facility: 'auth'|'daemon'|'kern'|'cron'|'user',
@@ -600,7 +601,7 @@
       machine.procs.push(full);
       return full;
     };
-    add({ pid: 1, ppid: 0, cmd: machine.profile === 'kali' ? '/sbin/init splash' : '/sbin/init', stat: 'Ss', rss: 14320, vsz: 23956, mem: memPercent(14320), time: 2 });
+    add({ pid: 1, ppid: 0, cmd: machine.profile === 'kali' ? '/sbin/init splash' : '/sbin/init', comm: 'systemd', stat: 'Ss', rss: 14320, vsz: 23956, mem: memPercent(14320), time: 2 });
     for (const [kpid, name, stat] of KERNEL_THREADS) add({ pid: kpid, ppid: kpid === 2 ? 0 : 2, cmd: '[' + name + ']', stat });
 
     pid = 228;
@@ -613,11 +614,11 @@
     }
     if (machine.profile === 'kali') {
       const login = boot + 41 * SEC;
-      for (const [cmd, rss, vsz, stat, parent, key] of KALI_SESSION) {
+      KALI_SESSION.forEach(([cmd, rss, vsz, stat, parent, key], i) => {
         gap(cmd);
-        const p = add({ ppid: machine.state.pids[parent] || 1, user: 'kali', cmd, stat, rss, vsz, mem: memPercent(rss), start: login + (pid % 7) * SEC, time: Math.floor(rss / 30000) });
+        const p = add({ ppid: machine.state.pids[parent] || 1, user: 'kali', cmd, stat, rss, vsz, mem: memPercent(rss), start: login + i * 180, time: Math.floor(rss / 30000) });
         if (key) machine.state.pids[key] = p.pid;
-      }
+      });
       const term = machine.procs.find((p) => p.pid === machine.state.pids.qterminal);
       Object.assign(term, { start: boot + 6 * MIN + 12 * SEC, cpu: 0.3, time: 9 });
     }
@@ -1327,6 +1328,453 @@
         if (name in ctx.env && name.indexOf('=') < 0) ctx.out(ctx.env[name] + end); else status = 1;
       }
       return status;
+    },
+  });
+
+  /* =============================================================== processes */
+
+  const SHELL_NAMES = /^(zsh|bash|sh|dash)$/;
+  // Accounts that own daemons but have no passwd entry in the base image.
+  const DAEMON_UIDS = { 'systemd-timesync': 992, polkitd: 990, rtkit: 105, lightdm: 107, postgres: 112, mysql: 104, _rpc: 103, jenkins: 108 };
+  const uidOfUser = (machine, name) => { const u = machine.userByName(name); return u ? u.uid : DAEMON_UIDS[name] != null ? DAEMON_UIDS[name] : 65534; };
+  const gidOfUser = (machine, name) => { const u = machine.userByName(name); return u ? u.gid : uidOfUser(machine, name); };
+
+  /** The kernel's short name for a process: what `ps -e`, pgrep and killall match. */
+  function commOf(p) {
+    if (p.comm) return p.comm;
+    const c = p.cmd;
+    if (c[0] === '[' && c[c.length - 1] === ']') return c.slice(1, -1);
+    let first = c.split(' ')[0];
+    if (/^[\w.-]+:$/.test(first)) first = first.slice(0, -1); // daemons that rewrite their title: "sshd: ...", "nginx: ..."
+    return K.VFS.basename(first.replace(/^-/, '')).slice(0, 15) || first;
+  }
+
+  /** Everything ps and top print about one process, with plausible numbers for processes a shell started. */
+  function procView(machine, p, selfPid) {
+    const comm = commOf(p); const h = U.hash32(comm);
+    const kthread = p.cmd[0] === '[';
+    const seeded = p.rss != null;
+    const rss = seeded ? p.rss : kthread ? 0 : SHELL_NAMES.test(comm) ? 6212 + (h % 900) : 1300 + (h % 3900);
+    const vsz = seeded ? p.vsz : kthread ? 0 : rss * 2 + 3800 + ((h >>> 8) % 5200);
+    let stat = p.stat;
+    if (!seeded && p.tty !== '?') stat = p.stat === 'R' ? (p.pid === selfPid ? 'R+' : 'S+') : SHELL_NAMES.test(comm) && p.stat === 'S' ? 'Ss' : p.stat;
+    const ni = /N/.test(stat) ? (comm === 'khugepaged' ? 19 : comm === 'ksmd' ? 5 : 1) : /</.test(stat) ? (kthread ? -20 : -11) : 0;
+    return {
+      pid: p.pid, ppid: p.ppid, user: p.user, uid: uidOfUser(machine, p.user), gid: gidOfUser(machine, p.user), tty: p.tty, stat, start: p.start,
+      cpu: p.cpu || 0, mem: seeded ? p.mem : memPercent(rss), cmd: p.cmd, comm, vsz, rss, time: p.time || 0, ni, nlwp: /l/.test(stat) ? 2 + (h % 5) : 1, kthread,
+    };
+  }
+  const allProcs = (ctx) => ctx.machine.procs.map((p) => procView(ctx.machine, p, ctx.pid));
+  const shortUser = (name) => (name.length > 8 ? name.slice(0, 7) + '+' : name);
+
+  const hms = (sec) => (sec >= 86400 ? Math.floor(sec / 86400) + '-' : '') + U.pad2(Math.floor(sec / 3600) % 24) + ':' + U.pad2(Math.floor(sec / 60) % 60) + ':' + U.pad2(Math.floor(sec) % 60);
+  const bsdTime = (sec) => Math.floor(sec / 60) + ':' + U.pad2(Math.floor(sec) % 60);
+  /** START/STIME: the time of day for processes started today, otherwise the date. */
+  function startShort(ms, now) {
+    if (dayStart(ms) === dayStart(now)) return strftime('%H:%M', ms);
+    return strftime(new Date(ms).getUTCFullYear() === new Date(now).getUTCFullYear() ? '%b%d' : '%Y', ms);
+  }
+  function elapsed(sec) {
+    const d = Math.floor(sec / 86400); const h = Math.floor(sec / 3600) % 24;
+    return (d ? d + '-' : '') + (d || h ? U.pad2(h) + ':' : '') + U.pad2(Math.floor(sec / 60) % 60) + ':' + U.pad2(sec % 60);
+  }
+
+  // ps output columns: name -> [header, width, 'l' | 'r', value(view, now)]
+  const PS_COLUMNS = (() => {
+    const c = {
+      pid: ['PID', 7, 'r', (v) => v.pid], ppid: ['PPID', 7, 'r', (v) => v.ppid], pgid: ['PGID', 7, 'r', (v) => v.pid], sid: ['SID', 7, 'r', (v) => v.pid],
+      user: ['USER', 8, 'l', (v) => shortUser(v.user)], ruser: ['RUSER', 8, 'l', (v) => shortUser(v.user)], uid_hack: ['UID', 8, 'l', (v) => shortUser(v.user)],
+      uid: ['UID', 5, 'r', (v) => v.uid], gid: ['GID', 5, 'r', (v) => v.gid], group: ['GROUP', 8, 'l', (v) => shortUser(v.user)],
+      '%cpu': ['%CPU', 4, 'r', (v) => v.cpu.toFixed(1)], c: ['C', 2, 'r', (v) => Math.round(v.cpu)], '%mem': ['%MEM', 4, 'r', (v) => v.mem.toFixed(1)],
+      vsz: ['VSZ', 6, 'r', (v) => v.vsz], rss: ['RSS', 5, 'r', (v) => v.rss], sz: ['SZ', 5, 'r', (v) => Math.floor(v.vsz / 4)], addr_sz: ['ADDR SZ', 7, 'l', (v) => '-' + U.padStart(Math.floor(v.vsz / 4), 6)],
+      tty: ['TT', 8, 'l', (v) => v.tty], tname: ['TTY', 8, 'l', (v) => v.tty], bsdtty: ['TTY', 8, 'l', (v) => v.tty], tpgid: ['TPGID', 7, 'r', () => -1],
+      stat: ['STAT', 4, 'l', (v) => v.stat], s: ['S', 1, 'l', (v) => v.stat[0]], f: ['F', 1, 'l', (v) => (v.kthread ? 1 : v.uid === 0 ? 4 : 0)], wchan: ['WCHAN', 6, 'l', () => '-'],
+      start: ['STARTED', 8, 'r', (v, now) => strftime(now - v.start < DAY ? '%H:%M:%S' : '%b %d', v.start)], lstart: ['STARTED', 24, 'l', (v) => strftime('%a %b %e %H:%M:%S %Y', v.start)],
+      stime: ['STIME', 5, 'r', (v, now) => startShort(v.start, now)], bsdstart: ['START', 5, 'r', (v, now) => startShort(v.start, now)],
+      etime: ['ELAPSED', 11, 'r', (v, now) => elapsed(Math.max(0, Math.floor((now - v.start) / 1000)))], etimes: ['ELAPSED', 7, 'r', (v, now) => Math.max(0, Math.floor((now - v.start) / 1000))],
+      time: ['TIME', 8, 'r', (v) => hms(v.time)], bsdtime: ['TIME', 6, 'r', (v) => bsdTime(v.time)], times: ['TIME', 8, 'r', (v) => Math.floor(v.time)],
+      ni: ['NI', 3, 'r', (v) => v.ni], pri: ['PRI', 3, 'r', (v) => 19 - v.ni], opri: ['PRI', 3, 'r', (v) => 80 + v.ni], nlwp: ['NLWP', 4, 'r', (v) => v.nlwp], psr: ['PSR', 3, 'r', (v) => v.pid % 2],
+      comm: ['COMMAND', 15, 'l', (v) => v.comm, 'tree'], ucmd: ['CMD', 15, 'l', (v) => v.comm, 'tree'], args: ['COMMAND', 27, 'l', (v) => v.cmd, 'tree'], cmd: ['CMD', 27, 'l', (v) => v.cmd, 'tree'],
+      fname: ['COMMAND', 8, 'l', (v) => v.comm.slice(0, 8)],
+    };
+    const alias = { euser: 'user', uname: 'user', euid: 'uid', ruid: 'uid', egid: 'gid', egroup: 'group', pcpu: '%cpu', pmem: '%mem', vsize: 'vsz', rssize: 'rss', rsz: 'rss', tt: 'tty',
+      state: 's', start_time: 'stime', cputime: 'time', nice: 'ni', thcount: 'nlwp', ucomm: 'comm', command: 'args', sess: 'sid', session: 'sid', pgrp: 'pgid' };
+    for (const a of Object.keys(alias)) c[a] = c[alias[a]];
+    return c;
+  })();
+  const PS_FORMATS = {
+    default: 'pid,tname,time,ucmd', full: 'uid_hack,pid,ppid,c,stime,tname,time,cmd', extraFull: 'uid_hack,pid,ppid,c,sz,rss,psr,stime,tname,time,cmd',
+    long: 'f,s,uid,pid,ppid,c,opri,ni,addr_sz,wchan,tname,time,ucmd', jobs: 'pid,pgid,sid,tname,time,ucmd',
+    bsd: 'pid,bsdtty,stat,bsdtime,args', bsdUser: 'user,pid,%cpu,%mem,vsz,rss,bsdtty,stat,bsdstart,bsdtime,args', bsdJobs: 'ppid,pid,pgid,sid,bsdtty,tpgid,stat,uid,bsdtime,args',
+  };
+  const PS_USAGE = "\nUsage:\n ps [options]\n\n Try 'ps --help <simple|list|output|threads|misc|all>'\n  or 'ps --help <s|l|o|t|m|a>'\n for additional help text.\n\nFor more details see ps(1).\n";
+  const PS_HELP_SIMPLE = '\nUsage:\n ps [options]\n\nBasic options:\n -A, -e               all processes\n -a                   all with tty, except session leaders\n  a                   all with tty, including other users\n' +
+    ' -d                   all except session leaders\n -N, --deselect       negate selection\n  r                   only running processes\n  T                   all processes on this terminal\n' +
+    '  x                   processes without controlling ttys\n\nFor more details see ps(1).\n';
+  const PS_SORT_KEYS = { pid: (v) => v.pid, ppid: (v) => v.ppid, '%cpu': (v) => v.cpu, pcpu: (v) => v.cpu, '%mem': (v) => v.mem, pmem: (v) => v.mem, rss: (v) => v.rss, vsz: (v) => v.vsz,
+    start_time: (v) => v.start, start: (v) => v.start, time: (v) => v.time, cputime: (v) => v.time, comm: (v) => v.comm, cmd: (v) => v.cmd, args: (v) => v.cmd, user: (v) => v.user, uid: (v) => v.uid, ni: (v) => v.ni };
+
+  class PsError extends Error {}
+
+  /** Turn ps's three option dialects (Unix -x, BSD x, GNU --x) into one request object. */
+  function parsePs(args) {
+    const q = { all: false, bsd: false, bsdAll: false, bsdNoTty: false, unixTty: false, notLeaders: false, running: false, negate: false, pids: [], ppids: [], users: [], names: [], ttys: [],
+      format: null, custom: [], forest: false, hierarchy: false, headers: true, sort: [], wide: 0, help: null, version: false };
+    const list = (text, what) => { const items = String(text).split(/[,\s]+/).filter(Boolean); if (!items.length) throw new PsError(what + ' list syntax error'); return items; };
+    const pidList = (text) => list(text, 'process ID').map((x) => { if (!/^\d+$/.test(x)) throw new PsError('process ID list syntax error'); return +x; });
+    const valued = {
+      p: (v) => q.pids.push(...pidList(v)), q: (v) => q.pids.push(...pidList(v)), u: (v) => q.users.push(...list(v, 'user')), U: (v) => q.users.push(...list(v, 'user')),
+      C: (v) => q.names.push(...list(v, 'command')), t: (v) => q.ttys.push(...list(v, 'TTY')), o: (v) => q.custom.push(v), k: (v) => q.sort.push(...list(v, 'sort')),
+    };
+    const long = {
+      forest: () => { q.forest = true; }, deselect: () => { q.negate = true; }, 'no-headers': () => { q.headers = false; }, 'no-heading': () => { q.headers = false; }, noheader: () => { q.headers = false; },
+      headers: () => {}, version: () => { q.version = true; }, info: () => { q.version = true; },
+    };
+    const longValued = { pid: valued.p, ppid: (v) => q.ppids.push(...pidList(v)), user: valued.u, User: valued.u, format: valued.o, sort: valued.k, tty: valued.t, cols: () => {}, columns: () => {}, width: () => {}, lines: () => {}, rows: () => {} };
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a.startsWith('--')) {
+        const eq = a.indexOf('='); const name = eq < 0 ? a.slice(2) : a.slice(2, eq);
+        if (name === 'help') { q.help = (eq < 0 ? args[i + 1] : a.slice(eq + 1)) || ''; return q; }
+        if (long[name] && eq < 0) { long[name](); continue; }
+        if (!longValued[name]) throw new PsError('unknown gnu long option');
+        const v = eq < 0 ? args[++i] : a.slice(eq + 1);
+        if (v == null) throw new PsError('option --' + name + ' requires an argument');
+        longValued[name](v);
+      } else if (a[0] === '-' && a.length > 1) {
+        for (let j = 1; j < a.length; j++) {
+          const ch = a[j];
+          if (ch === 'e' || ch === 'A') q.all = true;
+          else if (ch === 'a') q.unixTty = true; else if (ch === 'd') q.notLeaders = true; else if (ch === 'N') q.negate = true;
+          else if (ch === 'f') q.format = 'full'; else if (ch === 'F') q.format = 'extraFull'; else if (ch === 'l') q.format = 'long'; else if (ch === 'j') q.format = 'jobs';
+          else if (ch === 'H') q.hierarchy = true; else if (ch === 'w') q.wide++; else if (ch === 'V') q.version = true;
+          else if (ch === 'L' || ch === 'T' || ch === 'M' || ch === 'x') continue;
+          else if (valued[ch] || ch === 'O') {
+            const v = a.slice(j + 1) || args[++i];
+            if (v == null) throw new PsError('option -' + ch + ' requires an argument');
+            if (ch !== 'O') valued[ch](v);
+            break;
+          } else throw new PsError('unsupported SysV option');
+        }
+      } else if (/^\d[\d,]*$/.test(a)) q.pids.push(...pidList(a));
+      else {
+        q.bsd = true;
+        for (let j = 0; j < a.length; j++) {
+          const ch = a[j];
+          if (ch === 'a') q.bsdAll = true; else if (ch === 'x') q.bsdNoTty = true; else if (ch === 'u') q.format = 'bsdUser'; else if (ch === 'j') q.format = 'bsdJobs';
+          else if (ch === 'f') q.forest = true; else if (ch === 'w') q.wide++; else if (ch === 'h') q.headers = false; else if (ch === 'r') q.running = true;
+          else if (ch === 'e' || ch === 'c' || ch === 'T' || ch === 'S') continue;
+          else if (ch === 'V') q.version = true;
+          else if ('optUk'.indexOf(ch) >= 0) {
+            const v = a.slice(j + 1) || args[++i];
+            if (v == null) throw new PsError('option ' + ch + ' requires an argument');
+            valued[ch === 'U' ? 'u' : ch](v);
+            break;
+          } else throw new PsError('unsupported option (BSD syntax)');
+        }
+      }
+    }
+    return q;
+  }
+
+  function psColumns(q) {
+    const specs = q.custom.length ? q.custom.join(',') : PS_FORMATS[q.format || (q.bsd ? 'bsd' : 'default')];
+    const cols = [];
+    // "pid=,comm=NAME": a header override runs to the end of its -o argument
+    for (const chunk of q.custom.length ? q.custom : [specs]) {
+      let rest = chunk;
+      while (rest) {
+        const m = /^[,\s]*([^,\s=:]+)(?::(\d+))?(?:=([^]*))?/.exec(rest);
+        if (!m) break;
+        const hasHeader = m[3] != null;
+        let consumed = m[0].length;
+        if (hasHeader && q.custom.length) { const comma = m[3].indexOf(','); if (comma >= 0 && PS_COLUMNS[m[3].slice(comma + 1).split(/[,=:\s]/)[0].toLowerCase()]) consumed -= m[3].length - comma; }
+        const headerText = hasHeader ? rest.slice(m[0].length - m[3].length, consumed) : null;
+        const def = PS_COLUMNS[m[1].toLowerCase()] || PS_COLUMNS[m[1]];
+        if (!def) throw new PsError('unknown user-defined format specifier "' + m[1] + '"');
+        const header = headerText != null ? headerText : def[0];
+        cols.push({ header, width: Math.max(m[2] ? +m[2] : def[1], header.length), align: def[2], value: def[3], tree: def[4] === 'tree' });
+        rest = rest.slice(consumed);
+      }
+    }
+    return cols;
+  }
+
+  function psSelect(ctx, q, views) {
+    const m = ctx.machine;
+    const self = views.find((v) => v.pid === ctx.pid);
+    const myTty = self ? self.tty : 'pts/0';
+    const leader = (v) => /s/.test(v.stat);
+    let pick;
+    if (q.pids.length || q.ppids.length || q.users.length || q.names.length || q.ttys.length) {
+      const users = q.users.map((u) => {
+        if (/^\d+$/.test(u)) return m.userName(+u);
+        if (!m.userByName(u) && !views.some((v) => v.user === u)) throw new PsError('user name does not exist');
+        return u;
+      });
+      const ttys = q.ttys.map((t) => t.replace(/^\/dev\//, ''));
+      for (const t of ttys) if (t !== '?' && t !== '-' && !/^(pts\/\d+|tty\d+|\d+)$/.test(t)) throw new PsError('TTY could not be found');
+      pick = (v) => q.pids.indexOf(v.pid) >= 0 || q.ppids.indexOf(v.ppid) >= 0 || users.indexOf(v.user) >= 0 || q.names.indexOf(v.comm) >= 0 || ttys.indexOf(v.tty) >= 0;
+    } else if (q.all || (q.bsdAll && q.bsdNoTty)) pick = () => true;
+    else if (q.bsdAll) pick = (v) => v.tty !== '?';
+    else if (q.bsdNoTty) pick = (v) => v.user === ctx.user.name;
+    else if (q.unixTty) pick = (v) => v.tty !== '?' && !leader(v);
+    else if (q.notLeaders) pick = (v) => !leader(v);
+    else if (q.bsd) pick = (v) => v.user === ctx.user.name && v.tty !== '?';
+    else pick = (v) => v.user === ctx.user.name && v.tty === myTty;
+    return views.filter((v) => (q.negate ? !pick(v) : pick(v)) && (!q.running || v.stat[0] === 'R'));
+  }
+
+  /** Order processes as a tree and give each its "\_" prefix. Children of init start at the left margin, as in procps. */
+  function psForest(views, hierarchy) {
+    const byPid = new Map(views.map((v) => [v.pid, v]));
+    const kids = new Map();
+    const roots = [];
+    for (const v of views) {
+      if (v.ppid > 1 && byPid.has(v.ppid)) { if (!kids.has(v.ppid)) kids.set(v.ppid, []); kids.get(v.ppid).push(v); } else roots.push(v);
+    }
+    const order = (list) => list.sort((a, b) => a.start - b.start || a.pid - b.pid);
+    // kthreadd and its threads come before init, the order procps prints
+    roots.sort((a, b) => (b.pid === 2) - (a.pid === 2) || (b.pid === 1) - (a.pid === 1) || a.start - b.start || a.pid - b.pid);
+    const out = [];
+    const walk = (v, prefix, depth, last) => {
+      v.tree = hierarchy ? '  '.repeat(depth) : depth ? prefix + ' \\_ ' : '';
+      out.push(v);
+      const children = order(kids.get(v.pid) || []);
+      children.forEach((c, i) => walk(c, depth ? prefix + (last ? '    ' : ' |  ') : '', depth + 1, i === children.length - 1));
+    };
+    for (const r of roots) walk(r, '', 0, true);
+    return out;
+  }
+
+  function psRender(ctx, q, cols, views) {
+    const now = K.clock.now();
+    const limit = ctx.isTTY && q.wide < 2 ? (q.wide ? Math.max(132, ctx.cols) : ctx.cols) : Infinity;
+    const line = (cells) => cells.map((text, i) => {
+      const c = cols[i]; const lastCol = i === cols.length - 1;
+      if (lastCol && c.align === 'l') return text;
+      if (c.align === 'l' && text.length > c.width) return text.slice(0, c.width);
+      return c.align === 'r' ? text.padStart(c.width) : text.padEnd(c.width);
+    }).join(' ').slice(0, limit);
+    let text = '';
+    if (q.headers && cols.some((c) => c.header)) text += line(cols.map((c) => c.header)) + '\n';
+    for (const v of views) text += line(cols.map((c) => (c.tree && v.tree ? v.tree : '') + String(c.value(v, now)))) + '\n';
+    ctx.out(text);
+  }
+
+  reg({
+    name: 'ps', pkg: 'procps', summary: 'report a snapshot of the current processes.', synopsis: 'ps [options]',
+    man: 'DESCRIPTION\n       ps displays information about a selection of the active processes. If you want a repetitive update of the selection and the displayed information, use top instead.\n\n       This version of ps accepts several kinds of options: UNIX options, which may be grouped and must be preceded by a dash; BSD options, which may be grouped and must not be used with a dash; and GNU long options, which are preceded by two dashes.\n\n       By default, ps selects all processes with the same effective user ID as the current user and associated with the same terminal as the invoker. It displays the process ID (pid=PID), the terminal associated with the process (tname=TTY), the cumulated CPU time in [DD-]hh:mm:ss format (time=TIME), and the executable name (ucmd=CMD).\n\nOPTIONS\n       -e, -A Select all processes.\n\n       a      Lift the BSD-style "only yourself" restriction. With x, select all processes.\n\n       x      Lift the BSD-style "must have a tty" restriction.\n\n       u      Display user-oriented format.\n\n       -f     Do full-format listing.\n\n       -l     Long format.\n\n       -u userlist\n              Select by effective user ID or name.\n\n       -p pidlist\n              Select by process ID.\n\n       -C cmdlist\n              Select by command name.\n\n       --ppid pidlist\n              Select by parent process ID.\n\n       -o format\n              User-defined format: a comma-separated list of columns such as pid, ppid, user, %cpu, %mem, vsz, rss, tty, stat, start, etime, time, comm and args. "pid=" hides a header, "pid=NAME" renames it.\n\n       --sort spec\n              Sort by the given keys, for example --sort=-%mem.\n\n       f, --forest\n              ASCII art process tree.\n\n       --no-headers\n              Print no header line at all.\n\nEXAMPLES\n       ps aux\n              Every process on the system in BSD syntax.\n       ps -ef --forest\n              Every process with its parent, drawn as a tree.\n       ps -u www-data -o pid,etime,args\n              Processes of one account with chosen columns.\n       ps aux --sort=-%mem | head\n              The processes using the most memory.',
+    run(ctx) {
+      let q; let cols; let views;
+      try {
+        q = parsePs(ctx.args);
+        if (q.help != null) { ctx.out(q.help ? PS_HELP_SIMPLE : PS_USAGE); return 0; }
+        if (q.version) { ctx.out('ps from procps-ng 4.0.4\n'); return 0; }
+        cols = psColumns(q);
+        views = psSelect(ctx, q, allProcs(ctx));
+        for (const key of q.sort) if (!PS_SORT_KEYS[key.replace(/^[+-]/, '')]) throw new PsError('unknown sort specifier');
+      } catch (e) {
+        if (!(e instanceof PsError)) throw e;
+        ctx.err('error: ' + e.message + '\n' + PS_USAGE);
+        return 1;
+      }
+      views.sort((a, b) => a.pid - b.pid);
+      for (const key of q.sort.slice().reverse()) {
+        const get = PS_SORT_KEYS[key.replace(/^[+-]/, '')]; const dir = key[0] === '-' ? -1 : 1;
+        views.sort((a, b) => { const x = get(a); const y = get(b); return (x < y ? -1 : x > y ? 1 : 0) * dir; });
+      }
+      if (q.forest || q.hierarchy) views = psForest(views, q.hierarchy && !q.forest);
+      psRender(ctx, q, cols, views);
+      return views.length ? 0 : 1;
+    },
+  });
+
+  /* ------------------------------------------------- pgrep, pkill, killall, pidof */
+
+  const SIGNALS = ['HUP', 'INT', 'QUIT', 'ILL', 'TRAP', 'ABRT', 'BUS', 'FPE', 'KILL', 'USR1', 'SEGV', 'USR2', 'PIPE', 'ALRM', 'TERM', 'STKFLT', 'CHLD', 'CONT', 'STOP', 'TSTP', 'TTIN', 'TTOU',
+    'URG', 'XCPU', 'XFSZ', 'VTALRM', 'PROF', 'WINCH', 'POLL', 'PWR', 'SYS'];
+  /** "9", "KILL", "SIGKILL", "kill" -> "KILL"; null when it is not a signal. */
+  function signalName(text) {
+    const t = String(text).toUpperCase().replace(/^SIG/, '');
+    if (/^\d+$/.test(t)) return +t === 0 ? '0' : SIGNALS[+t - 1] || null;
+    return SIGNALS.indexOf(t) >= 0 ? t : null;
+  }
+
+  /**
+   * Deliver a signal the way kill(2) would: 'ok', or 'eperm' when the caller may not signal the process.
+   * The shell's kill builtin does the work, so jobs, units and the process table stay consistent.
+   */
+  async function sendSignal(ctx, view, signal) {
+    if (!ctx.isRoot && view.user !== ctx.user.name) return 'eperm';
+    // kernel threads, init and the shells this command runs under ignore the signal
+    const shells = []; for (let sh = ctx.shell; sh; sh = sh.parent) shells.push(sh.pid);
+    if (signal === '0' || view.kthread || view.pid === 1 || shells.indexOf(view.pid) >= 0) return 'ok';
+    await ctx.run(['kill', '-' + signal, String(view.pid)]);
+    return 'ok';
+  }
+
+  const PGREP_OPTIONS = ' -d, --delimiter <string>  specify output delimiter\n -l, --list-name           list PID and process name\n -a, --list-full           list PID and full command line\n' +
+    ' -v, --inverse             negates the matching\n -w, --lightweight         list all TID\n -c, --count               count of matching processes\n -f, --full                use full process name to match\n' +
+    ' -g, --pgroup <PGID,...>   match listed process group IDs\n -G, --group <GID,...>     match real group IDs\n -i, --ignore-case         match case insensitively\n' +
+    ' -n, --newest              select most recently started\n -o, --oldest              select least recently started\n -O, --older <seconds>     select where older than seconds\n' +
+    ' -P, --parent <PPID,...>   match only child processes of the given parent\n -s, --session <SID,...>   match session IDs\n     --signal <sig>        signal to send (either number or name)\n' +
+    ' -t, --terminal <tty,...>  match by controlling terminal\n -u, --euid <ID,...>       match by effective IDs\n -U, --uid <ID,...>        match by real IDs\n' +
+    ' -x, --exact               match exactly with the command name\n -F, --pidfile <file>      read PIDs from file\n -L, --logpidfile          fail if PID file is not locked\n' +
+    ' -r, --runstates <state>   match runstates [D,S,Z,...]\n -A, --ignore-ancestors    exclude our ancestors from results\n --cgroup <grp,...>        match by cgroup v2 names\n' +
+    ' --ns <PID>                match the processes that belong to the same\n                           namespace as <pid>\n --nslist <ns,...>         list which namespaces will be considered for\n' +
+    '                           the --ns option.\n                           Available namespaces: ipc, mnt, net, pid, user, uts\n\n -h, --help     display this help and exit\n -V, --version  output version information and exit\n';
+  const pgrepUsage = (name) => '\nUsage:\n ' + name + ' [options] <pattern>\n\nOptions:\n' +
+    (name === 'pkill' ? ' -<sig>                    signal to send (either number or name)\n -H, --require-handler     match only if signal handler is present\n -q, --queue <value>       integer value to be sent with the signal\n -e, --echo                display what is killed\n' : '') +
+    PGREP_OPTIONS.replace(name === 'pkill' ? /^ -[dla],.*\n/gm : /^$/, '') + '\nFor more details see pgrep(1).\n';
+
+  /** Shared matcher of pgrep and pkill. Returns { views, o } or an exit status after printing an error. */
+  function pgrepMatch(ctx, args) {
+    const name = ctx.name;
+    const hint = "\nTry `" + name + " --help' for more information.\n";
+    const g = K.getopt(args, { short: 'd:lavwcfg:G:inoO:P:s:t:u:U:xF:Lr:AhVe', long: ['delimiter=', 'list-name', 'list-full', 'inverse', 'lightweight', 'count', 'full', 'pgroup=', 'group=', 'ignore-case', 'newest', 'oldest',
+      'older=', 'parent=', 'session=', 'signal=', 'terminal=', 'euid=', 'uid=', 'exact', 'help', 'version', 'echo'],
+      alias: { delimiter: 'd', 'list-name': 'l', 'list-full': 'a', inverse: 'v', count: 'c', full: 'f', 'ignore-case': 'i', newest: 'n', oldest: 'o', parent: 'P', terminal: 't', euid: 'u', uid: 'U', exact: 'x', help: 'h', version: 'V', echo: 'e' } });
+    if (g.err) { ctx.err(name + ': ' + g.err + '\n' + pgrepUsage(name)); return 2; }
+    const o = g.opts; const m = ctx.machine;
+    if (o.h) { ctx.out(pgrepUsage(name)); return 0; }
+    if (o.V) { ctx.out(name + ' from procps-ng 4.0.4\n'); return 0; }
+    if (g.rest.length > 1) { ctx.err(name + ': only one pattern can be provided' + hint); return 2; }
+    const criteria = o.u != null || o.U != null || o.P != null || o.t != null;
+    if (!g.rest.length && !criteria) { ctx.err(name + ': no matching criteria specified' + hint); return 2; }
+    let users = null;
+    if (o.u != null || o.U != null) {
+      users = [];
+      for (const u of String(o.u != null ? o.u : o.U).split(',')) {
+        const user = /^\d+$/.test(u) ? m.userByUid(+u) : m.userByName(u);
+        if (!user && !m.procs.some((p) => p.user === u)) { ctx.err(name + ': invalid user name: ' + u + '\n'); return 2; }
+        users.push(user ? user.name : u);
+      }
+    }
+    let re = null;
+    if (g.rest.length) {
+      const pattern = g.rest[0];
+      if (!o.f && pattern.length > 15) ctx.err(name + ': pattern that searches for process name longer than 15 characters will result in zero matches\nTry `' + name + " -f' option to match against the complete command line.\n");
+      try { re = new RegExp(o.x ? '^(?:' + pattern + ')$' : pattern, o.i ? 'i' : ''); } catch (e) { ctx.err(name + ': regex error: Invalid regular expression\n'); return 2; }
+    }
+    const parents = o.P != null ? String(o.P).split(',').map(Number) : null;
+    const ttys = o.t != null ? String(o.t).split(',') : null;
+    let views = allProcs(ctx).filter((v) => v.pid !== ctx.pid).filter((v) => {
+      const hit = (!re || re.test(o.f ? v.cmd : v.comm)) && (!users || users.indexOf(v.user) >= 0) &&
+        (!parents || parents.indexOf(v.ppid) >= 0) && (!ttys || ttys.indexOf(v.tty) >= 0);
+      return o.v ? !hit : hit;
+    }).sort((a, b) => a.pid - b.pid);
+    if ((o.n || o.o) && views.length) {
+      const pickNewest = !!o.n;
+      views = [views.reduce((best, v) => ((pickNewest ? v.start > best.start || (v.start === best.start && v.pid > best.pid) : v.start < best.start) ? v : best))];
+    }
+    return { views, o };
+  }
+
+  reg({
+    name: 'pgrep', pkg: 'procps', summary: 'look up processes based on name and other attributes', synopsis: 'pgrep [options] pattern',
+    man: 'DESCRIPTION\n       pgrep looks through the currently running processes and lists the process IDs which match the selection criteria to stdout. All the criteria have to match. The pattern is an extended regular expression matched against the process name, or against the whole command line with -f.\n\nOPTIONS\n       -l, --list-name\n              List the process name as well as the process ID.\n\n       -a, --list-full\n              List the full command line as well as the process ID.\n\n       -c, --count\n              Suppress normal output; instead print a count of matching processes.\n\n       -f, --full\n              The pattern is normally only matched against the process name. When -f is set, the full command line is used.\n\n       -u, --euid euid,...\n              Only match processes whose effective user ID is listed. Either the numerical or symbolical value may be used.\n\n       -x, --exact\n              Only match processes whose names (or command lines if -f is specified) exactly match the pattern.\n\n       -n, --newest\n              Select only the newest (most recently started) of the matching processes.\n\n       -o, --oldest\n              Select only the oldest (least recently started) of the matching processes.\n\n       -P, --parent ppid,...\n              Only match processes whose parent process ID is listed.\n\n       -v, --inverse\n              Negates the matching.\n\nEXIT STATUS\n       0      One or more processes matched the criteria.\n       1      No processes matched.\n       2      Syntax error in the command line.\n\nEXAMPLES\n       pgrep -l ssh\n              PIDs and names of processes whose name contains ssh.\n       pgrep -u root -a cron\n              cron processes owned by root, with their command lines.',
+    run(ctx) {
+      const r = pgrepMatch(ctx, ctx.args);
+      if (typeof r === 'number') return r;
+      const { views, o } = r;
+      if (o.c) { ctx.println(views.length); return views.length ? 0 : 1; }
+      if (!views.length) return 1;
+      const sep = o.d != null ? o.d : '\n';
+      ctx.println(views.map((v) => v.pid + (o.a ? ' ' + v.cmd : o.l ? ' ' + v.comm : '')).join(sep));
+      return 0;
+    },
+  });
+
+  reg({
+    name: 'pkill', pkg: 'procps', summary: 'signal processes based on name and other attributes', synopsis: 'pkill [options] pattern',
+    man: 'DESCRIPTION\n       pkill will send the specified signal (by default SIGTERM) to each process instead of listing them on stdout. Processes are selected exactly as pgrep selects them.\n\nOPTIONS\n       -signal, --signal signal\n              Defines the signal to send to each matched process. Either the numeric or the symbolic signal name can be used.\n\n       -e, --echo\n              Display what is killed.\n\n       -f, --full\n              Match against the full command line.\n\n       -u, --euid euid,...\n              Only match processes whose effective user ID is listed.\n\n       -x, --exact\n              Only match processes whose names exactly match the pattern.\n\nEXIT STATUS\n       0      One or more processes matched the criteria and were signalled.\n       1      No processes matched or none of them could be signalled.\n       2      Syntax error in the command line.\n\nEXAMPLES\n       pkill -f "python3 -m http.server"\n              Stop a web server you started earlier, matching on its command line.\n       sudo pkill -HUP sshd\n              Ask sshd to reload its configuration.',
+    async run(ctx) {
+      const args = ctx.args.slice(); let signal = 'TERM';
+      if (args.length && /^-[A-Za-z0-9]+$/.test(args[0]) && signalName(args[0].slice(1)) && !/^-[dlavwcfinoxLAhVe]+$/.test(args[0])) signal = signalName(args.shift().slice(1));
+      const at = args.findIndex((a) => a === '--signal' || a.startsWith('--signal='));
+      if (at >= 0) {
+        const value = args[at] === '--signal' ? args[at + 1] : args[at].slice(9);
+        if (!signalName(value || '')) { ctx.err('pkill: Unknown signal "' + (value || '') + '".\n' + pgrepUsage('pkill')); return 2; }
+        signal = signalName(value);
+        args.splice(at, args[at] === '--signal' ? 2 : 1);
+      }
+      const r = pgrepMatch(ctx, args);
+      if (typeof r === 'number') return r;
+      let killed = 0;
+      for (const v of r.views) {
+        if ((await sendSignal(ctx, v, signal)) === 'eperm') { ctx.err('pkill: killing pid ' + v.pid + ' failed: Operation not permitted\n'); continue; }
+        killed++;
+        if (r.o.e) ctx.println(v.comm + ' killed (pid ' + v.pid + ')');
+      }
+      return killed ? 0 : 1;
+    },
+  });
+
+  const KILLALL_USAGE = 'Usage: killall [OPTION]... [--] NAME...\n       killall -l, --list\n       killall -V, --version\n\n  -e,--exact          require exact match for very long names\n' +
+    '  -I,--ignore-case    case insensitive process name match\n  -g,--process-group  kill process group instead of process\n  -y,--younger-than   kill processes younger than TIME\n' +
+    '  -o,--older-than     kill processes older than TIME\n  -i,--interactive    ask for confirmation before killing\n  -l,--list           list all known signal names\n' +
+    "  -q,--quiet          don't print complaints\n  -r,--regexp         interpret NAME as an extended regular expression\n  -s,--signal SIGNAL  send this signal instead of SIGTERM\n" +
+    '  -u,--user USER      kill only process(es) running as USER\n  -v,--verbose        report if the signal was successfully sent\n  -V,--version        display version information\n' +
+    '  -w,--wait           wait for processes to die\n  -n,--ns PID         match processes that belong to the same namespaces\n                      as PID\n' +
+    '  -Z,--context REGEXP kill only process(es) having context\n                      (must precede other arguments)\n\n';
+
+  reg({
+    name: 'killall', pkg: 'psmisc', summary: 'kill processes by name', synopsis: 'killall [-eIgiqrvw] [-s signal] [-u user] [--] name ...',
+    man: 'DESCRIPTION\n       killall sends a signal to all processes running any of the specified commands. If no signal name is specified, SIGTERM is sent. Signals can be specified either by name (e.g. -HUP or -SIGHUP) or by number (e.g. -1) or by option -s.\n\n       killall returns a zero return code if at least one process has been killed for each listed command. killall returns non-zero otherwise.\n\nOPTIONS\n       -I, --ignore-case\n              Do case insensitive process name match.\n\n       -l, --list\n              List all known signal names.\n\n       -q, --quiet\n              Do not complain if no processes were killed.\n\n       -r, --regexp\n              Interpret process name pattern as a POSIX extended regular expression.\n\n       -s, --signal signal\n              Send this signal instead of SIGTERM.\n\n       -u, --user user\n              Kill only processes the specified user owns. Command names are optional.\n\n       -v, --verbose\n              Report if the signal was successfully sent.\n\nEXAMPLES\n       killall sleep\n              Send SIGTERM to every process named sleep.\n       sudo killall -9 apache2\n              Kill every apache2 process at once. systemd then marks the service as failed.',
+    async run(ctx) {
+      const args = ctx.args.slice(); let signal = 'TERM';
+      const sigAt = args.findIndex((a) => /^-[A-Za-z0-9]+$/.test(a) && signalName(a.slice(1)) && !/^-[eIgiqrvwlVu]+$/.test(a));
+      if (sigAt >= 0) signal = signalName(args.splice(sigAt, 1)[0].slice(1));
+      const g = K.getopt(args, { short: 'eIgy:o:ilqrs:u:vVwn:Z:', long: ['exact', 'ignore-case', 'process-group', 'younger-than=', 'older-than=', 'interactive', 'list', 'quiet', 'regexp', 'signal=', 'user=', 'verbose', 'version', 'wait', 'ns=', 'context='],
+        alias: { 'ignore-case': 'I', list: 'l', quiet: 'q', regexp: 'r', signal: 's', user: 'u', verbose: 'v', version: 'V' } });
+      if (g.err) { ctx.err('killall: ' + g.err + '\n' + KILLALL_USAGE); return 1; }
+      const o = g.opts;
+      if (o.l) { ctx.out(SIGNALS.slice(0, 16).join(' ') + '\n' + SIGNALS.slice(16).join(' ') + '\n'); return 0; }
+      if (o.V) { ctx.err('killall (PSmisc) 23.7\nCopyright (C) 1993-2024 Werner Almesberger and Craig Small\n\nPSmisc comes with ABSOLUTELY NO WARRANTY.\nThis is free software, and you are welcome to redistribute it under\nthe terms of the GNU General Public License.\nFor more information about these matters, see the files named COPYING.\n'); return 0; }
+      if (o.s != null) { signal = signalName(o.s); if (!signal) { ctx.err(o.s + ': unknown signal; killall -l lists signals.\n'); return 1; } }
+      if (o.u != null && !ctx.machine.userByName(o.u) && !ctx.machine.procs.some((p) => p.user === o.u)) { ctx.err('Cannot find user ' + o.u + '\n'); return 1; }
+      if (!g.rest.length && o.u == null) { ctx.err(KILLALL_USAGE); return 1; }
+      const views = allProcs(ctx).filter((v) => v.pid !== ctx.pid && (o.u == null || v.user === o.u));
+      let status = 0;
+      for (const name of g.rest.length ? g.rest : [null]) {
+        let test = () => true;
+        if (name != null && o.r) { let re; try { re = new RegExp(name, o.I ? 'i' : ''); } catch (e) { ctx.err('killall: Bad regular expression: ' + name + '\n'); return 1; } test = (v) => re.test(v.comm); }
+        else if (name != null) test = (v) => (o.I ? v.comm.toLowerCase() === name.toLowerCase().slice(0, 15) : v.comm === name.slice(0, 15));
+        let killed = 0;
+        for (const v of views.filter(test)) {
+          if ((await sendSignal(ctx, v, signal)) === 'eperm') { ctx.err(v.comm + '(' + v.pid + '): Operation not permitted\n'); continue; }
+          killed++;
+          if (o.v) ctx.err('Killed ' + v.comm + '(' + v.pid + ') with signal ' + (signal === '0' ? 0 : SIGNALS.indexOf(signal) + 1) + '\n');
+        }
+        if (!killed) { status = 1; if (!o.q) ctx.err((name == null ? o.u : name) + ': no process found\n'); }
+      }
+      return status;
+    },
+  });
+
+  const PIDOF_USAGE = 'pidof usage: [options] <program-name>\n\n -c           Return PIDs with the same root directory\n -d <sep>     Use the provided character as output separator\n -h           Display this help text\n' +
+    ' -n           Avoid using stat system function on network shares\n -o <pid>     Omit results with a given PID\n -q           Quiet mode. Do not display output\n -s           Only return one PID\n' +
+    ' -x           Return PIDs of shells running scripts with a matching name\n -z           List zombie and I/O waiting processes. May cause pidof to hang.\n\n';
+
+  reg({
+    name: 'pidof', pkg: 'sysvinit-utils', summary: 'find the process ID of a running program', synopsis: 'pidof [-s] [-c] [-n] [-x] [-z] [-o omitpid[,omitpid...]] [-d sep] program [program...]',
+    man: 'DESCRIPTION\n       pidof finds the process id\'s (PIDs) of the named programs. It prints those id\'s on the standard output.\n\nOPTIONS\n       -s     Single shot - this instructs the program to only return one pid.\n\n       -o omitpid\n              Tells pidof to omit processes with that process id.\n\n       -d sep Tells pidof to use sep as an output separator if more than one PID is shown. The default separator is a space.\n\n       -q     Do not display matched PIDs to standard out. Simply exit with a status of true or false to indicate whether a matching PID was found.\n\nEXIT STATUS\n       0      At least one program was found with the requested name.\n       1      No program was found with the requested name.\n\nEXAMPLES\n       pidof cron\n              Print the PID of the cron daemon.\n       kill $(pidof -s sleep)\n              Stop one sleep process by name.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'cd:hno:qsxz' });
+      if (g.err) { ctx.err('pidof: ' + g.err + '\n' + PIDOF_USAGE); return 1; }
+      if (g.opts.h) { ctx.out(PIDOF_USAGE); return 0; }
+      const omit = (g.all.o || []).join(',').split(',').filter(Boolean).map((x) => (x === '%PPID' ? ctx.shell.pid : +x));
+      const views = allProcs(ctx).filter((v) => v.pid !== ctx.pid && omit.indexOf(v.pid) < 0 && !v.kthread);
+      const found = [];
+      for (const name of g.rest) {
+        const base = K.VFS.basename(name);
+        const hits = views.filter((v) => v.comm === base.slice(0, 15) || v.cmd.split(' ')[0] === name).sort((a, b) => b.pid - a.pid);
+        found.push(...(g.opts.s ? hits.slice(0, 1) : hits));
+      }
+      if (!found.length) return 1;
+      if (!g.opts.q) ctx.println(found.map((v) => v.pid).join(g.opts.d != null ? g.opts.d : ' '));
+      return 0;
     },
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

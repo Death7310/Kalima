@@ -332,7 +332,7 @@ test('whois: domain records from the registry', async () => {
     'Registrant Name: REDACTED FOR PRIVACY', 'Registrant Email: REDACTED FOR PRIVACY', 'Name Server: NS1.HALCYONFREIGHT.EXAMPLE', 'Name Server: NS2.HALCYONFREIGHT.EXAMPLE',
     'DNSSEC: unsigned', '>>> Last update of WHOIS database: 2026-11-13T14:29:19Z <<<']) assert.ok(lines.includes(want), want);
   assert.match(client.out, /\nTERMS OF USE: /);
-  assert.equal((await sim.run('whois halcyonfreight.example | grep -c x 2>/dev/null; whois HalcyonFreight.Example. | t-count')).out.trim().split('\n').pop(), String(lines.filter(Boolean).length));
+  assert.equal((await sim.run('whois HalcyonFreight.Example. | t-count')).out, lines.filter(Boolean).length + '\n', 'case and a trailing dot do not matter');
 
   const generic = (await sim.run('whois -H kali.org')).out;
   assert.match(generic, /^Domain Name: KALI\.ORG\n/);
@@ -341,7 +341,8 @@ test('whois: domain records from the registry', async () => {
   assert.match(generic, /\nCreation Date: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\nRegistry Expiry Date: 202[67]-/);
   assert.match(generic, /\nNOTICE: This record is simulated by Kalima for training\./);
   assert.doesNotMatch(generic, /TERMS OF USE/, '-H hides the legal text');
-  assert.equal((await sim.run('whois -H kali.org')).out, generic, 'invented registrations are stable');
+  const dated = (text) => text.replace(/Last update of WHOIS database: \S+/, '');
+  assert.equal(dated((await sim.run('whois -H kali.org')).out), dated(generic), 'invented registrations are stable');
 
   assert.equal((await sim.run('whois example.com')).out, '% IANA WHOIS server\n% for more information on IANA, visit http://www.iana.org\n% This query returned 1 object\n\n' +
     'domain:       EXAMPLE.COM\n\norganisation: Internet Assigned Numbers Authority\n\ncreated:      1992-01-01\nsource:       IANA\n\n');
@@ -405,4 +406,86 @@ test('whois: options, verbose mode and unreachable servers', async () => {
   assert.deepEqual([cut.code, cut.out, cut.err], [2, '', 'Timeout.\n']);
   assert.equal(sim.K.clock.now() - before, 60000);
   assert.equal((await sim.run('whois web01.halcyon.lab')).out, 'No whois server is known for this kind of object.\n', 'no connection is needed to know that');
+});
+
+test('resolvectl status, dns and domain', async () => {
+  const sim = await dnsSim();
+  const status = 'Global\n         Protocols: +LLMNR +mDNS -DNSOverTLS DNSSEC=no/unsupported\n  resolv.conf mode: foreign\nCurrent DNS Server: 10.10.10.53\n' +
+    '       DNS Servers: 10.10.10.53\n        DNS Domain: halcyon.lab\n\nLink 2 (eth0)\n    Current Scopes: DNS LLMNR/IPv4\n' +
+    '         Protocols: +DefaultRoute +LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported\nCurrent DNS Server: 10.10.10.53\n       DNS Servers: 10.10.10.53\n        DNS Domain: halcyon.lab\n';
+  assert.equal((await sim.run('resolvectl status')).out, status);
+  assert.equal((await sim.run('resolvectl')).out, status, 'status is the default command');
+  assert.equal((await sim.run('resolvectl status eth0')).out, status.split('\n\n')[1]);
+  assert.equal((await sim.run('resolvectl dns')).out, 'Global: 10.10.10.53\nLink 2 (eth0): 10.10.10.53\n');
+  assert.equal((await sim.run('resolvectl domain eth0')).out, 'Link 2 (eth0): halcyon.lab\n');
+  assert.deepEqual(await sim.run('resolvectl flush-caches').then((r) => [r.code, r.output]), [0, '']);
+  assert.deepEqual(await sim.run('resolvectl status eth9').then((r) => [r.code, r.err]), [1, 'Failed to resolve interface "eth9": No such device\n']);
+  assert.deepEqual(await sim.run('resolvectl frob').then((r) => [r.code, r.err]), [1, "Unknown command verb 'frob'.\n"]);
+  assert.equal((await sim.run('resolvectl --bogus')).err, "resolvectl: unrecognized option '--bogus'\n");
+  assert.match((await sim.run('resolvectl --version')).out, /^systemd 257 \(257\.9-1\)\n\+PAM /);
+  assert.match((await sim.run('resolvectl --help')).out, /^resolvectl \[OPTIONS\.\.\.\] COMMAND \.\.\.\n\nSend control commands to the network name resolution manager, or\n/);
+  sim.machine.dns = [];
+  assert.equal((await sim.run('resolvectl status')).out, 'Global\n       Protocols: +LLMNR +mDNS -DNSOverTLS DNSSEC=no/unsupported\nresolv.conf mode: foreign\n      DNS Domain: halcyon.lab\n\n' +
+    'Link 2 (eth0)\nCurrent Scopes: LLMNR/IPv4\n     Protocols: -DefaultRoute +LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported\n');
+});
+
+test('resolvectl query resolves like the system resolver', async () => {
+  const sim = await dnsSim();
+  const legend = '\n-- Information acquired via protocol DNS in T.\n-- Data is authenticated: no; Data was acquired via local or encrypted transport: no\n-- Data from: network\n';
+  const out = async (line) => (await sim.run(line)).out.replace(/in [\d.]+(ms|us)\./g, 'in T.');
+  const at60 = (text) => text.padEnd(60) + '-- link: eth0\n';
+  assert.equal(await out('resolvectl query web01.halcyon.lab'), at60('web01.halcyon.lab: 10.10.10.10') + legend);
+  assert.equal(await out('resolvectl query www.halcyon.lab'), at60('www.halcyon.lab: 10.10.10.10') + '                 (web01.halcyon.lab)\n' + legend);
+  assert.equal(await out('resolvectl query web01'), at60('web01: 10.10.10.10') + '       (web01.halcyon.lab)\n' + legend, 'single labels use the search domain');
+  assert.equal(await out('resolvectl query kali.org'), at60('kali.org: 104.18.4.159') + at60('          104.18.5.159') + legend);
+  assert.equal(await out('resolvectl query 10.10.10.10'), at60('10.10.10.10: web01.halcyon.lab') + legend);
+  assert.equal(await out('resolvectl query -t mx halcyon.lab'), at60('halcyon.lab IN MX 10 mail01.halcyon.lab') + legend);
+  assert.equal(await out('resolvectl query --legend=no -4 web01.halcyon.lab db01.halcyon.lab'), at60('web01.halcyon.lab: 10.10.10.10') + at60('db01.halcyon.lab: 10.10.10.30'));
+  assert.equal(await out('resolvectl query localhost'), 'localhost: 127.0.0.1'.padEnd(60) + '-- link: lo\n' +
+    '\n-- Information acquired via protocol DNS in T.\n-- Data is authenticated: yes; Data was acquired via local or encrypted transport: yes\n-- Data from: synthetic\n');
+  assert.match(await out('resolvectl query kali'), /^kali: 127\.0\.1\.1\n\n[^]*-- Data from: synthetic\n$/, '/etc/hosts wins over DNS');
+  assert.equal(await out('resolvectl --legend=no query web01.halcyon.lab | t-count'), '1\n');
+
+  const fail = async (line) => { const r = await sim.run(line); return [r.code, r.out, r.err]; };
+  assert.deepEqual(await fail('resolvectl query nosuch.halcyon.lab'), [1, '', "nosuch.halcyon.lab: resolve call failed: Name 'nosuch.halcyon.lab' not found\n"]);
+  assert.deepEqual(await fail('resolvectl query halcyon.lab'), [1, '', "halcyon.lab: resolve call failed: Name 'halcyon.lab' does not have any RR of the requested type\n"]);
+  assert.deepEqual(await fail('resolvectl query 10.10.10.99'), [1, '', "10.10.10.99: resolve call failed: Name '99.10.10.10.in-addr.arpa' not found\n"]);
+  assert.deepEqual(await fail('resolvectl query'), [1, '', 'Too few arguments.\n']);
+  sim.machine.dns = ['10.10.10.99'];
+  assert.deepEqual(await fail('resolvectl query web01.halcyon.lab'), [1, '', 'web01.halcyon.lab: resolve call failed: All attempts to contact name servers or networks failed\n']);
+  sim.machine.dns = [];
+  assert.deepEqual(await fail('resolvectl query web01.halcyon.lab'), [1, '', 'web01.halcyon.lab: resolve call failed: No appropriate name servers or networks for name found\n']);
+  assert.match((await sim.run('dig web01.halcyon.lab')).out, /^;; communications error to 127\.0\.0\.1#53: connection refused\n/, 'with no resolver configured dig falls back to localhost');
+});
+
+test('completion offers lab names, servers and record types', async () => {
+  const sim = await dnsSim();
+  const items = (line) => sim.shell.complete(line).items.map((i) => i.display);
+  assert.deepEqual(items('dig web'), ['web01.halcyon.lab']);
+  assert.deepEqual(items('dig m'), ['mail.halcyon.lab', 'mail.halcyonfreight.example', 'mail01.halcyon.lab', 'mx']);
+  assert.deepEqual(items('dig halcyon.lab M'), ['MX']);
+  assert.deepEqual(items('dig -t c'), ['caa', 'cname']);
+  assert.deepEqual(items('dig @10.10.10.5'), ['@10.10.10.50', '@10.10.10.53']);
+  assert.deepEqual(items('dig +tr'), ['+trace', '+tries']);
+  assert.ok(!items('dig +').includes('+yaml'), 'only keywords the simulator accepts are offered');
+  assert.deepEqual(items('dig -x 10.10.10.5'), ['10.10.10.50', '10.10.10.53']);
+  assert.deepEqual(items('host -t S'), ['SOA', 'SPF', 'SRV', 'SVCB']);
+  assert.deepEqual(items('host db'), ['db01.halcyon.lab']);
+  assert.deepEqual(items('host db01.halcyon.lab 9'), ['9.9.9.9']);
+  assert.deepEqual(items('nslookup -type=m'), ['-type=mx']);
+  assert.deepEqual(items('nslookup pri'), ['printer.halcyon.lab']);
+  assert.ok(items('whois h').includes('halcyonfreight.example'));
+  assert.deepEqual(items('whois k'), ['kali.org']);
+  assert.deepEqual(items('resolvectl q'), ['query']);
+  assert.deepEqual(items('resolvectl query ns1.halcyon.'), ['ns1.halcyon.lab']);
+  assert.deepEqual(items('resolvectl status e'), ['eth0']);
+});
+
+test('every command has help metadata and reacts to Ctrl-C while waiting', async () => {
+  const sim = await dnsSim();
+  for (const name of ['dig', 'host', 'nslookup', 'whois', 'resolvectl']) {
+    const def = sim.K.cmd.get(name);
+    assert.ok(def.summary && def.synopsis && /DESCRIPTION[^]*EXAMPLES/.test(def.man), name);
+    assert.ok(sim.machine.commandAt('/usr/bin/' + name), name + ' is installed on Kali');
+  }
 });

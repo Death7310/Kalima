@@ -431,3 +431,216 @@ test('env and printenv', async () => {
   assert.equal(await sim.out('printenv -0 HOME | tr "\\0" "!"'), '/home/kali!');
   await fails('printenv -x', "printenv: invalid option -- 'x'\nTry 'printenv --help' for more information.\n", 2);
 });
+
+/* ------------------------------------------------------------------ processes */
+
+test('ps: default, aux and -ef layouts', async () => {
+  const sim = await sys();
+  const { shell } = sim;
+  const own = (await sim.out('ps')).split('\n');
+  assert.equal(own[0], '    PID TTY          TIME CMD');
+  assert.equal(own[1], `   ${shell.pid} pts/0    00:00:00 zsh`);
+  assert.match(own[2], /^ {3}\d{4} pts\/0 {4}00:00:00 ps$/);
+  assert.equal(own.length, 4);
+
+  const aux = (await sim.out('ps aux')).split('\n');
+  assert.equal(aux[0], 'USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND');
+  assert.equal(aux[1], 'root           1  0.0  0.4  23956 14320 ?        Ss   11:12   0:02 /sbin/init splash');
+  assert.equal(aux[2], 'root           2  0.0  0.0      0     0 ?        S    11:12   0:00 [kthreadd]');
+  assert.ok(aux.includes('message+     312  0.0  0.1   9872  5456 ?        Ss   11:12   0:00 /usr/bin/dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only'), 'long user names are cut with +');
+  assert.ok(aux.includes('root         452  1.2  2.9 421776 118320 tty7     Ssl+ 11:12   2:22 /usr/lib/xorg/Xorg :0 -seat seat0 -auth /var/run/lightdm/root/:0 -nolisten tcp vt7 -novtswitch'));
+  assert.ok(aux.some((l) => new RegExp(`^kali {8}${shell.pid}  0\\.0  0\\.\\d +\\d+ +\\d+ pts/0    Ss   14:30   0:00 -zsh$`).test(l)));
+  assert.match(aux.at(-2), /^kali +\d+  0\.0  0\.\d +\d+ +\d+ pts\/0    R\+   14:30   0:00 ps aux$/);
+  assert.equal(aux.length - 2, sim.machine.procs.length + 1, 'every process plus ps itself');
+
+  const ef = (await sim.out('ps -ef')).split('\n');
+  assert.equal(ef[0], 'UID          PID    PPID  C STIME TTY          TIME CMD');
+  assert.equal(ef[1], 'root           1       0  0 11:12 ?        00:00:02 /sbin/init splash');
+  assert.ok(ef.includes('root         452     451  1 11:12 tty7     00:02:22 /usr/lib/xorg/Xorg :0 -seat seat0 -auth /var/run/lightdm/root/:0 -nolisten tcp vt7 -novtswitch'));
+  assert.equal((await sim.out('ps -e')).split('\n')[1], '      1 ?        00:00:02 systemd');
+  assert.equal(await sim.out('ps -eF | head -2'), 'UID          PID    PPID  C    SZ   RSS PSR STIME TTY          TIME CMD\nroot           1       0  0  5989 14320   1 11:12 ?        00:00:02 /sbin/init splash\n');
+  assert.match(await sim.out('ps -l'), /^F S {3}UID {5}PID {4}PPID {2}C PRI {2}NI ADDR SZ WCHAN {2}TTY {10}TIME CMD\n0 S {2}1000 {4}\d+ {5}\d+ {2}0 {2}80 {3}0 - +\d+ - {6}pts\/0 {4}00:00:00 zsh\n/);
+  assert.equal(await sim.out('ps ax | head -3'), '    PID TTY      STAT   TIME COMMAND\n      1 ?        Ss     0:02 /sbin/init splash\n      2 ?        S      0:00 [kthreadd]\n');
+  assert.equal(await sim.out('ps axj | head -2'), '   PPID     PID    PGID     SID TTY        TPGID STAT   UID   TIME COMMAND\n      0       1       1       1 ?             -1 Ss       0   0:02 /sbin/init splash\n');
+  assert.equal(await sim.out('ps -V'), 'ps from procps-ng 4.0.4\n');
+});
+
+test('ps: selection by user, PID, name and parent', async () => {
+  const sim = await sys();
+  const pids = async (line) => (await sim.out(line + ' -o pid=')).trim().split(/\s+/).filter(Boolean).map(Number);
+  const byUser = (u) => sim.machine.procs.filter((p) => p.user === u).map((p) => p.pid);
+  assert.deepEqual((await pids('ps -u messagebus')), byUser('messagebus'));
+  assert.deepEqual((await pids('ps -u kali')).slice(0, -1), byUser('kali'));
+  assert.deepEqual((await pids('ps -U 33 -u root')).length, byUser('root').length);
+  assert.deepEqual(await pids('ps -p 1,2'), [1, 2]);
+  assert.deepEqual(await pids('ps -p 1 -p 2'), [1, 2]);
+  assert.deepEqual(await pids('ps 1'), [1]);
+  assert.deepEqual(await pids('ps -C cron'), [sim.K.sys.unit(sim.machine, 'cron').pid]);
+  assert.deepEqual(await pids('ps --ppid 451'), [452, 453]);
+  assert.deepEqual((await pids('ps a')).slice(0, -1), sim.machine.procs.filter((p) => p.tty !== '?').map((p) => p.pid), 'a: every process with a terminal');
+  assert.ok((await pids('ps x')).includes(563), 'x adds processes without a terminal');
+  assert.equal((await pids('ps -e')).length, sim.machine.procs.length + 1);
+  assert.equal((await pids('ps -A')).length, sim.machine.procs.length + 1);
+  const none = await sim.run('ps -p 99999');
+  assert.deepEqual([none.out, none.code], ['    PID TTY          TIME CMD\n', 1]);
+  assert.equal(await sim.out('ps -t tty7 -o pid=,comm='), '    452 Xorg\n');
+  assert.equal(await sim.out('ps -e | grep -c kworker'), '32\n');
+  assert.equal(await sim.out('ps aux | grep "[c]ron -f" | tr -s " " | cut -d" " -f1,2,11-'), 'root 365 /usr/sbin/cron -f\n');
+});
+
+test('ps: -o columns, headers and sorting', async () => {
+  const sim = await sys();
+  assert.equal(await sim.out('ps -o pid,ppid,user,stat,comm,args -p 1'), '    PID    PPID USER     STAT COMMAND         COMMAND\n      1       0 root     Ss   systemd         /sbin/init splash\n');
+  assert.equal(await sim.out('ps -o pid,cmd,%cpu,%mem,etime,time,tty,ni,pri,vsz,rss,start,lstart,uid,gid,nlwp,s,tname,stime -p 1'),
+    '    PID CMD                         %CPU %MEM     ELAPSED     TIME TT        NI PRI    VSZ   RSS  STARTED STARTED                    UID   GID NLWP S TTY      STIME\n' +
+    '      1 /sbin/init splash            0.0  0.4    03:17:42 00:00:02 ?          0  19  23956 14320 11:12:18 Fri Nov 13 11:12:18 2026     0     0    1 S ?        11:12\n');
+  assert.equal(await sim.out('ps -o pid= -p 1'), '      1\n');
+  assert.equal(await sim.out('ps -o pid=,comm= -p 1'), '      1 systemd\n');
+  assert.equal(await sim.out('ps -o pid=PROCESS,comm=NAME -p 1'), 'PROCESS NAME\n      1 systemd\n');
+  assert.equal(await sim.out('ps -o user:20,pid -p 1'), 'USER                     PID\nroot                       1\n');
+  assert.equal(await sim.out('ps -o pid -o comm -p 2'), '    PID COMMAND\n      2 kthreadd\n');
+  assert.equal(await sim.out('ps --no-headers -o comm -p 1'), 'systemd\n');
+  assert.equal(await sim.out('ps -eo pid,comm,args | grep "systemd-journald$"'), '    239 systemd-journal /usr/lib/systemd/systemd-journald\n', 'comm is cut to 15 characters');
+  assert.equal(await sim.out('ps -eo user,pid,ni,comm | grep -E "ksmd|khugepaged|rtkit"'), 'root          37   5 ksmd\nroot          38  19 khugepaged\nrtkit        457   1 rtkit-daemon\n');
+  assert.equal(await sim.out('ps aux --sort=-%mem | head -3 | cut -c1-41'), 'USER         PID %CPU %MEM    VSZ   RSS T\nroot         452  1.2  2.9 421776 118320 \nkali         631  0.0  2.4 1203316 98244 \n');
+  assert.equal(await sim.out('ps -eo pid=,rss= --sort=-rss | head -2'), '    452 118320\n    631 98244\n');
+  assert.equal(await sim.out('ps -eo pid= --sort=-pid | tail -1'), '      1\n');
+  // on a terminal, lines are cut to its width
+  const wide = (await sim.run('ps aux', { tty: true })).out.split('\n');
+  assert.ok(wide.every((l) => l.length <= 80));
+  assert.equal(wide.find((l) => / 452 /.test(l)), 'root         452  1.2  2.9 421776 118320 tty7     Ssl+ 11:12   2:22 /usr/lib/xorg/Xorg :0 -seat seat0'.slice(0, 80));
+  assert.ok((await sim.run('ps auxww', { tty: true })).out.split('\n').some((l) => l.length > 132), 'ww lifts the limit');
+});
+
+test('ps: process tree', async () => {
+  const sim = await sys();
+  const ef = (await sim.out('ps -ef --forest')).split('\n');
+  assert.equal(ef[1], 'root           2       0  0 11:12 ?        00:00:00 [kthreadd]');
+  assert.equal(ef[2], 'root           3       2  0 11:12 ?        00:00:00  \\_ [pool_workqueue_release]');
+  const at = (re) => ef.findIndex((l) => re.test(l));
+  assert.ok(at(/ \/sbin\/init splash$/) > at(/\[kworker\/u8:0-flush-8:0\]$/), 'kernel threads come before init');
+  const dm = at(/ \/usr\/sbin\/lightdm$/);
+  assert.deepEqual(ef.slice(dm, dm + 6).map((l) => l.replace(/^.*\d\d:\d\d:\d\d/, '').slice(0, 32)), [
+    ' /usr/sbin/lightdm',
+    '  \\_ /usr/lib/xorg/Xorg :0 -seat ',
+    '  \\_ lightdm --session-child 13 2',
+    '      \\_ xfce4-session',
+    '          \\_ /usr/bin/ssh-agent x-',
+    '          \\_ xfwm4',
+  ]);
+  const panel = at(/ {10}\\_ xfce4-panel$/);
+  assert.match(ef[panel + 1], / {10}\| {3}\\_ \/usr\/lib\/x86_64-linux-gnu\/xfce4\/panel\/wrapper-2\.0 /);
+  const term = at(/\\_ \/usr\/bin\/qterminal$/);
+  assert.match(ef[term + 1], / {10}\| {7}\\_ -zsh$/);
+  assert.match(ef[term + 2], / {10}\| {11}\\_ ps -ef --forest$/);
+  assert.match(await sim.out('ps f'), /^ {4}PID TTY {6}STAT {3}TIME COMMAND\n +\d+ pts\/0 {4}Ss {5}0:00 -zsh\n +\d+ pts\/0 {4}R\+ {5}0:00 {2}\\_ ps f\n$/);
+  assert.match(await sim.out('ps -H'), /\n +\d+ pts\/0 {4}00:00:00 zsh\n +\d+ pts\/0 {4}00:00:00 {3}ps\n$/);
+});
+
+test('ps: errors', async () => {
+  const sim = await sys();
+  const usage = "\nUsage:\n ps [options]\n\n Try 'ps --help <simple|list|output|threads|misc|all>'\n  or 'ps --help <s|l|o|t|m|a>'\n for additional help text.\n\nFor more details see ps(1).\n";
+  const fails = async (line, msg) => { const r = await sim.run(line); assert.deepEqual([r.err, r.code, r.out], ['error: ' + msg + '\n' + usage, 1, ''], line); };
+  await fails('ps -o bogus', 'unknown user-defined format specifier "bogus"');
+  await fails('ps --bogus', 'unknown gnu long option');
+  await fails('ps -z', 'unsupported SysV option');
+  await fails('ps z', 'unsupported option (BSD syntax)');
+  await fails('ps -u nosuchuser', 'user name does not exist');
+  await fails('ps -p abc', 'process ID list syntax error');
+  await fails('ps -t pts/x', 'TTY could not be found');
+  assert.equal(await sim.out('ps --help'), usage);
+  assert.match(await sim.out('ps --help simple'), /^\nUsage:\n ps \[options\]\n\nBasic options:\n -A, -e {15}all processes\n/);
+});
+
+test('pgrep and pidof', async () => {
+  const sim = await sys();
+  assert.equal(await sim.out('pgrep cron'), '365\n');
+  assert.equal(await sim.out('pgrep -l dbus'), '312 dbus-daemon\n550 dbus-daemon\n');
+  assert.equal(await sim.out('pgrep -a cron'), '365 /usr/sbin/cron -f\n');
+  assert.equal(await sim.out('pgrep -u kali -l xfce4'), '563 xfce4-session\n682 xfce4-panel\n770 xfce4-power-man\n796 xfce4-notifyd\n');
+  assert.equal(await sim.out('pgrep -u 0 -x systemd'), '1\n');
+  assert.equal(await sim.out('pgrep -x systemd'), '1\n483\n');
+  assert.equal(await sim.out('pgrep -c kworker'), '32\n');
+  assert.equal(await sim.out('pgrep -n xfce4; pgrep -o xfce4'), '796\n563\n');
+  assert.equal(await sim.out('pgrep -f session-child'), '453\n');
+  assert.equal(await sim.out('pgrep -P 451 -l'), '452 Xorg\n453 lightdm\n');
+  assert.equal(await sim.out('pgrep -d, dbus'), '312,550\n');
+  assert.equal(await sim.out('pgrep -t tty7 -l'), '452 Xorg\n');
+  assert.equal(await sim.out('pgrep -i XORG'), '452\n');
+  assert.equal(await sim.out('pgrep -vc .'), '0\n');
+  assert.equal(await sim.out('pgrep pgrep; echo $?'), '1\n', 'pgrep never reports itself');
+  assert.equal(await sim.out('ps -o comm= -p $(pgrep -x cron)'), 'cron\n');
+  const none = await sim.run('pgrep nosuchproc');
+  assert.deepEqual([none.output, none.code], ['', 1]);
+  const fails = async (line, err, code) => { const r = await sim.run(line); assert.deepEqual([r.err, r.code], [err, code], line); };
+  await fails('pgrep', "pgrep: no matching criteria specified\nTry `pgrep --help' for more information.\n", 2);
+  await fails('pgrep a b', "pgrep: only one pattern can be provided\nTry `pgrep --help' for more information.\n", 2);
+  await fails('pgrep -u nosuchuser x', 'pgrep: invalid user name: nosuchuser\n', 2);
+  await fails('pgrep xfce4-power-manager', "pgrep: pattern that searches for process name longer than 15 characters will result in zero matches\nTry `pgrep -f' option to match against the complete command line.\n", 1);
+  assert.match((await sim.run('pgrep -z')).err, /^pgrep: invalid option -- 'z'\n\nUsage:\n pgrep \[options\] <pattern>\n/);
+  assert.equal(await sim.out('pgrep -V'), 'pgrep from procps-ng 4.0.4\n');
+
+  assert.equal(await sim.out('pidof cron'), '365\n');
+  assert.equal(await sim.out('pidof dbus-daemon'), '550 312\n', 'newest first');
+  assert.equal(await sim.out('pidof -s dbus-daemon'), '550\n');
+  assert.equal(await sim.out('pidof -o 550 dbus-daemon'), '312\n');
+  assert.equal(await sim.out('pidof -d, cron dbus-daemon'), '365,550,312\n');
+  assert.equal(await sim.out('pidof /usr/sbin/cron'), '365\n');
+  assert.equal(await sim.out('pidof -q cron; echo $?'), '0\n');
+  assert.equal(await sim.out('pidof nosuchproc; echo $?'), '1\n');
+  assert.match(await sim.out('pidof -h'), /^pidof usage: \[options\] <program-name>\n/);
+});
+
+test('pkill and killall: permissions, signals and units', async () => {
+  const sim = await sys();
+  const { K, machine } = sim;
+  const denied = await sim.run('pkill cron');
+  assert.deepEqual([denied.err, denied.code], ['pkill: killing pid 365 failed: Operation not permitted\n', 1]);
+  const denied2 = await sim.run('killall cron');
+  assert.deepEqual([denied2.err, denied2.code], ['cron(365): Operation not permitted\ncron: no process found\n', 1]);
+  assert.equal(K.sys.unit(machine, 'cron').active, 'active');
+  assert.deepEqual([(await sim.run('killall nosuchproc')).err, (await sim.run('killall -q nosuchproc')).err], ['nosuchproc: no process found\n', '']);
+  assert.equal((await sim.run('pkill nosuchproc')).code, 1);
+  assert.equal(await sim.out('pkill -0 xfwm4; echo $?; killall -0 xfwm4; echo $?'), '0\n0\n', 'signal 0 only tests');
+
+  // a HUP makes a daemon reload: it stays up
+  assert.equal((await sim.run('sudo pkill -HUP cron')).code, 0);
+  assert.equal(K.sys.unit(machine, 'cron').active, 'active');
+  // TERM stops the daemon cleanly; systemd notices
+  const r = await sim.run('sudo killall -v cron');
+  assert.deepEqual([r.err, r.code], ['Killed cron(365) with signal 15\n', 0]);
+  assert.equal(await sim.out('pgrep cron; echo $?'), '1\n');
+  assert.deepEqual([K.sys.unit(machine, 'cron').active, K.sys.unit(machine, 'cron').pid], ['inactive', null]);
+  assert.equal(machine.state.journal.at(-1).msg, 'cron.service: Deactivated successfully.');
+  // KILL takes the whole unit down as failed
+  K.sys.startUnit(machine, 'apache2');
+  assert.equal(await sim.out('pgrep -c apache2'), '3\n');
+  assert.equal((await sim.run('sudo pkill -9 -o apache2')).code, 0);
+  assert.deepEqual([K.sys.unit(machine, 'apache2').active, K.sys.unit(machine, 'apache2').sub], ['failed', 'failed']);
+  assert.equal(await sim.out('pgrep -c apache2'), '0\n');
+  assert.equal(K.net.tcp(machine, '10.10.10.5', 80).state, 'closed');
+  // own desktop processes can be signalled without sudo
+  assert.equal(await sim.out('pkill -e -x nm-applet; pgrep nm-applet; echo $?'), 'nm-applet killed (pid 757)\n1\n');
+  assert.equal(await sim.out('killall -u kali -r "^xfce4-p"; pgrep -c xfce4-p'), '0\n');
+  assert.equal(await sim.out('pkill zsh; echo $?; ps -o comm= -p $$'), '0\nzsh\n', 'an interactive shell ignores SIGTERM');
+
+  assert.equal(await sim.out('killall -l'), 'HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM STKFLT\nCHLD CONT STOP TSTP TTIN TTOU URG XCPU XFSZ VTALRM PROF WINCH POLL PWR SYS\n');
+  const usage = await sim.run('killall');
+  assert.equal(usage.code, 1);
+  assert.match(usage.err, /^Usage: killall \[OPTION\]\.\.\. \[--\] NAME\.\.\.\n/);
+  assert.deepEqual([(await sim.run('killall -s BOGUS cron')).err], ['BOGUS: unknown signal; killall -l lists signals.\n']);
+  assert.deepEqual([(await sim.run('pkill')).err, (await sim.run('pkill')).code], ["pkill: no matching criteria specified\nTry `pkill --help' for more information.\n", 2]);
+  assert.equal(await sim.out('pkill -V'), 'pkill from procps-ng 4.0.4\n');
+});
+
+test('pkill stops a background job', async () => {
+  const sim = await sys();
+  sim.K.clock.useReal(); sim.K.settings.timeScale = 1;
+  await sim.shell.runLine('sleep 5 &');
+  assert.match(await sim.out('jobs'), /running +sleep 5/);
+  assert.equal((await sim.run('pgrep -x sleep')).code, 0);
+  assert.equal((await sim.run('pkill sleep')).code, 0);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(await sim.out('pgrep -c sleep'), '0\n');
+  assert.doesNotMatch(await sim.out('jobs'), /running/);
+});
