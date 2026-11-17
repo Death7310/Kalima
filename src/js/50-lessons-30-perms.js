@@ -420,7 +420,7 @@
           'Directories have the same nine characters, but they mean something a little different, because a directory is a list of names:',
           '',
           '- `r` lets you list the names in it',
-          '- `w` lets you create, delete and rename entries in it',
+          '- `w` lets you create, delete and rename entries in it, provided you also have `x`',
           '- `x` lets you enter it and reach the things inside',
           '',
           'When you name a directory, `ls -l` lists what is inside it. To see the line for the directory itself, add `-d`:',
@@ -461,14 +461,14 @@
       },
       {
         q: 'A file has mode `640`, owner `root` and group `adm`. The user `maya` is a member of `adm`. What may she do with the file?',
-        choices: ['Nothing', 'Read it, but not change it', 'Read it and change it', 'Read it, change it and run it'],
-        answer: 1,
+        choices: ['Nothing', 'Read it and change it', 'Read it, but not change it', 'Read it, change it and run it'],
+        answer: 2,
         why: 'She is not the owner but is in the group, so the middle digit applies. 4 is read only.',
       },
       {
         q: 'Which octal mode is the same as `rw-rw-r--`?',
-        choices: ['`644`', '`664`', '`662`', '`774`'],
-        answer: 1,
+        choices: ['`664`', '`644`', '`662`', '`774`'],
+        answer: 0,
         why: '`rw-` is 4+2 = 6 for the owner and again for the group, and `r--` is 4 for other.',
       },
       {
@@ -499,7 +499,7 @@
       'Make a script executable and run it',
       'Set permissions with `chmod` in both the symbolic and the octal form',
       'Change the owner and group of a file with `chown` and `chgrp`, and say when that needs root',
-      'Explain how the umask decides the permissions of new files',
+      'Predict the permissions of a new file or directory from the umask',
     ],
     intro: T(
       'Reading permissions tells you what is allowed. Changing them is how you make a script runnable, keep client notes away from other accounts, and take back files that a tool running as root left behind. All three come up in the first week of real work.',
@@ -666,11 +666,13 @@
           'umask',
           '```',
           '',
-          'The value is `022`, which some shells print with an extra zero in front as `0022`. The digits line up with owner, group and other: leave out nothing for the owner, and `w` (2) for group and for other. That turns `666` into `644` for files and `777` into `755` for directories.'
+          'The value is `022`, which some shells print with an extra zero in front as `0022`. The digits line up with owner, group and other: leave out nothing for the owner, and leave out `w`, which is 2, for the group and for other. That turns `666` into `644` for a new file.',
+          '',
+          'Now predict. With this umask, which mode does a new directory get? Give three digits. You can check your answer with `mkdir trial` followed by `ls -ld trial`.'
         ),
-        hint: 'Type `umask` with no arguments.',
-        solution: 'umask',
-        check: { cmd: 'umask', out: /^0?[0-7]{3}\s*$/m },
+        hint: 'A directory starts from `777`. Take 2 away from the digit for the group and from the digit for other.',
+        solution: '755',
+        answer: /^0?755$/,
       },
     ],
     quiz: [
@@ -772,7 +774,7 @@
       {
         id: 'sudo',
         prompt: T(
-          'When a task really does need root, borrow root\'s identity for that one command. `sudo` runs the command that follows it as root. It asks for *your* password, not root\'s. In this lab your password is `kali`.',
+          'When a task really does need root, borrow root\'s identity for that one command. `sudo` runs the command that follows it as root. It asks for *your* password, not root\'s, unless you gave it a few minutes ago. In this lab your password is `kali`.',
           '',
           '```',
           'sudo whoami',
@@ -921,12 +923,12 @@
       {
         q: 'Which password does each tool ask for?',
         choices: [
-          '`su` asks for your own password, `sudo` for the password of root',
           '`su` asks for the password of the account you switch to, `sudo` for your own',
+          '`su` asks for your own password, `sudo` for the password of root',
           'Both ask for the password of root',
           'Both ask for your own password',
         ],
-        answer: 1,
+        answer: 0,
         why: '`su` needs the target account\'s password, so everyone who uses it must know the root password. `sudo` checks who you are and what you are permitted, so no root password has to be shared, or even to exist.',
       },
       {
@@ -944,11 +946,11 @@
         q: '`/usr/bin/passwd` shows `-rwsr-xr-x root root`. What does the `s` mean when `kali` runs the program?',
         choices: [
           '`kali` becomes root in that terminal until logging out',
-          'The program runs with the identity of its owner, root, which lets it update `/etc/shadow`',
           'Only root is allowed to run the program',
           'The program will ask for the password of root',
+          'The program runs with the identity of its owner, root, which lets it update `/etc/shadow`',
         ],
-        answer: 1,
+        answer: 3,
         why: 'Setuid applies to that one program for as long as it runs. `passwd` uses root\'s rights to change one entry in `/etc/shadow` and then exits. Your shell stays what it was.',
       },
     ],

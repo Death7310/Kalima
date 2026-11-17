@@ -162,7 +162,7 @@
       {
         id: 'recursive',
         prompt: T(
-          'So far you named the file to search. With `-r` you name a directory instead, and grep searches every file below it, printing the file name in front of each match. The current directory is written `.`',
+          'So far you named the file to search. With `-r` you name a directory instead, and grep searches every file below it, printing the file name in front of each match. A single dot, `.`, stands for the current directory.',
           '',
           'At 08:55 the shift log mentions consignment `HF-2026-10431`. Search everything under `/usr/share/kalima` for that reference.',
           '',
@@ -373,7 +373,7 @@
         prompt: T(
           'Combine all this with grep. The 404 answers deserve a closer look: **which clients received them, and how many each?**',
           '',
-          'Start the pipeline with a grep that keeps only the lines with status 404. Search for ` 404 ` with a space on each side, in quotes, so that the number cannot match inside a longer one. Then count those lines for each client address, as you did before.',
+          'Start the pipeline with a grep that keeps only the lines with status 404. Give it the pattern `\' 404 \'`: the number with a space on each side, held together by the quotes, so that it cannot match inside a longer number. Then count those lines for each client address, as you did before.',
           '',
           'When it works, read the result with care. The number of lines in it tells you as much as the counts do.'
         ),
@@ -396,30 +396,30 @@
       },
       {
         q: 'A file holds the numbers 5, 24 and 110, one per line. In what order does plain `sort`, without `-n`, print them?',
-        choices: ['5, 24, 110', '110, 24, 5', '24, 5, 110', 'In the order they are in the file'],
-        answer: 1,
+        choices: ['110, 24, 5', '5, 24, 110', '24, 5, 110', 'In the order they are in the file'],
+        answer: 0,
         why: 'Without `-n`, sort compares text one character at a time, and `1` comes before `2`, which comes before `5`. `-n` makes it compare the values of the numbers.',
       },
       {
         q: 'All 108 answers with status 404 went to one address, within 45 seconds, for paths such as `/admin`, `/backup` and `/config`. What is the most reasonable reading?',
         choices: [
           'The site is broken and every visitor is getting errors',
-          'One client asked for a list of likely paths to find out which exist',
           'Files were stolen from the server',
+          'One client asked for a list of likely paths to find out which exist',
           'The log file is damaged',
         ],
-        answer: 1,
+        answer: 2,
         why: 'A 404 says only that a path does not exist. Many of them from one client in a short time, for names that no page links to, is the trace of an automated search for hidden content. It shows probing, not success.',
       },
       {
         q: 'Why build a pipeline one stage at a time, looking at the output after each stage?',
         choices: [
           'Because the shell cannot start more than two commands at once',
-          'Because a mistake in an early stage, such as the wrong field number, is easy to see before counting and sorting hide it',
           'Because `sort` is unable to read from a file',
           'Because long pipelines lose lines',
+          'Because a mistake in an early stage, such as the wrong field number, is easy to see before counting and sorting hide it',
         ],
-        answer: 1,
+        answer: 3,
         why: 'Each stage sees only what the previous one printed. If the first stage selects the wrong field, the later stages will still produce a tidy table, and it will be wrong. Checking as you go keeps every stage honest.',
       },
     ],
