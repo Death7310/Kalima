@@ -2366,4 +2366,508 @@
       return exitCode == null ? 0 : exitCode;
     },
   });
+
+  /* ------------------------------------------------------------- systemctl */
+
+  const UNIT_DIR = '/usr/lib/systemd/system/';
+  const TASK_LIMIT = 4569;
+  const SYSV_SCRIPTS = ['ssh', 'apache2', 'nginx', 'mariadb', 'smbd', 'nmbd', 'vsftpd', 'cron', 'rsyslog', 'rpcbind', 'postgresql', 'nfs-kernel-server'];
+  const RELOADABLE = /^(ssh|apache2|nginx|rsyslog|NetworkManager|smbd|nmbd|postgresql|mariadb|dbus|systemd-logind|cron|lightdm)\./;
+  const NO_RELOAD = /^(cron|lightdm|systemd-logind|mariadb|getty@.*|networking|user@.*)\./;
+
+  /** "5s", "1min 3s", "3h 17min", "2 days 4h": the two leading units systemd shows after "ago". */
+  function ago(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'min' + (s % 60 ? ' ' + (s % 60) + 's' : '');
+    if (s < 86400) return Math.floor(s / 3600) + 'h' + (Math.floor(s / 60) % 60 ? ' ' + (Math.floor(s / 60) % 60) + 'min' : '');
+    const days = Math.floor(s / 86400);
+    if (days < 14) return plural(days, 'day') + (Math.floor(s / 3600) % 24 ? ' ' + (Math.floor(s / 3600) % 24) + 'h' : '');
+    return plural(Math.floor(days / 7), 'week') + (days % 7 ? ' ' + plural(days % 7, 'day') : '');
+  }
+  const unitStamp = (ms) => U.DAYS[new Date(ms).getUTCDay()] + ' ' + U.isoDate(ms) + ' UTC';
+
+  /** Line in the format journalctl and `systemctl status` print: "Nov 13 14:30:00 kali sshd[2212]: text". */
+  function journalLine(machine, rec, mode) {
+    const kernel = rec.ident === 'kernel';
+    const tag = rec.ident + (rec.pid != null && rec.ident !== 'sudo' && !kernel ? '[' + rec.pid + ']' : '');
+    if (mode === 'cat') return rec.msg;
+    const when = mode === 'short-iso' ? U.isoDate(rec.ts).replace(' ', 'T') + '+0000' : U.syslogDate(rec.ts);
+    return when + ' ' + machine.hostname + ' ' + tag + ': ' + rec.msg;
+  }
+
+  function unitProcs(machine, unit) { return machine.procs.filter((p) => p.unit === unit.name); }
+
+  function statusDot(ctx, unit) {
+    const c = K.c;
+    if (!ctx.isTTY) return unit.active === 'failed' ? '×' : unit.active === 'active' ? '●' : '○';
+    if (unit.active === 'failed') return c.red('×');
+    return unit.active === 'active' ? c.green('●') : '○';
+  }
+
+  function sliceOf(unit) {
+    if (/^user@(\d+)\./.test(unit.name)) return '/user.slice/user-' + /^user@(\d+)/.exec(unit.name)[1] + '.slice/' + unit.name;
+    if (/^getty@/.test(unit.name)) return '/system.slice/system-getty.slice/' + unit.name;
+    if (/^postgresql@/.test(unit.name)) return '/system.slice/system-postgresql.slice/' + unit.name;
+    return '/system.slice/' + unit.name;
+  }
+
+  function unitStatus(ctx, unit, lines) {
+    const m = ctx.machine; const now = K.clock.now();
+    const enabled = unit.enabled === 'static' ? 'static' : unit.enabled ? 'enabled' : 'disabled';
+    const preset = unit.enabled === 'static' ? '' : '; preset: ' + (unit.preset || 'enabled');
+    const out = [statusDot(ctx, unit) + ' ' + unit.name + ' - ' + unit.desc];
+    const row = (k, v) => out.push(k.padStart(11) + ': ' + v);
+    row('Loaded', 'loaded (' + UNIT_DIR + (unit.instance ? unit.name.replace(/@[^.]*\./, '@.') : unit.name) + '; ' + enabled + preset + ')');
+    const state = unit.active + ' (' + unit.sub + ')';
+    if (unit.active === 'active') row('Active', state + ' since ' + unitStamp(unit.since) + '; ' + ago(now - unit.since) + ' ago');
+    else if (unit.active === 'failed') row('Active', 'failed (Result: ' + (unit.result || 'exit-code') + ') since ' + unitStamp(unit.since) + '; ' + ago(now - unit.since) + ' ago');
+    else row('Active', state + (unit.since ? ' since ' + unitStamp(unit.since) + '; ' + ago(now - unit.since) + ' ago' : ''));
+    if (unit.active === 'inactive' && unit.since && unit.ranFor != null) row('Duration', ago(unit.ranFor));
+    if (unit.invocation && unit.active !== 'inactive' || unit.invocation && unit.since) row('Invocation', unit.invocation);
+    unit.docs.forEach((d, i) => out.push((i ? ' '.repeat(13) : 'Docs'.padStart(11) + ': ') + d));
+    if (unit.active !== 'inactive' || unit.since) {
+      const startLabel = unit.pre && unit.type !== 'forking' ? 'ExecStartPre' : 'ExecStart';
+      if (unit.execPid) row('Process', unit.execPid + ' ' + startLabel + '=' + (unit.pre || '/bin/true') + ' (code=exited, status=0/SUCCESS)');
+    }
+    const procs = unitProcs(m, unit);
+    if (unit.active === 'active' && unit.pid && procs.length) {
+      const main = procs.find((p) => p.pid === unit.pid) || procs[0];
+      row('Main PID', main.pid + ' (' + commOf(main) + ')');
+      row('Tasks', procs.length + ' (limit: ' + TASK_LIMIT + ')');
+      const rss = procs.reduce((a, p) => a + (p.rss || 0), 0);
+      const mem = (kb) => (kb / 1024 < 10 ? (kb / 1024).toFixed(1) : String(Math.round(kb / 1024))) + 'M';
+      row('Memory', mem(rss) + ' (peak: ' + mem(rss * 1.2) + ')');
+      row('CPU', (20 + U.hash32(unit.name) % 400) + 'ms');
+      out.push('CGroup'.padStart(11) + ': ' + sliceOf(unit));
+      procs.forEach((p, i) => {
+        const title = /^\w[\w-]*: /.test(p.cmd) && p.cmd.indexOf('/') > 0 ? '"' + p.cmd + '"' : p.cmd;
+        out.push(' '.repeat(13) + (i === procs.length - 1 ? '└─' : '├─') + p.pid + ' ' + title);
+      });
+    } else if (unit.active === 'active' && unit.type === 'oneshot') { /* a finished oneshot has no processes */ }
+    else if (unit.active === 'failed' && unit.pid == null && unit.since) row('Process', (unit.execPid || m.nextPid()) + ' ExecStart=' + unit.name.replace(/\.service$/, '') + ' (code=exited, status=1/FAILURE)');
+    const recs = journalOf(m).filter((r) => r.unit === unit.name).slice(-lines);
+    out.push('');
+    if (recs.length) for (const r of recs) out.push(journalLine(m, r));
+    return out.join('\n') + '\n';
+  }
+
+  const SYSTEMCTL_USAGE = 'systemctl [OPTIONS...] COMMAND ...\n\nQuery or send control commands to the system manager.\n\nUnit Commands:\n  list-units [PATTERN...]         List units currently in memory\n  list-unit-files [PATTERN...]    List installed unit files\n  status [PATTERN...|PID...]      Show runtime status of one or more units\n  start UNIT...                   Start (activate) one or more units\n  stop UNIT...                    Stop (deactivate) one or more units\n  reload UNIT...                  Reload one or more units\n  restart UNIT...                 Start or restart one or more units\n  is-active PATTERN...            Check whether units are active\n  is-failed [PATTERN...]          Check whether units are failed or system is degraded\n  enable [UNIT...|PATH...]        Enable one or more unit files\n  disable UNIT...                 Disable one or more unit files\n  is-enabled UNIT...              Check whether unit files are enabled\n  cat PATTERN...                  Show files and drop-ins of specified units\n  reset-failed [PATTERN...]       Reset failed state for all, one, or more units\n\nManager State Commands:\n  daemon-reload                   Reload systemd manager configuration\n\nSee the systemctl(1) man page for details.\n';
+
+  function enableMessages(unit, enable) {
+    const file = UNIT_DIR + unit.name; const lines = [];
+    const sysv = SYSV_SCRIPTS.indexOf(unit.prog) >= 0 || SYSV_SCRIPTS.indexOf(unit.name.replace(/\.service$/, '')) >= 0;
+    const base = unit.name.replace(/\.service$/, '');
+    if (sysv && unit.enabled !== 'static') {
+      lines.push('Synchronizing state of ' + unit.name + ' with SysV service script with /usr/lib/systemd/systemd-sysv-install.');
+      lines.push('Executing: /usr/lib/systemd/systemd-sysv-install ' + (enable ? 'enable' : 'disable') + ' ' + base);
+    }
+    const links = unit.aliases.map((a) => '/etc/systemd/system/' + a).concat('/etc/systemd/system/multi-user.target.wants/' + unit.name);
+    for (const l of links) lines.push(enable ? "Created symlink '" + l + "' → '" + file + "'." : "Removed '" + l + "'.");
+    return lines;
+  }
+
+  /** Daemon units that react to systemctl. Returns false when the argument names no unit. */
+  function resolveUnits(ctx, names, verb) {
+    const missing = [];
+    const units = names.map((n) => {
+      const u = K.sys.unit(ctx.machine, n);
+      if (!u) missing.push(n);
+      return u;
+    });
+    return { units: units.filter(Boolean), missing };
+  }
+  const withSuffix = (n) => (/\.[a-z]+$/.test(n) ? n : n + '.service');
+
+  const failedJob = (unit, verb) => 'Job for ' + unit.name + ' failed because the control process exited with error code.\nSee "systemctl status ' + unit.name + '" and "journalctl -xeu ' + unit.name + '" for details.\n';
+
+  function unitTable(ctx, units, o) {
+    const rows = units.map((u) => ({ mark: u.active === 'failed' ? (ctx.isTTY ? K.c.red('×') : '×') : (o.mark ? ' ' : ' '), cells: [u.name, 'loaded', u.active, u.sub, u.desc] }));
+    const head = ['UNIT', 'LOAD', 'ACTIVE', 'SUB', 'DESCRIPTION'];
+    const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r.cells[i].length)));
+    const fmt = (cells) => cells.slice(0, 4).map((c, i) => c.padEnd(w[i])).join(' ') + ' ' + cells[4];
+    const lines = [];
+    const cut = (s) => (ctx.isTTY && K.util.stripAnsi(s).length > ctx.cols ? s.slice(0, ctx.cols - 1) + '…' : s);
+    lines.push(cut('  ' + fmt(head)));
+    for (const r of rows) lines.push(cut(r.mark + ' ' + fmt(r.cells)));
+    return lines;
+  }
+
+  const EXTRA_UNITS = (machine) => [
+    ['basic.target', 'Basic System'], ['getty.target', 'Login Prompts'], ['multi-user.target', 'Multi-User System'], ['network-online.target', 'Network is Online'],
+    ['network.target', 'Network'], ['sysinit.target', 'System Initialization'], ['sockets.target', 'Socket Units'], ['timers.target', 'Timer Units'],
+  ].concat(machine.profile === 'kali' ? [['graphical.target', 'Graphical Interface']] : []).map(([name, desc]) => ({ name, desc, active: 'active', sub: 'active', enabled: 'static', preset: 'disabled' }));
+
+  reg({
+    name: 'systemctl', pkg: 'systemd', summary: 'Control the systemd system and service manager', synopsis: 'systemctl [OPTIONS...] COMMAND [UNIT...]',
+    man: 'DESCRIPTION\n       systemctl may be used to introspect and control the state of the "systemd" system and service manager.\n\nCOMMANDS\n       status [PATTERN...|PID...]\n              Show terse runtime status information about one or more units, followed by most recent log data from the journal.\n\n       start UNIT...\n              Start (activate) one or more units specified on the command line.\n\n       stop UNIT...\n              Stop (deactivate) one or more units.\n\n       restart UNIT...\n              Stop and then start one or more units.\n\n       enable UNIT...\n              Enable one or more units, so that they start at boot. Add --now to start them immediately.\n\n       disable UNIT...\n              Disable one or more units. Add --now to stop them as well.\n\n       is-active PATTERN...\n              Check whether any of the specified units are active.\n\n       list-units [PATTERN...]\n              List units that systemd currently has in memory. Use --failed to show only failed units.\n\n       list-unit-files [PATTERN...]\n              List unit files installed on the system, in combination with their enablement state.\n\n       daemon-reload\n              Reload the systemd manager configuration.\n\nEXAMPLES\n       sudo systemctl start ssh\n              Start the SSH server; port 22 opens.\n       systemctl status apache2\n              Is the web server running?\n       sudo systemctl enable --now postgresql\n              Start PostgreSQL now and at every boot.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'ahlqt:p:n:o:H:M:', long: ['all', 'help', 'version', 'no-pager', 'no-legend', 'no-ask-password', 'failed', 'now', 'full', 'quiet', 'type=', 'state=', 'property=', 'lines=', 'output=', 'system', 'user', 'plain', 'force', 'value', 'show-types', 'reverse', 'runtime'], alias: { type: 't', lines: 'n', quiet: 'q', all: 'a', full: 'l', help: 'h', property: 'p', output: 'o' } });
+      if (g.err) { ctx.err('systemctl: ' + g.err + '\n'); return 1; }
+      if (g.opts.help) { ctx.out(SYSTEMCTL_USAGE); return 0; }
+      if (g.opts.version) { ctx.out('systemd 258 (258.1-1)\n+PAM +AUDIT +SELINUX +APPARMOR +IMA +IPE +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK +BTF +XKBCOMMON +UTMP +SYSVINIT +LIBARCHIVE\n'); return 0; }
+      const m = ctx.machine;
+      if (g.opts.user) { ctx.err('Failed to connect to user scope bus via local transport: No medium found\n'); return 1; }
+      const verb = g.rest[0] || 'list-units'; const names = g.rest.slice(1).map(withSuffix);
+      const need = (what) => { if (!ctx.isRoot) { ctx.err(what + ': Interactive authentication required.\n'); return false; } return true; };
+      const notFound = (n) => 'Unit ' + n + ' not found.';
+      const quiet = !!g.opts.q;
+
+      switch (verb) {
+        case 'list-units': case 'list-sockets': case 'list-timers': {
+          let units = m.units.filter((u) => g.opts.a || g.opts.failed ? true : u.active !== 'inactive' || u.sub === 'exited');
+          if (g.opts.failed) units = units.filter((u) => u.active === 'failed');
+          else if (!g.opts.a) units = units.filter((u) => u.active === 'active' || u.active === 'failed');
+          let list = units.map((u) => u);
+          const type = g.opts.t || '';
+          if (!type && !g.opts.failed) list = list.concat(EXTRA_UNITS(m));
+          if (type && type !== 'service') list = type === 'target' ? EXTRA_UNITS(m) : [];
+          if (names.length) list = list.filter((u) => names.some((p) => U.globToRe(p.replace(/\.service$/, '') + '*').test(u.name)));
+          list.sort((a, b) => (a.name < b.name ? -1 : 1));
+          const lines = list.length ? unitTable(ctx, list, {}) : [];
+          if (!list.length) { ctx.println('0 loaded units listed.'); return 0; }
+          if (g.opts['no-legend']) lines.splice(0, 1);
+          ctx.println(lines.join('\n'));
+          if (!g.opts['no-legend']) ctx.println('\nLegend: LOAD   → Reflects whether the unit definition was properly loaded.\n        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.\n        SUB    → The low-level unit activation state, values depend on unit type.\n\n' + list.length + ' loaded units listed.' + (g.opts.a ? '' : ' Pass --all to see loaded but inactive units, too.') + "\nTo show all installed unit files use 'systemctl list-unit-files'.");
+          return 0;
+        }
+        case 'list-unit-files': {
+          let units = m.units.filter((u) => !u.instance || true);
+          if (g.opts.t && g.opts.t !== 'service') units = [];
+          if (names.length) units = units.filter((u) => names.some((p) => U.globToRe(p.replace(/\.service$/, '') + '*').test(u.name)));
+          units = units.slice().sort((a, b) => (a.name < b.name ? -1 : 1));
+          const state = (u) => (u.enabled === 'static' ? 'static' : u.enabled ? 'enabled' : 'disabled');
+          const rows = units.map((u) => [u.name, state(u), u.enabled === 'static' ? '-' : u.preset || 'enabled']);
+          const head = ['UNIT FILE', 'STATE', 'PRESET'];
+          const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+          const fmt = (r) => r.map((c, i) => (i < 2 ? c.padEnd(w[i]) : c)).join(' ');
+          const lines = g.opts['no-legend'] ? [] : [fmt(head)];
+          for (const r of rows) lines.push(fmt(r));
+          ctx.println(lines.join('\n') + (g.opts['no-legend'] ? '' : '\n\n' + rows.length + ' unit files listed.'));
+          return 0;
+        }
+        case 'status': {
+          if (!names.length) { ctx.println('● ' + m.hostname + '\n    State: running\n    Units: ' + m.units.length + ' loaded (incl. loaded aliases)\n     Jobs: 0 queued\n   Failed: ' + m.units.filter((u) => u.active === 'failed').length + ' units'); return 0; }
+          let code = 0; const blocks = [];
+          const lines = g.opts.n != null ? parseInt(g.opts.n, 10) : 10;
+          for (const n of names) {
+            const u = K.sys.unit(m, n);
+            if (!u) { ctx.err('Unit ' + n + ' could not be found.\n'); code = Math.max(code, 4); continue; }
+            blocks.push(unitStatus(ctx, u, lines));
+            code = Math.max(code, u.active === 'active' ? 0 : 3);
+          }
+          if (blocks.length) ctx.out(blocks.join('\n'));
+          return code;
+        }
+        case 'is-active': case 'is-failed': {
+          if (!names.length) { ctx.err('Too few arguments.\n'); return 1; }
+          let code = verb === 'is-active' ? 3 : 1;
+          for (const n of names) {
+            const u = K.sys.unit(m, n);
+            const state = u ? u.active : 'inactive';
+            if (!quiet) ctx.println(state);
+            if (verb === 'is-active' ? state === 'active' : state === 'failed') code = 0;
+          }
+          return code;
+        }
+        case 'is-enabled': {
+          if (!names.length) { ctx.err('Too few arguments.\n'); return 1; }
+          let code = 0;
+          for (const n of names) {
+            const u = K.sys.unit(m, n);
+            if (!u) { ctx.err('Failed to get unit file state for ' + n + ': No such file or directory\n'); code = 1; continue; }
+            const s = u.enabled === 'static' ? 'static' : u.enabled ? 'enabled' : 'disabled';
+            if (!quiet) ctx.println(s);
+            if (s === 'disabled') code = 1;
+          }
+          return code;
+        }
+        case 'start': case 'stop': case 'restart': case 'reload': case 'try-restart': case 'reload-or-restart': {
+          if (!names.length) { ctx.err('Too few arguments.\n'); return 1; }
+          const { units, missing } = resolveUnits(ctx, names, verb);
+          const label = verb === 'try-restart' ? 'restart' : verb === 'reload-or-restart' ? 'reload' : verb;
+          if (missing.length) { for (const n of missing) ctx.err('Failed to ' + label + ' ' + n + ': Unit ' + n + ' not found.\n'); return 5; }
+          if (!ctx.isRoot) {
+            ctx.err('Failed to ' + label + ' ' + units[0].name + ': Interactive authentication required.\nSee system logs and \'systemctl status ' + units[0].name + "' for details.\n");
+            return 1;
+          }
+          let code = 0;
+          for (const u of units) {
+            if (verb === 'reload' && (u.active !== 'active' || NO_RELOAD.test(u.name))) {
+              ctx.err('Failed to reload ' + u.name + ': ' + (u.active !== 'active' ? 'Unit ' + u.name + ' is not active.' : 'Job type reload is not applicable for unit ' + u.name + '.') + '\n');
+              code = 1; continue;
+            }
+            if (verb === 'reload' || verb === 'reload-or-restart' && u.active === 'active' && !NO_RELOAD.test(u.name)) {
+              K.syslog(m, { ident: 'systemd', pid: 1, facility: 'daemon', unit: u.name, msg: 'Reloading ' + u.name + ' - ' + u.desc + '...' });
+              K.syslog(m, { ident: 'systemd', pid: 1, facility: 'daemon', unit: u.name, msg: 'Reloaded ' + u.name + ' - ' + u.desc + '.' });
+              continue;
+            }
+            if (verb === 'try-restart' && u.active !== 'active') continue;
+            if (verb === 'stop') { const was = u.since; K.sys.stopUnit(m, u); if (u.since && was) u.ranFor = u.since - was; continue; }
+            if (u.active === 'active' && verb === 'start') continue;
+            if (u.active === 'active') K.sys.stopUnit(m, u);
+            const r = K.sys.startUnit(m, u);
+            if (!r.ok) { ctx.err(failedJob(u, verb)); code = 1; }
+          }
+          return code;
+        }
+        case 'enable': case 'disable': case 'reenable': {
+          if (!names.length) { ctx.err('Too few arguments.\n'); return 1; }
+          const enable = verb !== 'disable';
+          const { units, missing } = resolveUnits(ctx, names, verb);
+          if (missing.length) { ctx.err('Failed to ' + verb + ' unit: Unit file ' + missing[0] + ' does not exist.\n'); return 1; }
+          if (!need('Failed to ' + verb + ' unit')) return 1;
+          for (const u of units) {
+            if (u.enabled === 'static') {
+              ctx.err('The unit files have no installation config (WantedBy=, RequiredBy=, UpheldBy=,\nAlso=, or Alias= settings in the [Install] section, and DefaultInstance= for\ntemplate units). This means they are not meant to be enabled or disabled using systemctl.\n \nPossible reasons for having these kinds of units are:\n' +
+                '• A unit may be statically enabled by being symlinked from another unit\'s\n  .wants/, .requires/, or .upholds/ directory.\n• A unit\'s purpose may be to act as a helper for some other unit which has\n  a requirement dependency on it.\n• A unit may be started when needed via activation (socket, path, timer,\n  D-Bus, udev, scripted systemctl call, ...).\n• In case of template units, the unit is meant to be enabled with some\n  instance name specified.\n');
+              continue;
+            }
+            if (u.enabled !== enable || verb === 'reenable') for (const l of enableMessages(u, enable)) ctx.println(l);
+            u.enabled = enable;
+            if (g.opts.now) { if (enable) K.sys.startUnit(m, u); else K.sys.stopUnit(m, u); }
+          }
+          return 0;
+        }
+        case 'daemon-reload': case 'daemon-reexec': return need('Failed to ' + (verb === 'daemon-reload' ? 'reload daemon' : 'execute daemon')) ? 0 : 1;
+        case 'reset-failed': {
+          if (!need('Failed to reset failed state of all units')) return 1;
+          for (const u of m.units) if (u.active === 'failed' && (!names.length || names.indexOf(u.name) >= 0)) Object.assign(u, { active: 'inactive', sub: 'dead', result: null });
+          return 0;
+        }
+        case 'cat': {
+          if (!names.length) { ctx.err('Too few arguments.\n'); return 1; }
+          let code = 0;
+          for (const n of names) {
+            const u = K.sys.unit(m, n);
+            if (!u) { ctx.err('No files found for ' + n + '.\n'); code = 1; continue; }
+            const lines = ['# ' + UNIT_DIR + u.name, '[Unit]', 'Description=' + u.desc].concat(u.docs.length ? ['Documentation=' + u.docs.join(' ')] : [], ['', '[Service]', 'Type=' + u.type]);
+            if (u.pre) lines.push('ExecStartPre=' + u.pre);
+            if (u.exec.length) lines.push('ExecStart=' + u.exec[0].cmd);
+            lines.push('', '[Install]', 'WantedBy=multi-user.target');
+            ctx.println(lines.join('\n'));
+          }
+          return code;
+        }
+        case 'get-default': ctx.println(m.profile === 'kali' ? 'graphical.target' : 'multi-user.target'); return 0;
+        case 'show': {
+          const u = names.length ? K.sys.unit(m, names[0]) : null;
+          if (!u) { ctx.err('Unit ' + (names[0] || '') + ' could not be found.\n'); return names.length ? 1 : 0; }
+          const props = [['Id', u.name], ['Description', u.desc], ['LoadState', 'loaded'], ['ActiveState', u.active], ['SubState', u.sub], ['MainPID', u.pid || 0],
+            ['UnitFileState', u.enabled === 'static' ? 'static' : u.enabled ? 'enabled' : 'disabled'], ['FragmentPath', UNIT_DIR + u.name]];
+          const want = g.opts.p ? [].concat(g.all.p || g.opts.p).join(',').split(',') : null;
+          for (const [k, v] of props) if (!want || want.indexOf(k) >= 0) ctx.println(g.opts.value ? v : k + '=' + v);
+          return 0;
+        }
+        case 'mask': case 'unmask': case 'kill': case 'isolate': case 'poweroff': case 'reboot': case 'halt': case 'suspend':
+          return need(verb === 'reboot' || verb === 'poweroff' || verb === 'halt' || verb === 'suspend' ? 'Failed to ' + verb + ' system via logind' : 'Failed to ' + verb + ' unit') ? 0 : 1;
+        default:
+          ctx.err("Unknown command verb '" + verb + "'.\n");
+          return 1;
+      }
+    },
+  });
+
+  /* ---------------------------------------------------------------- service */
+
+  const SERVICE_USAGE = 'Usage: service < option > | --status-all | [ service_name [ command | --full-restart ] ]\n';
+
+  reg({
+    name: 'service', path: '/usr/sbin/service', pkg: 'init-system-helpers', section: 8, summary: 'run a System V init script', synopsis: 'service SCRIPT COMMAND [OPTIONS]',
+    man: 'DESCRIPTION\n       service runs a System V init script or systemd unit in as predictable an environment as possible, removing most environment variables and with current working directory set to /.\n\n       The SCRIPT parameter specifies a System V init script, located in /etc/init.d/SCRIPT. The supported values of COMMAND depend on the invoked script, service passes COMMAND and OPTIONS to the init script unmodified. For systemd units, the commands start, stop, restart, reload and status are supported.\n\nOPTIONS\n       --status-all\n              List all services with their state: [ + ] running, [ - ] stopped, [ ? ] no status support.\n\n       --full-restart\n              Stop, then start the service.\n\nEXAMPLES\n       sudo service ssh start\n              Start the SSH server.\n       service --status-all\n              Which services run?',
+    async run(ctx) {
+      const a = ctx.args;
+      if (!a.length) { ctx.err(SERVICE_USAGE); return 1; }
+      if (a[0] === '--help' || a[0] === '-h') { ctx.out(SERVICE_USAGE); return 0; }
+      if (a[0] === '--version' || a[0] === '-V') { ctx.out('service ver. 0.91-ubuntu1\n'); return 0; }
+      const m = ctx.machine;
+      if (a[0] === '--status-all') {
+        const rows = m.units.filter((u) => SYSV_SCRIPTS.indexOf(u.name.replace(/\.service$/, '')) >= 0 || SYSV_SCRIPTS.indexOf(u.prog) >= 0).map((u) => [u.name.replace(/\.service$/, ''), u.active === 'active']);
+        rows.sort((x, y) => (x[0] < y[0] ? -1 : 1));
+        ctx.println(rows.map(([n, up]) => ' [ ' + (up ? '+' : '-') + ' ]  ' + n).join('\n'));
+        return 0;
+      }
+      const name = a[0];
+      const unit = K.sys.unit(m, name);
+      if (!unit || !/^[\w@.-]+$/.test(name)) { ctx.err(name + ': unrecognized service\n'); return 1; }
+      if (a.length < 2) { ctx.err('Usage: /etc/init.d/' + name + ' {start|stop|restart|reload|force-reload|status}\n'); return 1; }
+      let cmd = a[1];
+      if (cmd === '--full-restart') cmd = 'restart';
+      if (['start', 'stop', 'restart', 'reload', 'force-reload', 'status'].indexOf(cmd) < 0) { ctx.err('Usage: /etc/init.d/' + name + ' {start|stop|restart|reload|force-reload|status}\n'); return 1; }
+      const verb = cmd === 'force-reload' ? 'reload' : cmd;
+      const r = await ctx.run(['systemctl', verb, unit.name].concat(verb === 'status' ? ['--no-pager'] : []));
+      ctx.out(r.out); ctx.err(r.err);
+      return r.code;
+    },
+  });
+
+  /* ------------------------------------------------------ journalctl, dmesg */
+
+  const SPAN_MS = { s: SEC, sec: SEC, second: SEC, seconds: SEC, m: MIN, min: MIN, minute: MIN, minutes: MIN, h: HOUR, hour: HOUR, hours: HOUR, d: DAY, day: DAY, days: DAY, w: 7 * DAY, week: 7 * DAY, weeks: 7 * DAY };
+
+  /** The timestamps journalctl --since/--until accept that matter in practice; null when unparsable. */
+  function parseWhen(text, now) {
+    const t = text.trim().toLowerCase();
+    const midnight = Math.floor(now / DAY) * DAY;
+    if (t === 'now') return now;
+    if (t === 'today') return midnight;
+    if (t === 'yesterday') return midnight - DAY;
+    if (t === 'tomorrow') return midnight + DAY;
+    let m = /^([+-])?\s*(\d+)\s*([a-z]+)(\s+ago)?$/.exec(t);
+    if (m && SPAN_MS[m[3]]) {
+      const sign = m[4] || m[1] === '-' ? -1 : 1;
+      return now + sign * m[2] * SPAN_MS[m[3]];
+    }
+    m = /^(\d{4})-(\d\d)-(\d\d)(?:[ t](\d\d):(\d\d)(?::(\d\d))?)?(?: utc)?$/.exec(t);
+    if (m) return Date.UTC(+m[1], m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    m = /^(\d\d):(\d\d)(?::(\d\d))?$/.exec(t);
+    if (m) return midnight + (+m[1]) * HOUR + (+m[2]) * MIN + (+(m[3] || 0)) * SEC;
+    return null;
+  }
+
+  const PRIO_NAMES = ['emerg', 'alert', 'crit', 'err', 'warning', 'notice', 'info', 'debug'];
+  function parsePriorityRange(text) {
+    const one = (w) => (/^[0-7]$/.test(w) ? +w : PRIORITIES[w] != null ? PRIORITIES[w] : null);
+    const parts = text.split('..');
+    const lo = one(parts[0]); const hi = parts.length > 1 ? one(parts[1]) : null;
+    if (lo == null || parts.length > 2 || (parts.length === 2 && hi == null)) return null;
+    return parts.length === 1 ? [0, lo] : [Math.min(lo, hi), Math.max(lo, hi)];
+  }
+
+  /** journalctl takes "-n 5" and "-b -1" although the value is optional: glue a following number to the option. */
+  function attachCounts(args) {
+    const out = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if ((a === '-n' || a === '-b' || a === '--lines' || a === '--boot') && /^-?\d+$/.test(args[i + 1] || '')) out.push((a.length === 2 ? a : a + '=') + args[++i]);
+      else out.push(a);
+    }
+    return out;
+  }
+
+  const JOURNALCTL_USAGE = 'journalctl [OPTIONS...] [MATCHES...]\n\nQuery the journal.\n\nOptions:\n     --system                Show the system journal\n  -b --boot[=ID]             Show current boot or the specified boot\n  -k --dmesg                 Show kernel message log from the current boot\n  -u --unit=UNIT             Show logs from the specified unit\n  -t --identifier=STRING     Show entries with the specified syslog identifier\n  -p --priority=RANGE        Show entries with the specified priority\n  -g --grep=REGEX            Show entries with MESSAGE matching REGEX\n  -S --since=DATE            Show entries not older than the specified date\n  -U --until=DATE            Show entries not newer than the specified date\n  -n --lines[=INTEGER]       Number of journal entries to show\n  -r --reverse               Show the newest entries first\n  -o --output=STRING         Change journal output mode (short, short-iso, cat, ...)\n  -x --catalog               Add message explanations where available\n  -e --pager-end             Immediately jump to the end in the pager\n  -f --follow                Follow the journal\n     --no-pager              Do not pipe output into a pager\n  -q --quiet                 Do not show info messages and privilege warning\n     --disk-usage            Show total disk usage of all journal files\n     --list-boots            Show terse information about recorded boots\n  -h --help                  Show this help\n     --version               Show package version\n';
+
+  reg({
+    name: 'journalctl', pkg: 'systemd', summary: 'Print log entries from the systemd journal', synopsis: 'journalctl [OPTIONS...] [MATCHES...]',
+    man: 'DESCRIPTION\n       journalctl may be used to query the contents of the systemd(1) journal as written by systemd-journald.service(8).\n\n       If called without parameters, it will show the full contents of the journal, starting with the oldest entry collected.\n\nOPTIONS\n       -u, --unit=UNIT\n              Show messages for the specified systemd unit.\n\n       -n, --lines=N\n              Show the most recent N journal events.\n\n       -f, --follow\n              Show only the most recent journal entries, and continuously print new entries as they are appended to the journal.\n\n       -r, --reverse\n              Reverse output so that the newest entries are displayed first.\n\n       -p, --priority=\n              Filter output by message priorities or priority ranges (emerg, alert, crit, err, warning, notice, info, debug).\n\n       -b, --boot\n              Show messages from the current boot.\n\n       -k, --dmesg\n              Show only kernel messages.\n\n       -S, --since=, -U, --until=\n              Start or end the output at the given date, e.g. "2026-11-13 10:00:00", "today" or "1 hour ago".\n\n       --no-pager\n              Do not pipe output into a pager.\n\nEXAMPLES\n       journalctl -u ssh -n 20 --no-pager\n              The last twenty lines the SSH server logged.\n       journalctl -p err -b\n              Everything at priority err or worse since boot.\n       sudo journalctl -f -u apache2\n              Follow the web server log.',
+    async run(ctx) {
+      const g = K.getopt(attachCounts(ctx.args), { short: 'hu:b::kt:p:g:S:U:n::rxefqo:mNF:', long: ['help', 'version', 'unit=', 'boot=?', 'dmesg', 'identifier=', 'priority=', 'grep=', 'since=', 'until=', 'lines=?', 'reverse', 'catalog', 'pager-end', 'follow', 'no-pager', 'quiet', 'output=', 'system', 'user', 'merge', 'disk-usage', 'list-boots', 'no-hostname', 'utc', 'full', 'flush', 'rotate', 'vacuum-size=', 'field='],
+        alias: { help: 'h', unit: 'u', boot: 'b', dmesg: 'k', identifier: 't', priority: 'p', grep: 'g', since: 'S', until: 'U', lines: 'n', reverse: 'r', catalog: 'x', 'pager-end': 'e', follow: 'f', quiet: 'q', output: 'o' } });
+      if (g.err) { ctx.err('journalctl: ' + g.err + '\n'); return 1; }
+      if (g.opts.h) { ctx.out(JOURNALCTL_USAGE); return 0; }
+      if (g.opts.version) { ctx.out('systemd 258 (258.1-1)\n+PAM +AUDIT +SELINUX\n'); return 0; }
+      const m = ctx.machine; const now = K.clock.now();
+      const groups = m.groupsOf(ctx.user.name).map((x) => x.name);
+      const sees = ctx.isRoot || groups.indexOf('adm') >= 0 || groups.indexOf('systemd-journal') >= 0;
+      if (g.opts['disk-usage']) { ctx.println('Archived and active journals take up 8.0M in the file system.'); return 0; }
+      if (g.opts['list-boots']) {
+        const first = journalOf(m)[0]; const boot = K.getBootTime();
+        const id = U.hash32('bid' + boot).toString(16).padStart(8, '0') + U.hash32('boot' + boot).toString(16).padStart(8, '0') + U.hash32(boot + 'x').toString(16).padStart(8, '0') + U.hash32('y' + boot).toString(16).padStart(8, '0');
+        ctx.println(' IDX BOOT ID                          FIRST ENTRY                      LAST ENTRY                       \n  0 ' + id + ' ' + unitStamp(first ? first.ts : boot) + ' ' + unitStamp(now));
+        return 0;
+      }
+      if (g.opts.flush || g.opts.rotate || g.opts['vacuum-size']) {
+        if (!ctx.isRoot) { ctx.err('Failed to ' + (g.opts.flush ? 'flush journal' : 'rotate journal') + ': Interactive authentication required.\n'); return 1; }
+        return 0;
+      }
+      if (typeof g.opts.b === 'string' && g.opts.b !== '0' && g.opts.b !== '-0') {
+        if (/^-?\d+$/.test(g.opts.b)) { ctx.err('No journal boot entry found from the specified boot offset.\n'); return 1; }
+        ctx.err('Data from the specified boot (' + g.opts.b + ') is not available: No such boot ID in journal\n'); return 1;
+      }
+      const units = [].concat(g.all.u || []).map(withSuffix);
+      for (const u of units) if (!K.sys.unit(m, u) && g.all.u && false) return 1;
+      let lo = 0; let hi = 7;
+      if (g.opts.p != null) {
+        const r = parsePriorityRange(String(g.opts.p));
+        if (!r) { ctx.err('Unknown log level ' + g.opts.p + '\n'); return 1; }
+        [lo, hi] = r;
+      }
+      let since = null; let until = null;
+      for (const [key, set] of [['S', (v) => { since = v; }], ['U', (v) => { until = v; }]]) {
+        if (g.opts[key] == null) continue;
+        const v = parseWhen(String(g.opts[key]), now);
+        if (v == null) { ctx.err('Failed to parse ' + (key === 'S' ? 'timestamp' : 'timestamp') + ': ' + g.opts[key] + '\n'); return 1; }
+        set(v);
+      }
+      let re = null;
+      if (g.opts.g != null) { try { re = new RegExp(g.opts.g); } catch (e) { ctx.err('Failed to compile regular expression ' + g.opts.g + '\n'); return 1; } }
+      const fields = g.rest.map((x) => /^([A-Z_]+)=(.*)$/.exec(x)).filter(Boolean);
+      const mode = g.opts.o === 'short-iso' || g.opts.o === 'cat' ? g.opts.o : 'short';
+      if (g.opts.o && ['short', 'short-iso', 'short-precise', 'cat', 'json', 'verbose'].indexOf(g.opts.o) < 0) { ctx.err('Unknown output format \'' + g.opts.o + "'.\n"); return 1; }
+      const matches = (r) => {
+        if (!sees && r.ident !== 'sudo') return false;
+        if (units.length && units.indexOf(r.unit) < 0) return false;
+        if (g.opts.k && r.ident !== 'kernel') return false;
+        if (g.opts.t && r.ident !== g.opts.t) return false;
+        if (r.prio < lo || r.prio > hi) return false;
+        if (since != null && r.ts < since) return false;
+        if (until != null && r.ts > until) return false;
+        if (re && !re.test(r.msg)) return false;
+        for (const [, k, v] of fields) {
+          if ((k === '_SYSTEMD_UNIT' && r.unit !== v) || (k === '_COMM' && r.ident !== v) || (k === 'SYSLOG_IDENTIFIER' && r.ident !== v) || (k === '_PID' && String(r.pid) !== v) || (k === 'PRIORITY' && String(r.prio) !== v)) return false;
+        }
+        return true;
+      };
+      const render = (r) => (g.opts.o === 'json'
+        ? JSON.stringify({ __REALTIME_TIMESTAMP: String(r.ts * 1000), _HOSTNAME: m.hostname, SYSLOG_IDENTIFIER: r.ident, _PID: r.pid == null ? undefined : String(r.pid), PRIORITY: String(r.prio), MESSAGE: r.msg })
+        : journalLine(m, r, mode));
+      let recs = journalOf(m).filter(matches);
+      const follow = !!g.opts.f;
+      let limit = g.opts.n != null ? (g.opts.n === true ? 10 : parseInt(g.opts.n, 10)) : g.opts.e ? 1000 : follow ? 10 : null;
+      if (limit != null && isNaN(limit)) { ctx.err('Failed to parse lines \'' + g.opts.n + "'\n"); return 1; }
+      if (limit != null) recs = recs.slice(Math.max(0, recs.length - limit));
+      if (g.opts.r) recs = recs.slice().reverse();
+      const lines = recs.map(render);
+      let text = lines.join('\n') + (lines.length ? '\n' : '');
+      if (!lines.length) text = '-- No entries --\n';
+      if (!sees && !g.opts.q) text = "Hint: You are currently not seeing messages from other users and the system.\n      Users in groups 'adm', 'systemd-journal' can see all messages.\n      Pass -q to turn off this notice.\n" + text;
+      if (!follow) {
+        if (ctx.isTTY && !g.opts['no-pager'] && lines.length > ctx.rows - 1) await ctx.term.pager(text, { title: 'journalctl' });
+        else ctx.out(text);
+        return 0;
+      }
+      ctx.out(lines.length ? text : '');
+      let seen = journalOf(m).length;
+      try {
+        for (;;) {
+          await ctx.sleep(1000);
+          if (K.clock._virtual) await new Promise((r) => setTimeout(r, 0));
+          const all = journalOf(m);
+          if (all.length > seen) { for (const r of all.slice(seen).filter(matches)) ctx.println(render(r)); seen = all.length; }
+        }
+      } catch (e) { if (e instanceof K.Interrupt) return 130; throw e; }
+    },
+  });
+
+  const DMESG_USAGE = '\nUsage:\n dmesg [options]\n\nDisplay or control the kernel ring buffer.\n\nOptions:\n -C, --clear                 clear the kernel ring buffer\n -c, --read-clear            read and clear all messages\n -H, --human                 human-readable output\n -k, --kernel                display kernel messages\n -l, --level <list>          restrict output to defined levels\n -r, --raw                   print the raw message buffer\n -T, --ctime                 show human-readable timestamp (may be inaccurate!)\n -t, --notime                don\'t show any timestamp with messages\n -x, --decode                decode facility and level to readable string\n\n -h, --help                  display this help\n -V, --version               display version\n\nSupported log facilities:\n    kern - kernel messages\n    user - random user-level messages\n  daemon - system daemons\n\nSupported log levels (priorities):\n   emerg - system is unusable\n   alert - action must be taken immediately\n    crit - critical conditions\n     err - error conditions\n    warn - warning conditions\n  notice - normal but significant condition\n    info - informational\n   debug - debug-level messages\n\nFor more details see dmesg(1).\n';
+
+  reg({
+    name: 'dmesg', path: '/usr/bin/dmesg', pkg: 'util-linux', summary: 'print or control the kernel ring buffer', synopsis: 'dmesg [options]',
+    man: 'DESCRIPTION\n       dmesg is used to examine or control the kernel ring buffer.\n\n       The default action is to display all messages from the kernel ring buffer. On Kali, reading it needs root (kernel.dmesg_restrict is set).\n\nOPTIONS\n       -T, --ctime\n              Print human-readable timestamps.\n\n       -l, --level list\n              Restrict output to the given (comma-separated) list of levels, e.g. err,warn.\n\n       -x, --decode\n              Decode facility and level (priority) numbers to human-readable prefixes.\n\n       -t, --notime\n              Do not print kernel\'s timestamps.\n\n       -C, --clear\n              Clear the ring buffer.\n\nEXAMPLES\n       sudo dmesg | tail\n              The latest kernel messages.\n       sudo dmesg -T -l err,warn\n              Errors and warnings with wall-clock times.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'CcHkl:rTtxhVw', long: ['clear', 'read-clear', 'human', 'kernel', 'level=', 'raw', 'ctime', 'notime', 'decode', 'help', 'version', 'follow'], alias: { clear: 'C', 'read-clear': 'c', human: 'H', kernel: 'k', level: 'l', raw: 'r', ctime: 'T', notime: 't', decode: 'x', help: 'h', version: 'V' } });
+      if (g.err) { ctx.err('dmesg: ' + g.err + "\nTry 'dmesg --help' for more information.\n"); return 1; }
+      if (g.opts.h) { ctx.out(DMESG_USAGE); return 0; }
+      if (g.opts.V) { ctx.out('dmesg from util-linux 2.41\n'); return 0; }
+      if (!ctx.isRoot) { ctx.err('dmesg: ' + (g.opts.C || g.opts.c ? 'klogctl failed: Operation not permitted' : 'read kernel buffer failed: Operation not permitted') + '\n'); return 1; }
+      let levels = null;
+      if (g.opts.l != null) {
+        levels = String(g.opts.l).split(',').map((w) => (w === 'warn' ? 4 : PRIORITIES[w]));
+        if (levels.some((x) => x == null)) { ctx.err("dmesg: unknown level '" + String(g.opts.l).split(',').find((w) => PRIORITIES[w] == null && w !== 'warn') + "'\n"); return 1; }
+      }
+      const rows = journalOf(ctx.machine).filter((r) => r.ident === 'kernel' && (!levels || levels.indexOf(r.prio) >= 0));
+      const boot = K.getBootTime();
+      const lines = rows.map((r) => {
+        const mono = r.mono != null ? r.mono : (r.ts - boot) / 1000;
+        let stamp = '[' + U.padStart(mono.toFixed(6), 12) + '] ';
+        if (g.opts.t) stamp = '';
+        else if (g.opts.T) stamp = '[' + unitStamp(boot + mono * 1000).replace(/^(\w+) (\d{4})-(\d\d)-(\d\d) (\S+) UTC$/, (a, dow, y, mo, d, t) => dow + ' ' + U.MONTHS[+mo - 1] + ' ' + U.padStart(+d, 2) + ' ' + t + ' ' + y) + '] ';
+        const prefix = g.opts.x ? 'kern  :' + PRIO_NAMES[r.prio === 4 ? 4 : r.prio].replace('warning', 'warn').padEnd(6) + ': ' : '';
+        return prefix + stamp + r.msg;
+      });
+      if (g.opts.C || g.opts.c) { if (g.opts.C) return 0; }
+      if (lines.length) ctx.println(lines.join('\n'));
+      return 0;
+    },
+  });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -784,3 +784,173 @@ test('htop and watch', async () => {
   const stopped = await interrupted(sim, 'watch -n 1 echo hi');
   assert.equal(stopped.code, 0);
 });
+
+/* ------------------------------------------------ systemctl, service, journal */
+
+test('systemctl status: layout of a stopped and a running service', async () => {
+  const sim = await sys();
+  const stopped = await sim.run('systemctl status ssh');
+  assert.equal(stopped.code, 3);
+  assert.equal(stopped.out, '○ ssh.service - OpenBSD Secure Shell server\n     Loaded: loaded (/usr/lib/systemd/system/ssh.service; disabled; preset: disabled)\n     Active: inactive (dead)\n       Docs: man:sshd(8)\n             man:sshd_config(5)\n\n');
+  assert.equal((await sim.run('sudo systemctl start ssh')).code, 0);
+  const up = await sim.run('systemctl status ssh');
+  assert.equal(up.code, 0);
+  const lines = up.out.split('\n');
+  assert.equal(lines[0], '● ssh.service - OpenBSD Secure Shell server');
+  assert.match(lines[2], /^ {5}Active: active \(running\) since \w{3} \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC; \d+s ago$/);
+  assert.match(lines[3], /^ Invocation: [0-9a-f]{32}$/);
+  assert.match(up.out, /\n {4}Process: \d+ ExecStartPre=\/usr\/sbin\/sshd -t \(code=exited, status=0\/SUCCESS\)\n {3}Main PID: \d+ \(sshd\)\n {6}Tasks: 1 \(limit: \d+\)\n/);
+  assert.match(up.out, /\n {5}CGroup: \/system\.slice\/ssh\.service\n {13}└─\d+ "sshd: \/usr\/sbin\/sshd -D \[listener\] 0 of 10-100 startups"\n\n/);
+  assert.match(up.out, /kali systemd\[1\]: Starting ssh\.service - OpenBSD Secure Shell server\.\.\.\n.*sshd\[\d+\]: Server listening on 0\.0\.0\.0 port 22\.\n/);
+  assert.match((await sim.run('systemctl status ssh', { tty: true })).out, /^\x1b\[32m●\x1b\[39m ssh\.service/);
+  const missing = await sim.run('systemctl status nosuch');
+  assert.equal(missing.code, 4);
+  assert.equal(missing.err, 'Unit nosuch.service could not be found.\n');
+});
+
+test('systemctl: start opens the port, stop closes it', async () => {
+  const sim = await sys();
+  const listening = () => sim.K.net.listening(sim.machine).some((l) => l.port === 22);
+  assert.equal(listening(), false);
+  assert.equal((await sim.run('sudo systemctl start ssh')).out, '');
+  assert.equal(listening(), true);
+  assert.ok(sim.machine.procs.some((p) => /^sshd: /.test(p.cmd)));
+  assert.equal(await sim.out('systemctl is-active ssh'), 'active\n');
+  assert.equal((await sim.run('sudo systemctl restart ssh')).code, 0);
+  assert.equal((await sim.run('sudo systemctl stop ssh')).code, 0);
+  assert.equal(listening(), false);
+  assert.ok(!sim.machine.procs.some((p) => /^sshd: /.test(p.cmd)));
+  const inactive = await sim.run('systemctl is-active ssh');
+  assert.equal(inactive.out, 'inactive\n');
+  assert.equal(inactive.code, 3);
+  assert.match(await sim.out('systemctl status ssh'), /Active: inactive \(dead\) since .*\n {3}Duration: /);
+  assert.match(await sim.out('sudo journalctl -u ssh --no-pager'), /Stopped ssh\.service - OpenBSD Secure Shell server\./);
+});
+
+test('systemctl: apache2 serves the web root once started', async () => {
+  const sim = await sys();
+  await sim.run('sudo systemctl start apache2');
+  const r = sim.K.net.http(sim.machine, { method: 'GET', url: 'http://127.0.0.1/' });
+  assert.equal(r.status, 200);
+  assert.match(r.body, /Apache2 Debian Default Page/);
+  const nf = sim.K.net.http(sim.machine, { method: 'GET', url: 'http://127.0.0.1/nope.html' });
+  assert.equal(nf.status, 404);
+  assert.match(nf.body, /Not Found/);
+});
+
+test('systemctl: permissions, unknown units, enable and disable', async () => {
+  const sim = await sys();
+  const denied = await sim.run('systemctl start ssh');
+  assert.equal(denied.code, 1);
+  assert.equal(denied.err, "Failed to start ssh.service: Interactive authentication required.\nSee system logs and 'systemctl status ssh.service' for details.\n");
+  assert.equal((await sim.run('systemctl stop cron')).err, "Failed to stop cron.service: Interactive authentication required.\nSee system logs and 'systemctl status cron.service' for details.\n");
+  assert.equal((await sim.run('systemctl enable ssh')).err, 'Failed to enable unit: Interactive authentication required.\n');
+  assert.equal((await sim.run('systemctl daemon-reload')).err, 'Failed to reload daemon: Interactive authentication required.\n');
+  const nosuch = await sim.run('sudo systemctl start nosuch');
+  assert.equal(nosuch.code, 5);
+  assert.equal(nosuch.err, 'Failed to start nosuch.service: Unit nosuch.service not found.\n');
+  assert.equal((await sim.run('sudo systemctl enable nosuch')).err, 'Failed to enable unit: Unit file nosuch.service does not exist.\n');
+  const en = await sim.out('sudo systemctl enable ssh');
+  assert.equal(en, "Synchronizing state of ssh.service with SysV service script with /usr/lib/systemd/systemd-sysv-install.\nExecuting: /usr/lib/systemd/systemd-sysv-install enable ssh\nCreated symlink '/etc/systemd/system/sshd.service' → '/usr/lib/systemd/system/ssh.service'.\nCreated symlink '/etc/systemd/system/multi-user.target.wants/ssh.service' → '/usr/lib/systemd/system/ssh.service'.\n");
+  assert.equal(await sim.out('systemctl is-enabled ssh'), 'enabled\n');
+  assert.match(await sim.out('sudo systemctl disable ssh'), /Removed '\/etc\/systemd\/system\/multi-user\.target\.wants\/ssh\.service'\.\n$/);
+  const dis = await sim.run('systemctl is-enabled ssh');
+  assert.equal(dis.out, 'disabled\n');
+  assert.equal(dis.code, 1);
+  assert.equal(await sim.out('systemctl is-enabled dbus'), 'static\n');
+  await sim.run('sudo systemctl enable --now ssh');
+  assert.equal(await sim.out('systemctl is-active ssh'), 'active\n');
+  assert.equal((await sim.run('systemctl frobnicate')).err, "Unknown command verb 'frobnicate'.\n");
+  assert.equal((await sim.run('sudo systemctl reload cron')).err, 'Failed to reload cron.service: Job type reload is not applicable for unit cron.service.\n');
+});
+
+test('systemctl: listings', async () => {
+  const sim = await sys();
+  const units = (await sim.out('systemctl list-units --type=service')).split('\n');
+  assert.match(units[0], /^ {2}UNIT +LOAD +ACTIVE SUB +DESCRIPTION$/);
+  assert.ok(units.some((l) => /^ {2}cron\.service +loaded active running +Regular background program processing daemon$/.test(l)));
+  assert.ok(!units.some((l) => /^ {2}ssh\.service/.test(l)));
+  assert.match(units.slice(-5).join('\n'), /loaded units listed\.[^\n]*\nTo show all installed unit files use 'systemctl list-unit-files'\./);
+  assert.ok((await sim.out('systemctl list-units --all --type=service')).includes('ssh.service'));
+  assert.match(await sim.out('systemctl list-units --failed'), /^0 loaded units listed\.\n$/);
+  const files = (await sim.out('systemctl list-unit-files')).split('\n');
+  assert.match(files[0], /^UNIT FILE +STATE +PRESET$/);
+  assert.ok(files.some((l) => /^ssh\.service +disabled +disabled$/.test(l)));
+  assert.ok(files.some((l) => /^dbus\.service +static +-$/.test(l)));
+  assert.match(files.slice(-2).join(''), /\d+ unit files listed\./);
+  assert.match(await sim.out('systemctl --version'), /^systemd \d+ \(/);
+});
+
+test('systemctl: a daemon that dies marks its unit', async () => {
+  const sim = await sys();
+  await sim.run('sudo systemctl start ssh');
+  const pid = sim.machine.procs.find((p) => /^sshd: /.test(p.cmd)).pid;
+  await sim.run('sudo kill ' + pid);
+  assert.equal(await sim.out('systemctl is-active ssh'), 'inactive\n');
+  await sim.run('sudo systemctl start ssh');
+  await sim.run('sudo kill -9 ' + sim.machine.procs.find((p) => /^sshd: /.test(p.cmd)).pid);
+  assert.equal(await sim.out('systemctl is-active ssh'), 'failed\n');
+  assert.match(await sim.out('systemctl --failed --no-pager'), /ssh\.service +loaded failed failed/);
+});
+
+test('service: start, status and --status-all', async () => {
+  const sim = await sys();
+  const denied = await sim.run('service ssh start');
+  assert.equal(denied.code, 1);
+  assert.match(denied.err, /^Failed to start ssh\.service: Interactive authentication required\./);
+  assert.equal((await sim.run('sudo service ssh start')).code, 0);
+  assert.match(await sim.out('service ssh status'), /^● ssh\.service - OpenBSD Secure Shell server\n/);
+  assert.match(await sim.out('service --status-all'), / \[ \+ \] {2}cron\n(.*\n)* \[ \+ \] {2}ssh\n?/);
+  assert.match(await sim.out('service --status-all'), / \[ - \] {2}apache2\n/);
+  assert.equal((await sim.run('service nosuch start')).err, 'nosuch: unrecognized service\n');
+  assert.match((await sim.run('service')).err, /^Usage: service < option >/);
+  assert.match((await sim.run('service ssh')).err, /^Usage: \/etc\/init\.d\/ssh \{start\|stop/);
+});
+
+test('journalctl: filters and formats', async () => {
+  const sim = await sys();
+  const all = (await sim.out('journalctl --no-pager')).split('\n');
+  assert.match(all[0], /^[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d kali kernel: Linux version 7\.1\.5-kali1-amd64/);
+  assert.equal((await sim.out('journalctl -n 3')).split('\n').length, 4);
+  assert.equal((await sim.out('journalctl -n3')).split('\n').length, 4);
+  const rev = (await sim.out('journalctl -r -n 2')).split('\n');
+  const fwd = (await sim.out('journalctl -n 2')).split('\n');
+  assert.equal(rev[0], fwd[1]);
+  assert.ok((await sim.out('journalctl -k')).split('\n').filter(Boolean).every((l) => / kali kernel: /.test(l)));
+  assert.equal(await sim.out('journalctl -u nosuch'), '-- No entries --\n');
+  await sim.run('sudo systemctl start ssh');
+  const ssh = (await sim.out('journalctl -u ssh -n 2 -o cat')).split('\n');
+  assert.equal(ssh[1], 'Started ssh.service - OpenBSD Secure Shell server.');
+  assert.match(await sim.out('journalctl -u ssh -o short-iso'), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+0000 kali systemd\[1\]: Starting/);
+  assert.equal(await sim.out('journalctl -p err'), '-- No entries --\n');
+  assert.match(await sim.out('journalctl -t sshd -g "port 22"'), /sshd\[\d+\]: Server listening on 0\.0\.0\.0 port 22\./);
+  assert.match(await sim.out('journalctl --since "10 min ago" --no-pager'), /Started ssh\.service/);
+  assert.equal(await sim.out('journalctl --since tomorrow'), '-- No entries --\n');
+  assert.equal((await sim.run('journalctl --since nonsense')).err, 'Failed to parse timestamp: nonsense\n');
+  assert.equal((await sim.run('journalctl -b -1')).err, 'No journal boot entry found from the specified boot offset.\n');
+  assert.equal((await sim.run('journalctl -p loud')).err, 'Unknown log level loud\n');
+  assert.match(await sim.out('journalctl --disk-usage'), /^Archived and active journals take up /);
+});
+
+test('journalctl: sudo use shows up and -f follows until Ctrl-C', async () => {
+  const sim = await sys();
+  await sim.type('sudo id');
+  assert.match(await sim.out('journalctl -t sudo --no-pager'), /sudo: {5}kali : TTY=pts\/0 ; PWD=\S+ ; USER=root ; COMMAND=\/usr\/bin\/id/);
+  const f = await interrupted(sim, 'journalctl -f -n 1');
+  assert.equal(f.code, 130);
+  assert.match(f.output, /kali /);
+});
+
+test('dmesg needs root', async () => {
+  const sim = await sys();
+  const denied = await sim.run('dmesg');
+  assert.equal(denied.code, 1);
+  assert.equal(denied.err, 'dmesg: read kernel buffer failed: Operation not permitted\n');
+  const lines = (await sim.out('sudo dmesg')).split('\n');
+  assert.match(lines[0], /^\[ {4}0\.000000\] Linux version 7\.1\.5-kali1-amd64/);
+  assert.match((await sim.out('sudo dmesg -t')).split('\n')[0], /^Linux version/);
+  assert.match((await sim.out('sudo dmesg -T')).split('\n')[0], /^\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\] Linux version/);
+  assert.match((await sim.out('sudo dmesg -x -l info')).split('\n')[0], /^kern {2}:info {2}: \[/);
+  assert.match((await sim.run('sudo dmesg -l loud')).err, /^dmesg: unknown level 'loud'/);
+  assert.match((await sim.out('sudo dmesg | grep -i "Link is Up"')), /e1000: eth0 NIC Link is Up 1000 Mbps/);
+});
