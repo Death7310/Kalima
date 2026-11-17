@@ -2870,4 +2870,187 @@
       return 0;
     },
   });
+
+  /* ---------------------------------------------- manual pages and look-ups */
+
+  const SECTION_TITLES = { 1: 'User Commands', 5: 'File Formats Manual', 7: 'Miscellaneous Information Manual', 8: 'System Manager\'s Manual' };
+  const PACKAGE_LABELS = { coreutils: 'GNU coreutils 9.7', procps: 'procps-ng 4.0.4', systemd: 'systemd 258', 'util-linux': 'util-linux 2.41', 'hostname': 'hostname 3.25', psmisc: 'psmisc 23.7' };
+  const MAN_WIDTH = 78;
+
+  /** Command definitions the machine really has (lab servers lack the Kali-only tools). */
+  function commandsOf(machine) {
+    return K.cmd.list().filter((d) => !(d.only === 'kali' && machine.profile !== 'kali'));
+  }
+  const manBody = (def) => (typeof def.man === 'function' ? def.man() : def.man) || '';
+
+  /** Break long lines at the page width, keeping each line's indentation on the continuation. */
+  function wrapManLine(line) {
+    if (line.length <= MAN_WIDTH) return [line];
+    const indent = /^ */.exec(line)[0]; const words = line.slice(indent.length).split(' ');
+    const out = []; let cur = indent;
+    for (const w of words) {
+      if (cur.length > indent.length && (cur + ' ' + w).length > MAN_WIDTH) { out.push(cur); cur = indent + w; } else cur += (cur.length > indent.length ? ' ' : '') + w;
+    }
+    out.push(cur);
+    return out;
+  }
+
+  const threeColumns = (l, c, r) => {
+    const gap = MAN_WIDTH - l.length - c.length - r.length;
+    const left = Math.floor(gap / 2);
+    return l + ' '.repeat(Math.max(1, left)) + c + ' '.repeat(Math.max(1, gap - left)) + r;
+  };
+
+  /** A full man page for a command, laid out like groff's man macros do on a terminal. */
+  function renderManPage(def, bold) {
+    const title = def.name.toUpperCase() + '(' + def.section + ')';
+    const heading = (h) => (bold ? K.c.bold(h) : h);
+    const body = manBody(def).replace(/\n+$/, '');
+    const lines = [threeColumns(title, SECTION_TITLES[def.section] || 'User Commands', title), ''];
+    lines.push(heading('NAME'), '       ' + def.name + ' - ' + def.summary, '');
+    if (def.synopsis) lines.push(heading('SYNOPSIS'), ...def.synopsis.split('\n').flatMap((l) => wrapManLine((l.startsWith('       ') ? '' : '       ') + l)), '');
+    const text = /^[A-Z][A-Z ]+(\n|$)/.test(body) ? body : 'DESCRIPTION\n       ' + body;
+    for (const l of text.split('\n')) {
+      if (/^[A-Z][A-Z ]+$/.test(l)) lines.push(heading(l));
+      else lines.push.apply(lines, wrapManLine(l));
+    }
+    const now = new Date(K.clock.now());
+    lines.push('', threeColumns(PACKAGE_LABELS[def.pkg] || def.pkg || 'Kali', MONTH_NAMES[now.getUTCMonth()] + ' ' + now.getUTCFullYear(), title));
+    return lines.join('\n') + '\n';
+  }
+
+  const whatisLine = (d) => (d.name + ' (' + d.section + ')').padEnd(20) + ' - ' + d.summary;
+  const NOTHING = (what) => what + ': nothing appropriate.\n';
+
+  function findPage(ctx, name, section) {
+    const defs = commandsOf(ctx.machine).filter((d) => d.name === name);
+    return defs.find((d) => section == null || String(d.section) === String(section)) || null;
+  }
+
+  async function showManual(ctx, names, section, opts) {
+    let code = 0;
+    for (const name of names) {
+      const def = findPage(ctx, name, section);
+      if (!def) {
+        ctx.err('No manual entry for ' + name + (section != null ? ' in section ' + section : '') + "\nSee 'man 7 undocumented' for help when manual pages are not available.\n");
+        code = 16;
+        continue;
+      }
+      if (opts.path) { ctx.println('/usr/share/man/man' + def.section + '/' + def.name + '.' + def.section + '.gz'); continue; }
+      const text = renderManPage(def, ctx.isTTY);
+      if (ctx.isTTY) await ctx.term.pager(text, { title: 'Manual page ' + name + '(' + def.section + ')' });
+      else ctx.out(K.util.stripAnsi(text));
+    }
+    return code;
+  }
+
+  const MAN_USAGE = 'Usage: man [OPTION...] [SECTION] PAGE...\n\n  -k, --apropos              equivalent to apropos(1)\n  -f, --whatis               equivalent to whatis(1)\n  -w, --where, --path, --location\n                             print physical location of man page(s)\n  -a, --all                  find all matching manual pages\n  -s, --sections=LIST        use colon separated section list\n\n  -?, --help                 give this help list\n      --usage                give a short usage message\n  -V, --version              print program version\n';
+
+  /** apropos and `man -k`: pages whose name or summary matches any keyword. */
+  function searchPages(ctx, words, o) {
+    const res = words.map((w) => { try { return new RegExp(o.exact ? '^' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' : w, 'i'); } catch (e) { return null; } });
+    if (res.some((r) => !r)) { ctx.err(ctx.name + ': invalid regular expression\n'); return 2; }
+    const hits = [];
+    for (const d of commandsOf(ctx.machine)) {
+      const hay = (r) => r.test(d.name) || (!o.exact && r.test(d.summary));
+      if (o.and ? res.every(hay) : res.some(hay)) hits.push(d);
+    }
+    hits.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.section - b.section));
+    if (!hits.length) { ctx.err(NOTHING(words.join(' ')).replace(/^(.*): nothing/, (a, w) => w + ': nothing')); return 16; }
+    ctx.println(hits.map(whatisLine).join('\n'));
+    return 0;
+  }
+
+  reg({
+    name: 'man', pkg: 'man-db', summary: 'an interface to the system reference manuals', synopsis: 'man [man options] [[section] page ...] ...\n       man -k [apropos options] regexp ...\n       man -f [whatis options] page ...',
+    man: 'DESCRIPTION\n       man is the system\'s manual pager. Each page argument given to man is normally the name of a program, utility or function. The manual page associated with each of these arguments is then found and displayed. A section, if provided, will direct man to look only in that section of the manual.\n\n       The manual is divided into sections: 1 executable programs and shell commands, 5 file formats, 7 miscellaneous, 8 system administration commands.\n\nOPTIONS\n       -k, --apropos\n              Equivalent to apropos. Search the short manual page descriptions for keywords.\n\n       -f, --whatis\n              Equivalent to whatis. Display a short description from the manual page, if available.\n\n       -w, --where\n              Do not actually display the manual pages, but do print the location of the files.\n\n       -a, --all\n              By default, man will exit after displaying the most suitable manual page it finds. Using this option forces man to display all the manual pages with names that match the search criteria.\n\n       q      Quit the pager.\n\nEXAMPLES\n       man ls\n              Display the manual page for the ls command.\n       man 8 ping\n              Display ping from section 8.\n       man -k "copy files"\n              Search the descriptions for a phrase.',
+    section: 1,
+    async run(ctx) {
+      const g = ctx.getopt({ short: 'k f w a s:?VhrCMLdD', long: ['apropos', 'whatis', 'where', 'path', 'location', 'all', 'sections=', 'help', 'usage', 'version'], alias: { apropos: 'k', whatis: 'f', where: 'w', path: 'w', location: 'w', all: 'a', sections: 's', help: '?', version: 'V' } });
+      if (g.err) { ctx.err('man: ' + g.err + '\n' + MAN_USAGE.split('\n')[0] + '\n'); return 1; }
+      if (g.opts['?'] || g.opts.h) { ctx.out(MAN_USAGE); return 0; }
+      if (g.opts.usage) { ctx.out('Usage: man [-?] [-k|-f] [-w] [-a] [-s LIST] [--help] [--usage] [--version]\n            [SECTION] PAGE...\n'); return 0; }
+      if (g.opts.V) { ctx.out('man 2.13.1\n'); return 0; }
+      let args = g.rest;
+      if (!args.length) { ctx.err("What manual page do you want?\nFor example, try 'man man'.\n"); return 1; }
+      if (g.opts.k) { ctx.name = 'apropos'; return searchPages(ctx, args, {}); }
+      if (g.opts.f) return whatisRun(ctx, args);
+      let section = g.opts.s != null ? g.opts.s : null;
+      if (/^[1-9][a-z]*$/.test(args[0]) && args.length > 1) { section = args[0].replace(/\D.*/, ''); args = args.slice(1); }
+      return showManual(ctx, args, section, { path: !!g.opts.w });
+    },
+    complete(info) { return commandsOf(info.ctx.machine).map((d) => d.name).filter((n) => n.indexOf(info.cur) === 0); },
+  });
+
+  function whatisRun(ctx, names) {
+    let code = 0;
+    for (const n of names) {
+      const hits = commandsOf(ctx.machine).filter((d) => d.name.toLowerCase() === n.toLowerCase()).sort((a, b) => a.section - b.section);
+      if (!hits.length) { ctx.err(NOTHING(n)); code = 16; } else ctx.println(hits.map(whatisLine).join('\n'));
+    }
+    return code;
+  }
+
+  reg({
+    name: 'whatis', pkg: 'man-db', summary: 'display one-line manual page descriptions', synopsis: 'whatis [-dlv?V] [-r|-w] [-s list] [-m system[,...]] [-M path] [-L locale] [-C file] name ...',
+    man: 'DESCRIPTION\n       Each manual page has a short description available within it. whatis searches the manual page names and displays the manual page descriptions of any name matched.\n\nOPTIONS\n       -s, --sections=LIST\n              Search only the given manual sections.\n\n       -V, --version\n              Show the version number.\n\nEXAMPLES\n       whatis ls\n              ls (1) - list directory contents\n       whatis nmap ssh\n              One line per name.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'dlvrwV?s:m:M:L:C:', long: ['debug', 'long', 'verbose', 'regex', 'wildcard', 'version', 'help', 'usage', 'sections=', 'systems=', 'manpath=', 'locale=', 'config-file='] });
+      if (g.err) { ctx.err('whatis: ' + g.err + '\nUsage: whatis [OPTION...] keyword ...\n'); return 1; }
+      if (g.opts.V || g.opts.version) { ctx.out('whatis 2.13.1\n'); return 0; }
+      if (g.opts['?'] || g.opts.help || g.opts.usage) { ctx.out('Usage: whatis [-dlv?V] [-r|-w] [-s LIST] [-m SYSTEM[,...]] [-M PATH] [-L LOCALE]\n            [-C FILE] [--debug] [--verbose] [--regex] [--wildcard] [--long]\n            [--sections=LIST] [--systems=SYSTEM[,...]] [--manpath=PATH]\n            [--locale=LOCALE] [--config-file=FILE] [--help] [--usage] [--version]\n            KEYWORD...\n'); return 0; }
+      if (!g.rest.length) { ctx.err('whatis what?\n'); return 1; }
+      return whatisRun(ctx, g.rest);
+    },
+  });
+
+  reg({
+    name: 'apropos', pkg: 'man-db', summary: 'search the manual page names and descriptions', synopsis: 'apropos [-dalv?V] [-e|-w|-r] [-s list] [-m system[,...]] [-M path] [-L locale] [-C file] keyword ...',
+    man: 'DESCRIPTION\n       Each manual page has a short description available within it. apropos searches the descriptions for instances of keyword. keyword is usually a regular expression, as if (-r) was used, or may contain wildcards (-w), or match the exact keyword (-e).\n\nOPTIONS\n       -e, --exact\n              Each keyword will be exactly matched against the page names.\n\n       -a, --and\n              Only display items that match all the supplied keywords.\n\n       -s, --sections=LIST\n              Search only the given manual sections.\n\nEXAMPLES\n       apropos password\n              Pages that mention passwords.\n       apropos -a dns lookup\n              Pages whose description matches both words.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'dalvrweV?s:m:M:L:C:', long: ['debug', 'and', 'long', 'verbose', 'regex', 'wildcard', 'exact', 'version', 'help', 'usage', 'sections=', 'systems=', 'manpath=', 'locale=', 'config-file='] });
+      if (g.err) { ctx.err('apropos: ' + g.err + '\nUsage: apropos [OPTION...] KEYWORD...\n'); return 1; }
+      if (g.opts.V || g.opts.version) { ctx.out('apropos 2.13.1\n'); return 0; }
+      if (g.opts['?'] || g.opts.help || g.opts.usage) { ctx.out('Usage: apropos [-dalv?V] [-e|-w|-r] [-s LIST] [-m SYSTEM[,...]] [-M PATH] [-L LOCALE]\n               [-C FILE] [--debug] [--verbose] [--and] [--long] [--exact]\n               [--wildcard] [--regex] [--sections=LIST] [--systems=SYSTEM[,...]]\n               [--manpath=PATH] [--locale=LOCALE] [--config-file=FILE] [--help]\n               [--usage] [--version]\n               KEYWORD...\n'); return 0; }
+      if (!g.rest.length) { ctx.err('apropos what?\n'); return 1; }
+      return searchPages(ctx, g.rest, { exact: !!g.opts.e, and: !!g.opts.a });
+    },
+  });
+
+  reg({
+    name: 'whereis', pkg: 'util-linux', summary: 'locate the binary, source, and manual page files for a command', synopsis: 'whereis [options] [-BMS directory... -f] name...',
+    man: 'DESCRIPTION\n       whereis locates the binary, source and manual page files for the specified command names. The supplied names are first stripped of leading pathname components. Only the files whose names are exactly the same as the stripped names are reported.\n\nOPTIONS\n       -b     Search for binaries only.\n\n       -m     Search for manuals only.\n\n       -s     Search for sources only.\n\n       -l     Output the list of effective lookup paths.\n\nEXAMPLES\n       whereis nmap\n              nmap: /usr/bin/nmap /usr/share/man/man1/nmap.1.gz\n       whereis -b ssh\n              Only the executable.',
+    run(ctx) {
+      const g = ctx.getopt({ short: 'bmsulf:B:M:S:h', long: ['help', 'version'] });
+      if (g.err) { ctx.err('whereis: ' + g.err + "\nTry 'whereis --help' for more information.\n"); return 1; }
+      if (g.opts.h || g.opts.help) { ctx.out('\nUsage:\n whereis [options] [-BMS <dir>... -f] <name>\n\nLocate the binary, source, and manual-page files for a command.\n\nOptions:\n -b         search only for binaries\n -B <dirs>  define binaries lookup path\n -m         search only for manuals and infos\n -M <dirs>  define man and info lookup path\n -s         search only for sources\n -S <dirs>  define sources lookup path\n -f         terminate <dirs> argument list\n -u         search for unusual entries\n -l         output effective lookup paths\n\n -h, --help     display this help\n -V, --version  display version\n\nFor more details see whereis(1).\n'); return 0; }
+      if (g.opts.version) { ctx.out('whereis from util-linux 2.41\n'); return 0; }
+      if (g.opts.l) { ctx.println('bin: /usr/bin\nbin: /usr/sbin\nbin: /usr/lib\nbin: /usr/lib64\nbin: /usr/local/bin\nbin: /usr/local/sbin\nman: /usr/share/man\nman: /usr/local/share/man\nsrc: /usr/src'); return 0; }
+      if (!g.rest.length) { ctx.err('whereis: no names specified\n'); return 1; }
+      const only = g.opts.b || g.opts.m || g.opts.s;
+      for (const arg of g.rest) {
+        const name = K.VFS.basename(arg); const found = [];
+        const def = commandsOf(ctx.machine).find((d) => d.name === name);
+        if ((!only || g.opts.b) && def && ctx.fs.exists(def.path)) found.push(def.path);
+        if ((!only || g.opts.m) && def) found.push('/usr/share/man/man' + def.section + '/' + def.name + '.' + def.section + '.gz');
+        ctx.println(name + ':' + (found.length ? ' ' + found.join(' ') : ''));
+      }
+      return 0;
+    },
+  });
+
+  reg({
+    name: 'info', pkg: 'info', summary: 'read Info documents', synopsis: 'info [OPTION]... [MENU-ITEM...]',
+    man: 'DESCRIPTION\n       Read documentation in Info format. When no Info document exists for a program, info shows its manual page instead.\n\nOPTIONS\n       -f, --file=MANUAL\n              Specify Info file to visit.\n\n       --version\n              Display version information and exit.\n\n       q      Quit the viewer.\n\nEXAMPLES\n       info ls\n              The coreutils manual entry for ls.',
+    async run(ctx) {
+      const g = ctx.getopt({ short: 'f:o:O?hwv', long: ['file=', 'output=', 'help', 'version', 'where', 'all', 'apropos='] });
+      if (g.err) { ctx.err('info: ' + g.err + "\nTry 'info --help' for more information.\n"); return 1; }
+      if (g.opts.version) { ctx.out('info (GNU texinfo) 7.2\n'); return 0; }
+      if (g.opts.help || g.opts['?']) { ctx.out('Usage: info [OPTION]... [MANUAL] [MENU-ITEM-OR-INDEX-ENTRY]...\n\nRead documentation in Info format.\n\nOptions:\n  -f, --file=MANUAL            specify Info manual to visit\n  -o, --output=FILENAME        output selected nodes to FILENAME\n  -w, --where                  print physical location of Info file\n      --help                   display this help and exit\n      --version                display version information and exit\n'); return 0; }
+      if (!g.rest.length) { ctx.println('File: dir,  Node: Top\tThis is the top of the INFO tree\n\n  This is the Info main menu.\n\n* Menu:\n\nBasics\n* Coreutils: (coreutils).       Core GNU utilities.\n* Man pages: (man).             Manual pages, opened through man.'); return 0; }
+      const name = g.rest[0];
+      if (!findPage(ctx, name, null)) { ctx.err("info: No menu item '" + name + "' in node '(dir)Top'.\n"); return 1; }
+      return showManual(ctx, [name], null, {});
+    },
+  });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -954,3 +954,68 @@ test('dmesg needs root', async () => {
   assert.match((await sim.run('sudo dmesg -l loud')).err, /^dmesg: unknown level 'loud'/);
   assert.match((await sim.out('sudo dmesg | grep -i "Link is Up"')), /e1000: eth0 NIC Link is Up 1000 Mbps/);
 });
+
+/* ------------------------------------------------------------ manual pages */
+
+test('man: page layout rendered from the command definition', async () => {
+  const sim = await sys();
+  const page = (await sim.out('man whoami')).split('\n');
+  assert.match(page[0], /^WHOAMI\(1\) {7}User Commands {8}WHOAMI\(1\)$|^WHOAMI\(1\) +User Commands +WHOAMI\(1\)$/);
+  assert.equal(page[0].length, 78);
+  assert.deepEqual(page.slice(1, 8), ['', 'NAME', '       whoami - print effective user name', '', 'SYNOPSIS', '       whoami [OPTION]...', '']);
+  assert.ok(page.includes('DESCRIPTION') && page.includes('EXAMPLES'));
+  assert.match(page.slice(-2)[0], /^GNU coreutils 9\.7 +\w+ \d{4} +WHOAMI\(1\)$/);
+  assert.ok(page.every((l) => l.length <= 78));
+  assert.match(await sim.out('man 8 ping'), /^PING\(8\) +System Manager's Manual +PING\(8\)\n/);
+  assert.match(await sim.out('man 1 ls'), /^LS\(1\)/);
+  assert.equal(await sim.out('man -w ls'), '/usr/share/man/man1/ls.1.gz\n');
+  // on a terminal the page goes through the pager, with bold headings
+  sim.term.take();
+  await sim.run('man whoami', { tty: true });
+  assert.ok(sim.term.take().includes('\x1b[1mNAME\x1b[22m'));
+});
+
+test('man: errors and options', async () => {
+  const sim = await sys();
+  const none = await sim.run('man nosuchpage');
+  assert.equal(none.code, 16);
+  assert.equal(none.err, "No manual entry for nosuchpage\nSee 'man 7 undocumented' for help when manual pages are not available.\n");
+  assert.equal((await sim.run('man 5 ls')).err, "No manual entry for ls in section 5\nSee 'man 7 undocumented' for help when manual pages are not available.\n");
+  const bare = await sim.run('man');
+  assert.equal(bare.code, 1);
+  assert.equal(bare.err, "What manual page do you want?\nFor example, try 'man man'.\n");
+  assert.match(await sim.out('man --help'), /^Usage: man \[OPTION\.\.\.\] \[SECTION\] PAGE\.\.\./);
+  assert.match(await sim.out('man -V'), /^man \d/);
+  assert.match(await sim.out('man man'), /\nNAME\n {7}man - an interface to the system reference manuals\n/);
+});
+
+test('whatis, apropos, man -k and -f', async () => {
+  const sim = await sys();
+  assert.equal(await sim.out('whatis ls'), 'ls (1)               - list directory contents\n');
+  assert.equal(await sim.out('man -f whoami'), 'whoami (1)           - print effective user name\n');
+  const miss = await sim.run('whatis nosuch');
+  assert.equal(miss.code, 16);
+  assert.equal(miss.err, 'nosuch: nothing appropriate.\n');
+  assert.match(await sim.out('apropos "kernel ring"'), /^dmesg \(1\) +- print or control the kernel ring buffer\n$/);
+  assert.equal(await sim.out('man -k "kernel ring"'), await sim.out('apropos "kernel ring"'));
+  const lines = (await sim.out('apropos process')).split('\n').filter(Boolean);
+  assert.ok(lines.length > 2 && lines.every((l) => /^\S+ \(\d\) +- /.test(l)));
+  assert.deepEqual(lines.map((l) => l.split(' ')[0]), lines.map((l) => l.split(' ')[0]).slice().sort());
+  assert.equal((await sim.run('apropos zzzqqq')).err, 'zzzqqq: nothing appropriate.\n');
+  assert.equal((await sim.run('apropos zzzqqq')).code, 16);
+  assert.equal(await sim.out('apropos -e whoami'), 'whoami (1)           - print effective user name\n');
+  assert.equal((await sim.run('apropos')).err, 'apropos what?\n');
+});
+
+test('whereis and info', async () => {
+  const sim = await sys();
+  assert.equal(await sim.out('whereis ls'), 'ls: /usr/bin/ls /usr/share/man/man1/ls.1.gz\n');
+  assert.equal(await sim.out('whereis -b ls'), 'ls: /usr/bin/ls\n');
+  assert.equal(await sim.out('whereis -m ls'), 'ls: /usr/share/man/man1/ls.1.gz\n');
+  assert.equal(await sim.out('whereis nosuchcmd'), 'nosuchcmd:\n');
+  assert.equal((await sim.run('whereis')).err, 'whereis: no names specified\n');
+  assert.match(await sim.out('info ls'), /^LS\(1\)/);
+  const bad = await sim.run('info nosuchthing');
+  assert.equal(bad.code, 1);
+  assert.equal(bad.err, "info: No menu item 'nosuchthing' in node '(dir)Top'.\n");
+});
