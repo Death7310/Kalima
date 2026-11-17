@@ -637,11 +637,238 @@
     refs: ['zshmisc(1), section REDIRECTION', 'tee(1)', 'null(4)', 'pipe(7)', 'NIST SP 800-115, section 7.4 (Data Handling)'],
   };
 
+  /* ------------------------------------------------------------ files-edit
+   * The interactive editors cannot be driven by the headless replay, so the
+   * steps that change the file carry a testSolution that produces the same
+   * content with ordinary commands. Their checks look only at the file.
+   */
+  const SEED = DATA + '/files/checklist.txt';
+  const LIST = WORK + '/checklist.txt';
+  const EDITORS = ['vim', 'vi'];
+
+  const editLesson = {
+    id: 'files-edit',
+    title: 'Editing text: nano, and enough vim to get out',
+    minutes: 12,
+    objectives: [
+      'Open a file in `nano`, change it, write it out with Ctrl-O and leave with Ctrl-X',
+      'Tell from the screen whether an editor is holding changes that are not saved',
+      'Use the minimum of `vim`: `i` to insert, Esc to stop, `:wq` to save and quit, `:q!` to quit without saving',
+    ],
+    intro: T(
+      'Sooner or later you have to change a file: a note, a line of configuration, a list of addresses. On a server there is often no graphical editor, only the terminal you are logged in through.',
+      '',
+      'Kali offers two terminal editors. `nano` is small, keeps its commands on screen, and is the sensible choice for everyday edits. `vim` is powerful and is found almost everywhere, but it behaves unlike any other program, and newcomers famously get stuck in it. In this lesson you edit a checklist in nano, then learn just enough vim to make a small change and, above all, to leave safely.'
+    ),
+    steps: [
+      {
+        id: 'setup',
+        prompt: T(
+          'Go to the practice directory, creating it first if it is not there yet:',
+          '',
+          '```',
+          'mkdir -p ~/practice/files && cd ~/practice/files',
+          '```',
+          '',
+          'The prompt should now show `~/practice/files`. Every editor command in this lesson is run from here.'
+        ),
+        hint: 'Type the whole line. `&&` runs the `cd` only if the `mkdir` succeeded.',
+        solution: 'mkdir -p ~/practice/files && cd ~/practice/files',
+        check: { cwd: WORK },
+      },
+      {
+        id: 'copy',
+        prompt: T(
+          'Never practice on an original. Take a copy of the checklist you are going to edit:',
+          '',
+          '```',
+          'cp ' + SEED + ' .',
+          '```',
+          '',
+          'Read it with `cat checklist.txt`: a title, an empty line and four items, two of them ticked. If you repeat this lesson, this command gives you a fresh copy to start from.'
+        ),
+        hint: 'The destination is a single dot, which means the directory you are in.',
+        solution: 'cp ' + SEED + ' .',
+        check: { cmd: 'cp', file: { path: LIST, contains: /Pre-engagement checklist/ } },
+      },
+      {
+        id: 'nano',
+        prompt: T(
+          'Open the copy in nano:',
+          '',
+          '```',
+          'nano checklist.txt',
+          '```',
+          '',
+          'nano takes over the terminal. The top line names the file, the text is in the middle, and the two rows at the bottom list the commands. In those rows `^` stands for the Ctrl key, so `^O` is Ctrl-O.',
+          '',
+          'Whatever you type goes into the text at the cursor. Add an item to the end of the list:',
+          '',
+          '- Press the Down arrow until the cursor is on the last line, then press End to jump to the end of that line.',
+          '- Press Enter to start a new line, and type `[ ] Notes file started`.',
+          '- Press Ctrl-O to *write out* the file. nano asks for the file name and offers the current one. Press Enter to accept it, and the message `Wrote 7 lines` confirms the save.',
+          '- Press Ctrl-X to exit.',
+          '',
+          'The step completes once you are back at the prompt and the file holds the new line.'
+        ),
+        hint: 'Make sure the prompt shows `~/practice/files` before you start nano. The step checks that `checklist.txt` there contains the words `Notes file started`. If you left nano without saving, open it and try again.',
+        solution: 'nano checklist.txt',
+        testSolution: 'echo "[ ] Notes file started" >> checklist.txt',
+        check: has(LIST, /notes file started/i),
+      },
+      {
+        id: 'modified',
+        prompt: T(
+          'Open the checklist in nano again and type a few characters anywhere in the text. Now look at the right-hand end of the top line. A word has appeared there to tell you that the text on screen is no longer the same as the file on disk.',
+          '',
+          'What is that word?',
+          '',
+          'Afterwards leave without keeping your change: press Ctrl-X, and when nano asks `Save modified buffer?` answer `N`.'
+        ),
+        hint: 'Run `nano checklist.txt` and type any letter. The word sits at the far right of the first line of the screen, opposite the nano version number.',
+        solution: 'Modified',
+        answer: /^\[?\s*modified\s*\]?\.?$/i,
+      },
+      {
+        id: 'tick',
+        prompt: T(
+          'Now make a change without step-by-step directions. In nano, tick the item `[ ] Rules of engagement read`: replace the space between its brackets with an `x`, so that the line reads `[x] Rules of engagement read`. Save the file and exit.',
+          '',
+          'The rules themselves are in `~/engagement/rules-of-engagement.txt`. On a real engagement you tick this box only after reading them: they say what you are authorized to test.'
+        ),
+        hint: 'Open `nano checklist.txt`, move to the line with the arrow keys, delete the space with Backspace or Delete, and type `x`. Then press Ctrl-O, Enter and Ctrl-X. There is a shortcut too: Ctrl-X, then `Y`, then Enter saves and exits in one go.',
+        solution: 'nano checklist.txt',
+        testSolution: [
+          'grep -v "Rules of engagement" checklist.txt > checklist.new',
+          'echo "[x] Rules of engagement read" >> checklist.new',
+          'mv checklist.new checklist.txt',
+        ],
+        check: { all: [has(LIST, /\[x\] *Rules of engagement read/i)], not: has(LIST, /\[ ?\] *Rules of engagement read/i) },
+      },
+      {
+        id: 'vim-quit',
+        prompt: T(
+          'nano is not installed on every machine. `vi`, or its successor `vim`, is on nearly every Unix-like system you will log in to, and on many of them other tools open it for you without asking. It works unlike other editors: it starts in **normal mode**, where the keys you press are commands and do not type text.',
+          '',
+          'Open the checklist in vim, look around, and leave again without changing anything:',
+          '',
+          '```',
+          'vim checklist.txt',
+          '```',
+          '',
+          '- The bottom line shows the name of the file and its size. Any lines that hold only a `~` are empty screen, not part of the file.',
+          '- Type `:q` and press Enter. The colon opens a command line at the bottom of the screen, and `q` means *quit*.',
+          '',
+          'If vim ever seems to be doing strange things, press Esc. It always returns you to normal mode, and from there `:q` works.'
+        ),
+        hint: 'Run `vim checklist.txt`, then type a colon, the letter `q`, and Enter. If vim answers with a message that starts `E37`, you changed something by accident: type `:q!` and Enter instead. A later step explains why.',
+        solution: 'vim checklist.txt',
+        check: { cmd: EDITORS, line: /checklist/ },
+      },
+      {
+        id: 'vim-insert',
+        prompt: T(
+          'To type text in vim you first have to enter **insert mode**. Add a line at the top of the checklist:',
+          '',
+          '- Run `vim checklist.txt`.',
+          '- Press `i`. The bottom line now shows `-- INSERT --`, and keys type text.',
+          '- Type `Reviewed by kali` and press Enter.',
+          '- Press Esc. `-- INSERT --` disappears: you are back in normal mode.',
+          '- Type `:wq` and press Enter. `w` writes the file and `q` quits.',
+          '',
+          'Back at the prompt, `head -n 2 checklist.txt` shows your new first line above the title.'
+        ),
+        hint: 'The order is `i`, the text, Esc, then `:wq` and Enter. If the characters `:wq` end up in your text, you were still in insert mode: press Esc, and remove them later. The step checks that the file contains `Reviewed by kali`.',
+        solution: 'vim checklist.txt',
+        testSolution: 'echo "Reviewed by kali" >> checklist.txt',
+        check: has(LIST, /reviewed by kali/i),
+      },
+      {
+        id: 'vim-discard',
+        prompt: T(
+          'The other thing you need is a way out when an edit has gone wrong. Open the file once more and spoil it on purpose:',
+          '',
+          '- Run `vim checklist.txt`, press `i`, type `oops`, and press Esc.',
+          '- Type `:q` and press Enter. vim refuses to quit and puts an error message on the bottom line. Read it.',
+          '- Type `:q!` and press Enter. The exclamation mark means "do it anyway": vim quits and throws your change away.',
+          '',
+          'Back at the prompt, `cat checklist.txt` shows that `oops` never reached the file.'
+        ),
+        hint: 'After typing `oops`, press Esc before the colon. `:q!` is a colon, the letter `q`, an exclamation mark, then Enter.',
+        solution: 'vim checklist.txt',
+        check: { cmd: EDITORS, line: /checklist/, not: has(LIST, /oops/) },
+      },
+      {
+        id: 'e37',
+        prompt: 'When `:q` refused to quit, vim explained itself on the bottom line. The message began with an error code: the letter E followed by a number. What was the code?',
+        hint: 'To see it again: run `vim checklist.txt`, press `i`, type a letter, press Esc, then type `:q` and press Enter. Read the bottom line, and leave with `:q!`.',
+        solution: 'E37',
+        answer: /^e\s*37:?$/i,
+      },
+    ],
+    quiz: [
+      {
+        q: 'You change a file in nano and press Ctrl-X. nano asks `Save modified buffer?` and you answer `N`. What is the result?',
+        choices: [
+          'nano saves the file under a new name and exits',
+          'nano stays open and the change is undone',
+          'nano exits and the file on disk is exactly as it was before',
+          'nano exits and the file on disk is now empty',
+        ],
+        answer: 2,
+        why: 'Until you write the file out, your changes exist only inside the editor. Answering `N` discards them and leaves the file untouched.',
+      },
+      {
+        q: 'You open a file in vim and at once start typing a sentence, without pressing `i` first. What happens?',
+        choices: [
+          'vim treats each key as a command, so the file may change in ways you did not intend',
+          'The sentence is added at the top of the file',
+          'Nothing at all, until you press Enter',
+          'vim shows an error and closes',
+        ],
+        answer: 0,
+        why: 'vim starts in normal mode, where letters are commands for moving, deleting and changing text. Press `i` before typing text. If you have already made a mess, Esc and then `:q!` leaves without saving it.',
+      },
+      {
+        q: 'You meant to save and quit vim, but the characters `:wq` appeared in the text of your file. Why?',
+        choices: [
+          'The file is read-only',
+          'vim needs `:WQ` in capital letters',
+          'You pressed Enter too soon',
+          'You were still in insert mode, where keys type text',
+        ],
+        answer: 3,
+        why: 'Commands that begin with a colon work only from normal mode. Press Esc first, delete the stray characters, and then type `:wq`.',
+      },
+      {
+        q: 'You have made a mess of a configuration file in vim and want to leave it exactly as it was on disk. What do you type from normal mode?',
+        choices: ['`:wq`', '`:q!`', '`:q`', '`:w`'],
+        answer: 1,
+        why: '`:q!` quits and discards every change since the last write. `:q` on its own refuses while there are unsaved changes, and `:wq` or `:w` would save the mess.',
+      },
+    ],
+    refs: ['nano(1)', 'vim(1)', 'vimtutor(1)'],
+  };
+
   K.lessons.register({
     id: 'files',
     title: 'Working with files',
     order: 20,
     summary: 'Look inside files, organize them into a tidy working directory, capture the output of commands, and edit text in nano and vim.',
-    lessons: [viewLesson, manageLesson, redirectLesson],
+    lessons: [viewLesson, manageLesson, redirectLesson, editLesson],
+  });
+
+  /* ------------------------------------------------------------ practice file */
+  K.fsSeeds.push((machine) => {
+    if (machine.profile !== 'kali') return;
+    machine.vfs.seed(SEED, T(
+      'Pre-engagement checklist: HF-LAB-2026-11',
+      '',
+      '[x] Written authorization received',
+      '[x] Scope read: ~/engagement/scope.txt',
+      '[ ] Rules of engagement read',
+      '[ ] Client contact confirmed',
+      ''
+    ), { mtime: Date.UTC(2026, 10, 9, 16, 40, 0) });
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
