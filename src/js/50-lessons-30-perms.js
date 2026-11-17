@@ -278,12 +278,220 @@
     refs: ['id(1)', 'groups(1)', 'passwd(5)', 'group(5)', 'getent(1)', 'Kali Linux Revealed, ch. 3'],
   };
 
+  /* ------------------------------------------------------------------ read */
+  const READERS = ['cat', 'head', 'tail', 'less', 'more', 'grep', 'nl', 'tac'];
+
+  const readLesson = {
+    id: 'perms-read',
+    title: 'Reading permissions',
+    minutes: 10,
+    objectives: [
+      'Read the type, permissions, owner and group of a file from `ls -l`',
+      'Work out which of the three permission classes applies to you, and predict whether an access will be allowed',
+      'Convert between the letter form and the octal form of a mode, and read both from `stat`',
+      'Explain what read, write and execute mean on a directory',
+    ],
+    intro: T(
+      'Permissions decide which accounts may read, change or run each file. They are the reason a web server cannot read your notes, and the reason you cannot read its private key.',
+      '',
+      'On a security workstation you read permissions all the time: to understand why a command was refused, to check that your own notes and keys are private, and to judge whether a system you are reviewing protects what it should. This lesson is about reading only. Nothing in it changes a file.'
+    ),
+    steps: [
+      {
+        id: 'list',
+        prompt: T(
+          'Move to a practice directory that holds files with a spread of permissions, and list it in long format:',
+          '',
+          '```',
+          'cd /usr/share/kalima/perms',
+          'ls -l',
+          '```',
+          '',
+          'Skip the `total` line. Every other line describes one entry. Take `audit.log` and read it from left to right:',
+          '',
+          '- `-rw-r-----` is the type and the permissions',
+          '- `1` is the number of names the file has, which rarely matters',
+          '- `root` is the owner, a user',
+          '- `adm` is the group',
+          '- then come the size in bytes, the time of the last change, and the name',
+          '',
+          'The very first character is the type: `-` for an ordinary file, `d` for a directory.',
+          '',
+          'The commands in this lesson assume you stay in this directory.'
+        ),
+        hint: 'Run the two commands in order. The option is a lower-case L, for *long*.',
+        solution: 'cd /usr/share/kalima/perms; ls -l',
+        check: { cmd: 'ls', out: /-rw-r-----\s+\d+\s+root\s+adm\s.*audit\.log/, all: [{ out: /drwx--x--x\s.*lobby/ }, { out: /payroll\.csv/ }] },
+      },
+      {
+        id: 'types',
+        prompt: 'Look at the first character of each line in that listing. How many of the six entries are directories?',
+        hint: 'Count the lines that begin with `d`.',
+        solution: '2',
+        answer: /^(2|two)(\s+(directories|entries))?\.?$/i,
+      },
+      {
+        id: 'classes',
+        prompt: T(
+          'After the type come nine characters, in three groups of three. The first group is for the **owner**, the second for members of the file\'s **group**, and the third for everyone else, called **other**.',
+          '',
+          'In each group the positions mean `r` read, `w` write and `x` execute, always in that order. A `-` means that permission is not granted. So for `audit.log`, `rw-` lets the owner `root` read and write, `r--` lets members of `adm` read, and `---` gives everyone else nothing.',
+          '',
+          'Now read `handbook.txt` the same way. Which one of the three classes may change its contents: owner, group or other?'
+        ),
+        hint: 'Find the `w` in `-rw-r--r--`. It appears in only one of the three groups.',
+        solution: 'owner',
+        answer: /^(the\s+)?(owner|user|root|u)\.?$/i,
+      },
+      {
+        id: 'group-read',
+        prompt: T(
+          'Which group of three applies to *you*? The system takes the first that fits. If you are the owner, the owner permissions apply. If not, and you are a member of the file\'s group, the group permissions apply. Otherwise the permissions for other apply.',
+          '',
+          'You are `kali`, not `root`, so the owner permissions of `audit.log` are not yours. But `kali` is a member of `adm`, so the group permissions `r--` apply, and reading should be allowed. Check the prediction:',
+          '',
+          '```',
+          'cat audit.log',
+          '```',
+          '',
+          'The file prints. Nothing about the file itself says `kali`. Membership of a group was enough.'
+        ),
+        hint: '`cat` followed by the file name. Run it as yourself, without `sudo`.',
+        solution: 'cat audit.log',
+        check: { cmd: READERS, user: 'kali', out: /gate opened by badge 0417/, exit: 0 },
+      },
+      {
+        id: 'denied',
+        prompt: T(
+          'Now a file where no class helps you. `payroll.csv` shows `-rw-------`, with owner `root` and group `root`. You are not the owner and not in that group, so the last three characters apply to you: `---`. Predict what happens, then try:',
+          '',
+          '```',
+          'cat payroll.csv',
+          '```',
+          '',
+          '`Permission denied` is not a malfunction. It is the system doing its job, and it tells you something: the file is there, and your account is not meant to read it.'
+        ),
+        hint: 'Run it as shown and read the error message. The step completes when the refusal appears.',
+        solution: 'cat payroll.csv',
+        check: { user: 'kali', out: /payroll\.csv.*Permission denied/ },
+      },
+      {
+        id: 'octal',
+        prompt: T(
+          'Permissions are often written as three digits instead of nine letters. Each permission has a value: `r` is 4, `w` is 2 and `x` is 1. Add up the values in each group of three and you get one digit for the owner, one for the group and one for other.',
+          '',
+          'For `audit.log`: `rw-` is 4+2 = 6, `r--` is 4, and `---` is 0, so the mode is `640`.',
+          '',
+          '`backup.sh` shows `rwxr-xr-x`. What is that as three digits?'
+        ),
+        hint: '`rwx` is 4+2+1. `r-x` is 4+1.',
+        solution: '755',
+        answer: /^0?755$/,
+      },
+      {
+        id: 'stat',
+        prompt: T(
+          '`stat` prints everything the system records about a file, including the mode in both forms:',
+          '',
+          '```',
+          'stat audit.log',
+          '```',
+          '',
+          'Find the line that starts with `Access: (`. It reads `0640/-rw-r-----`, the digits and the letters side by side, followed by the owner as `Uid:` and the group as `Gid:`, each with its number and its name. The extra `0` in front of `640` is a fourth digit for special permissions, which you will meet in a later lesson.'
+        ),
+        hint: '`stat` followed by the file name.',
+        solution: 'stat audit.log',
+        check: { cmd: 'stat', out: /Access: \(0640\/-rw-r-----\)\s+Uid: \(\s*0\/\s*root\)\s+Gid: \(\s*4\/\s*adm\)/ },
+      },
+      {
+        id: 'shadow',
+        prompt: T(
+          'Apply this to a real system file. `/etc/shadow` holds the password hashes of every account on the machine, so its permissions matter.',
+          '',
+          'Run `stat` on `/etc/shadow` and read the `Access:` line. Apart from the owner, which group is allowed to read the file?'
+        ),
+        hint: '`stat /etc/shadow`. The group is the name inside the brackets after `Gid:`.',
+        solution: 'shadow',
+        answer: /^(the\s+)?(group\s+)?shadow(\s+group)?\.?$/i,
+      },
+      {
+        id: 'dir',
+        prompt: T(
+          'Directories have the same nine characters, but they mean something a little different, because a directory is a list of names:',
+          '',
+          '- `r` lets you list the names in it',
+          '- `w` lets you create, delete and rename entries in it',
+          '- `x` lets you enter it and reach the things inside',
+          '',
+          'When you name a directory, `ls -l` lists what is inside it. To see the line for the directory itself, add `-d`:',
+          '',
+          '```',
+          'ls -ld lobby archive',
+          '```',
+          '',
+          'Compare the two. For other, `archive` grants nothing at all, while `lobby` grants `x` without `r`.'
+        ),
+        hint: 'Add `d` to the options: `ls -ld` followed by the two directory names.',
+        solution: 'ls -ld lobby archive',
+        check: { cmd: 'ls', args: ['-d'], out: /drwx--x--x\s.*lobby/, all: [{ out: /drwx------\s.*archive/ }] },
+      },
+      {
+        id: 'through',
+        prompt: T(
+          'What can you do with `x` but not `r` on a directory? You cannot list it: `ls lobby` is refused, and you may try it to see. But `x` lets you pass *through* the directory to a name you already know.',
+          '',
+          'The directory `lobby` contains a file called `welcome.txt`. Print it.'
+        ),
+        hint: 'Give `cat` the path through the directory: `lobby/welcome.txt`. No `sudo` is needed.',
+        solution: 'cat lobby/welcome.txt',
+        check: { cmd: READERS, user: 'kali', out: /Welcome to the depot office share/, exit: 0 },
+      },
+    ],
+    quiz: [
+      {
+        q: 'The directory `archive` shows `drwx------ root root`. Inside it is `rota-2025.csv` with mode `-rw-r--r--`. What happens when `kali` runs `cat archive/rota-2025.csv`?',
+        choices: [
+          'The file prints, because its own mode lets everyone read it',
+          'Permission denied, because without `x` on the directory nothing inside it can be reached',
+          'No such file or directory',
+          'It prints nothing and reports success',
+        ],
+        answer: 1,
+        why: 'To open a file you need `x` on every directory along its path. The file\'s own permissions are only considered once you can get to it.',
+      },
+      {
+        q: 'A file has mode `640`, owner `root` and group `adm`. The user `maya` is a member of `adm`. What may she do with the file?',
+        choices: ['Nothing', 'Read it, but not change it', 'Read it and change it', 'Read it, change it and run it'],
+        answer: 1,
+        why: 'She is not the owner but is in the group, so the middle digit applies. 4 is read only.',
+      },
+      {
+        q: 'Which octal mode is the same as `rw-rw-r--`?',
+        choices: ['`644`', '`664`', '`662`', '`774`'],
+        answer: 1,
+        why: '`rw-` is 4+2 = 6 for the owner and again for the group, and `r--` is 4 for other.',
+      },
+      {
+        q: 'A file belongs to user `kali` and group `kali` and shows `----rw----`. Can `kali` read it?',
+        choices: [
+          'Yes, through the group permissions',
+          'Yes, an owner can always read their own files',
+          'No: `kali` is the owner, so only the owner permissions `---` are used',
+          'Only after logging out and in again',
+        ],
+        answer: 2,
+        why: 'The system uses the first class that fits and looks no further. The owner could change the mode to get access back, but as it stands the read is refused.',
+      },
+    ],
+    refs: ['ls(1)', 'stat(1)', 'path_resolution(7)', 'The Linux Command Line (W. Shotts), ch. 9'],
+  };
+
   K.lessons.register({
     id: 'perms',
     title: 'Users, permissions and privilege',
     order: 30,
     summary: 'Know who you are on the system, read and set file permissions with confidence, and use root privilege only for the commands that need it.',
-    lessons: [usersLesson],
+    lessons: [usersLesson, readLesson],
   });
 
   void WORK; void statOf;
