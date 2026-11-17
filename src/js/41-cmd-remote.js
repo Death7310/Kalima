@@ -449,7 +449,8 @@
 
   /**
    * What ssh, scp and ssh-copy-id share: resolve, connect, check the host key, authenticate.
-   * spec: see sshTarget, plus { verbose }. Returns the login { target, ip, machine, account, close() },
+   * spec: see sshTarget, plus { verbose, beforeAuth(machine, account) } - beforeAuth runs once the server is
+   * trusted and may return false to hang up. Returns the login { target, ip, rtt, machine, account, close() },
    * or null after printing why it failed (the caller exits 255).
    */
   async function sshLogin(ctx, spec) {
@@ -491,6 +492,7 @@
     const side = sshdSide(session);
     const account = side.machine && side.machine.userByName(target.user);
     if (side.machine && !account) side.log('Invalid user ' + target.user + ' from ' + side.from);
+    if (spec.beforeAuth && !spec.beforeAuth(side.machine, account)) { session.close(); return null; }
     const offered = (conf.preferredauthentications || 'publickey,password').split(',');
     const allowed = (name, keyword) => offered.includes(name) && !/^no$/i.test(conf[keyword] || '');
     debug('Authentications that can continue: publickey,password');
@@ -536,7 +538,7 @@
     side.log('Accepted ' + method + ' for ' + target.user + ' from ' + side.from + ' ssh2' + detail);
     side.log('pam_unix(sshd:session): session opened for user ' + target.user + '(uid=' + account.uid + ') by ' + target.user + '(uid=0)');
     const login = {
-      target, ip: res.ip, client: session.client, machine: side.machine, account, procs: [],
+      target, ip: res.ip, client: session.client, rtt: session.rtt, machine: side.machine, account, procs: [],
       close() {
         for (const p of login.procs) side.machine.reap(p.pid);
         side.log('Received disconnect from ' + side.from + ':11: disconnected by user');
@@ -959,6 +961,317 @@
       const path = await keygenInput(ctx, o);
       if (path == null) return 1;
       return o.l ? keygenFingerprints(ctx, o, alg, path) : keygenPublic(ctx, path);
+    },
+  });
+
+  /* ==================================================================== scp */
+
+  const SCP_USAGE = 'usage: scp [-346ABCOpqRrsTv] [-c cipher] [-D sftp_server_path] [-F ssh_config]\n' +
+    '           [-i identity_file] [-J destination] [-l limit] [-o ssh_option]\n           [-P port] [-S program] [-X sftp_option] source ... target\n';
+  // Bytes per millisecond on the lab's switch once a transfer is under way.
+  const LAN_THROUGHPUT = 60000;
+  const SIZE_UNITS = ' KMGT';
+
+  /** progressmeter.c's format_size: four digits and a unit. */
+  function meterSize(bytes) {
+    let i = 0;
+    for (; bytes >= 10000 && SIZE_UNITS[i] !== 'T'; i++) bytes = Math.floor((bytes + 512) / 1024);
+    return String(bytes).padStart(4) + SIZE_UNITS[i] + (i ? 'B' : ' ');
+  }
+  /** progressmeter.c's format_rate: one decimal, never less than kilobytes. */
+  function meterRate(bytesPerSecond) {
+    let n = Math.floor(bytesPerSecond) * 100; let i = 0;
+    for (; n >= 100000 && SIZE_UNITS[i] !== 'T'; i++) n = Math.floor((n + 512) / 1024);
+    if (i === 0) { i = 1; n = Math.floor((n + 512) / 1024); }
+    return String(Math.floor((n + 5) / 100)).padStart(3) + '.' + (Math.floor((n + 5) / 10) % 10) + SIZE_UNITS[i] + 'B';
+  }
+  /** The line scp leaves behind for a finished file. */
+  function meterLine(name, bytes, ms, cols) {
+    const width = Math.max(0, cols - 36);
+    const seconds = Math.floor(ms / 1000);
+    const line = U.padEnd(name.slice(0, width), width) + ' 100% ' + meterSize(bytes) + ' ' + meterRate(bytes / (ms / 1000)) + '/s   ' +
+      U.pad2(Math.floor(seconds / 60)) + ':' + U.pad2(seconds % 60) + '    ';
+    return '\r' + line.slice(0, cols - 1) + '\n';
+  }
+
+  /** "[user@]host:path" -> { user, host, path }; null for a local name (a colon after a slash belongs to the file name). */
+  function parseRemoteSpec(arg) {
+    const m = /^(?:([^@/:]+)@)?([^@/:]+):(.*)$/.exec(arg);
+    return m ? { user: m[1], host: m[2], path: m[3] } : null;
+  }
+
+  /** The remote account's view of its machine's files, starting in its home directory as an SFTP session does. */
+  const remoteFs = (login, umask) => new K.FsView(login.machine.vfs, login.account.home, login.machine.credFor(login.account.name), umask);
+  /** A path as the SFTP server resolves it: relative to the home directory, with a leading ~ meaning the same place. */
+  const remotePath = (rfs, path) => rfs.abs(path.replace(/^~(?=\/|$)\/?/, '') || '.');
+  /** SFTP has only a few status codes, so its error texts are coarser than strerror. */
+  const sftpStatus = (e) => (e.code === 'ENOENT' ? 'No such file' : e.code === 'EACCES' || e.code === 'EPERM' ? 'Permission denied' : 'Failure');
+  const trimSlashes = (p) => p.replace(/(.)\/+$/, '$1');
+
+  /** Remote paths matching a pattern whose last component may hold wildcards. */
+  function remoteGlob(rfs, path) {
+    const dir = K.VFS.dirname(path); const base = K.VFS.basename(path);
+    if (!/[*?[]/.test(base)) return rfs.exists(path) ? [path] : [];
+    const re = U.globToRe(base);
+    let names = [];
+    try { names = rfs.readdir(dir); } catch (e) { /* an unreadable directory matches nothing */ }
+    return names.filter((n) => re.test(n) && (n[0] !== '.' || base[0] === '.')).map((n) => (dir === '/' ? '' : dir) + '/' + n);
+  }
+
+  // What scp says when a step of a transfer fails; remote failures carry SFTP's status text.
+  const SCP_COMPLAINTS = {
+    upload: {
+      read: (src, dst, e) => 'open local "' + src + '": ' + e.message,
+      write: (src, dst, e) => 'dest open "' + dst + '": ' + sftpStatus(e),
+      mkdir: (src, dst, e) => 'remote mkdir "' + dst + '": ' + sftpStatus(e),
+    },
+    download: {
+      read: (src, dst, e) => 'remote open "' + src + '": ' + sftpStatus(e),
+      write: (src, dst, e) => 'open local "' + dst + '": ' + e.message,
+      mkdir: (src, dst, e) => 'mkdir ' + dst + ': ' + e.message,
+    },
+  };
+
+  /** Copy one regular file from job.from to job.to. */
+  async function scpFile(job, src, dst) {
+    const ctx = job.ctx;
+    let st; let data;
+    try { st = job.from.stat(src); data = job.from.read(src); } catch (e) { return job.complain(job.wording.read(src, dst, e)); }
+    try {
+      job.to.write(dst, data, { mode: st.mode & 0o777 });
+      if (job.preserve) { job.to.chmod(dst, st.mode & 0o7777); job.to.utimes(dst, st.mtime); }
+    } catch (e) { return job.complain(job.wording.write(src, dst, e)); }
+    const bytes = U.byteLen(data);
+    const ms = 2 * job.rtt + bytes / LAN_THROUGHPUT;
+    await ctx.sleep(ms);
+    if (job.meter) ctx.out(meterLine(K.VFS.basename(src), bytes, ms, ctx.cols));
+  }
+
+  /** Copy a directory and everything below it. */
+  async function scpTree(job, src, dst) {
+    let st; let names;
+    try { st = job.from.stat(src); names = job.from.readdir(src); } catch (e) { return job.complain(job.wording.read(src, dst, e)); }
+    try { if (!job.to.isDir(dst)) job.to.mkdir(dst, { mode: (st.mode & 0o777) | 0o700 }); } catch (e) { return job.complain(job.wording.mkdir(src, dst, e)); }
+    for (const name of names) {
+      const from = src + '/' + name; const to = dst + '/' + name;
+      if (job.from.isDir(from)) await scpTree(job, from, to); else await scpFile(job, from, to);
+    }
+    if (job.preserve) job.to.utimes(dst, st.mtime);
+  }
+
+  /** Log in for a transfer. A failed login ends scp the way a dead ssh child does. */
+  async function scpLogin(job, spec) {
+    const login = await sshLogin(job.ctx, Object.assign({ host: spec.host, user: spec.user }, job.ssh));
+    if (!login) job.ctx.err('scp: Connection closed\n');
+    else job.rtt = login.rtt;
+    return login;
+  }
+
+  /** Local files to one remote place. Returns an exit status when scp has to stop early. */
+  async function scpUpload(job, sources, spec) {
+    const ctx = job.ctx;
+    const login = await scpLogin(job, spec);
+    if (!login) return 255;
+    try {
+      const rfs = remoteFs(login, 0o022);
+      Object.assign(job, { from: ctx.fs, to: rfs, wording: SCP_COMPLAINTS.upload });
+      const target = remotePath(rfs, spec.path);
+      let intoDir = rfs.isDir(target);
+      if (sources.length > 1 && !intoDir) {
+        try { rfs.mkdir(target); } catch (e) { ctx.err('scp: remote mkdir "' + target + '": ' + sftpStatus(e) + '\n'); return 255; }
+        intoDir = true;
+      }
+      for (const src of sources) {
+        let st;
+        try { st = ctx.fs.stat(src); } catch (e) { ctx.err('scp: stat local "' + src + '": ' + e.message + '\n'); return 255; }
+        const dst = intoDir ? trimSlashes(target) + '/' + K.VFS.basename(trimSlashes(src)) : target;
+        const before = job.errs;
+        const wholeDir = st.isDir && job.recursive;
+        if (wholeDir) await scpTree(job, trimSlashes(src), dst);
+        else if (st.isDir) job.complain('local "' + src + '" is not a regular file');
+        else await scpFile(job, src, dst);
+        if (job.errs > before) ctx.err('scp: failed to upload ' + (wholeDir ? 'directory' : 'file') + ' ' + src + ' to ' + (spec.path || '.') + '\n');
+      }
+    } finally { login.close(); }
+    return null;
+  }
+
+  /** One remote source (which may be a pattern) to a local place. */
+  async function scpDownload(job, spec, target) {
+    const ctx = job.ctx;
+    const login = await scpLogin(job, spec);
+    if (!login) return 255;
+    try {
+      const rfs = remoteFs(login, 0o022);
+      Object.assign(job, { from: rfs, to: ctx.fs, wording: SCP_COMPLAINTS.download });
+      const matches = remoteGlob(rfs, remotePath(rfs, spec.path));
+      if (!matches.length) return job.complain((spec.path || '.') + ': No such file or directory');
+      let intoDir = ctx.fs.isDir(target);
+      if (matches.length > 1 && !intoDir) {
+        if (ctx.fs.exists(target)) return job.complain('Multiple files match pattern, but destination "' + target + '" is not a directory');
+        try { ctx.fs.mkdir(target); } catch (e) { return job.complain('local mkdir "' + target + '": ' + e.message); }
+        intoDir = true;
+      }
+      for (const src of matches) {
+        const dst = intoDir ? trimSlashes(target) + '/' + K.VFS.basename(src) : target;
+        if (!rfs.isDir(src)) await scpFile(job, src, dst);
+        else if (job.recursive) await scpTree(job, src, dst);
+        else job.complain('download ' + src + '/: not a regular file');
+      }
+    } finally { login.close(); }
+    return null;
+  }
+
+  K.cmd.register({
+    name: 'scp', pkg: 'openssh-client', section: 1,
+    summary: 'OpenSSH secure file copy',
+    synopsis: 'scp [-pqrv] [-F ssh_config] [-i identity_file] [-o ssh_option] [-P port] source ... target',
+    man: 'DESCRIPTION\n       scp copies files between hosts on a network. It uses ssh(1) for the connection, so it asks the same host key question, uses the same keys and passwords, and gives the same protection as a login session.\n\n' +
+      '       The source and target may be specified as a local pathname or as a remote host with optional path in the form [user@]host:[path]. A remote path that is not absolute starts in the home directory of the remote account. Local file names containing a colon can be made explicit with an absolute pathname or a leading ./ to keep scp from treating them as host specifiers.\n\n' +
+      'OPTIONS\n       -F ssh_config\n              Specifies an alternative per-user configuration file for ssh.\n       -i identity_file\n              Selects the file from which the identity (private key) for public key authentication is read.\n' +
+      '       -o ssh_option\n              Can be used to pass options to ssh in the format used in ssh_config(5).\n       -P port\n              Specifies the port to connect to on the remote host. Note that this option is written with a capital P.\n' +
+      '       -p     Preserves modification times and file mode bits from the source file.\n       -q     Quiet mode: disables the progress meter as well as warning and diagnostic messages from ssh(1).\n       -r     Recursively copy entire directories.\n       -v     Verbose mode. Causes scp and ssh(1) to print debugging messages about their progress.\n\n' +
+      'EXIT STATUS\n       The scp utility exits 0 on success, and >0 if an error occurs.\n\n' +
+      'EXAMPLES\n       scp notes.txt student@web01.halcyon.lab:\n              Copy a local file to the home directory of student on web01.\n       scp student@web01.halcyon.lab:/etc/hostname .\n              Fetch a file from web01 into the current directory.\n       scp -r student@files01.halcyon.lab:reports ./reports\n              Copy a whole directory.',
+    async run(ctx) {
+      const g = bsdGetopt(ctx.args, '346ABCOpqRrsTvc:D:F:i:J:l:o:P:S:X:');
+      if (g.err || g.rest.length < 2) { ctx.err((g.err ? g.err + '\n' : '') + SCP_USAGE); return 1; }
+      const o = g.opts;
+      if (o.P != null && !(/^\d+$/.test(o.P) && +o.P > 0 && +o.P < 65536)) { ctx.err('scp: bad port "' + o.P + '"\n'); return 255; }
+      const cli = cliOptions(g.all.o || []);
+      if (cli.err) { ctx.err(cli.err + '\nscp: Connection closed\n'); return 255; }
+      const job = {
+        ctx, errs: 0, recursive: !!o.r, preserve: !!o.p, meter: ctx.isTTY && !o.q,
+        ssh: { port: o.P, identities: g.all.i || [], options: cli.conf, configFile: o.F, verbose: !!o.v },
+        complain(msg) { ctx.err('scp: ' + msg + '\n'); job.errs++; },
+      };
+      const sources = g.rest.slice(0, -1); const target = g.rest[g.rest.length - 1];
+      const remoteTarget = parseRemoteSpec(target);
+      if (remoteTarget && sources.some(parseRemoteSpec)) { ctx.err('scp: copies between two remote hosts are not part of this simulator\n'); return 1; }
+      if (remoteTarget) {
+        const stopped = await scpUpload(job, sources, remoteTarget);
+        if (stopped != null) return stopped;
+      }
+      for (const src of remoteTarget ? [] : sources) {
+        const from = parseRemoteSpec(src);
+        if (from) {
+          const stopped = await scpDownload(job, from, target);
+          if (stopped != null) return stopped;
+        } else {
+          // Two local names: scp hands the job to cp.
+          const r = await ctx.run(['cp'].concat(o.r ? ['-r'] : [], o.p ? ['-p'] : [], ['--', src, target]));
+          ctx.out(r.out); ctx.err(r.err);
+          if (r.code) job.errs++;
+        }
+      }
+      return job.errs ? 1 : 0;
+    },
+  });
+
+  /* ============================================================ ssh-copy-id */
+
+  const COPY_ID = '/usr/bin/ssh-copy-id';
+  const COPY_ID_USAGE = 'Usage: ' + COPY_ID + ' [-h|-?|-f|-n|-s|-x] [-i [identity_file]] [-t target_path] [-F ssh_config] [[-o ssh_option] ...] [-p port] user@hostname\n' +
+    '\t-f: force mode -- copy keys without trying to check if they are already installed\n\t-n: dry run    -- no keys are actually copied\n' +
+    '\t-s: use sftp   -- use sftp instead of executing remote-commands. Can be useful if the remote only allows sftp\n\t-x: debug      -- enables -x in this shell, for debugging\n\t-h|-?: print this help\n';
+
+  /** ssh-copy-id's own argument walk: -i may stand alone, and options may come after the host. { opt } or null for the usage text. */
+  function copyIdArgs(args) {
+    const opt = { o: [], hosts: [] };
+    for (let i = 0; i < args.length; i++) {
+      const m = /^-([fnsxiotpF])(.*)$/.exec(args[i]);
+      if (!m) {
+        if (/^-/.test(args[i])) return null;
+        opt.hosts.push(args[i]);
+      } else if ('fnsx'.includes(m[1])) {
+        if (m[2]) return null;
+        opt[m[1]] = true;
+      } else if (m[1] === 'i') {
+        // the file name is optional: a last argument must be the host
+        opt.i = m[2] || (i + 2 < args.length && !/^-/.test(args[i + 1]) ? args[++i] : '');
+      } else {
+        const value = m[2] || args[++i];
+        if (value == null) return null;
+        if (m[1] === 'o') opt.o.push(value); else opt[m[1]] = value;
+      }
+    }
+    return opt.hosts.length === 1 ? opt : null;
+  }
+
+  /** The newest public key in ~/.ssh, which is what ssh-copy-id installs when no -i names one. */
+  function newestPublicKey(ctx) {
+    const dir = ctx.user.home + '/.ssh';
+    let names = [];
+    try { names = ctx.fs.readdir(dir); } catch (e) { /* no ~/.ssh, no keys */ }
+    const files = names.filter((n) => /^id.*\.pub$/.test(n) && !/-cert\.pub$/.test(n)).map((n) => dir + '/' + n);
+    return files.sort((a, b) => ctx.fs.stat(b).mtime - ctx.fs.stat(a).mtime)[0] || null;
+  }
+
+  K.cmd.register({
+    name: 'ssh-copy-id', pkg: 'openssh-client', section: 1,
+    summary: "use locally available keys to authorise logins on a remote machine",
+    synopsis: 'ssh-copy-id [-f] [-n] [-i [identity_file]] [-p port] [-F ssh_config] [-o ssh_option] [-t target_path] [user@]hostname',
+    man: "DESCRIPTION\n       ssh-copy-id is a script that uses ssh(1) to log into a remote machine (presumably using a login password, so password authentication should be enabled). It assembles a list of one or more fingerprints (as described below) and tries to log in with each key, to see if any of them are already installed. It then assembles a list of those that failed to log in and, using ssh, enables logins with those keys on the remote server by appending them to the remote user's ~/.ssh/authorized_keys (creating the file, and directory, if necessary).\n\n" +
+      'OPTIONS\n       -i [identity_file]\n              Use only the key(s) contained in identity_file. If the filename does not end in .pub this is added. If the filename is omitted, the default_ID_file is used: the most recent file that matches ~/.ssh/id*.pub.\n' +
+      '       -f     Forced mode: doesn\'t check if the keys are present on the remote server.\n       -n     Do a dry-run. Instead of installing keys on the remote system simply prints the key(s) that would have been installed.\n' +
+      '       -p port\n              Connect to this port on the remote host.\n       -F ssh_config, -o ssh_option\n              These options are simply passed through untouched to ssh.\n       -t target_path\n              The path on the target system where the keys should be added (defaults to ".ssh/authorized_keys").\n       -h, -?\n              Print usage summary.\n\n' +
+      'EXAMPLES\n       ssh-copy-id student@web01.halcyon.lab\n              Install your newest public key for student on web01; the next ssh login needs no password.\n       ssh-copy-id -i ~/.ssh/lab_rsa.pub student@db01.halcyon.lab\n              Install one particular key.',
+    async run(ctx) {
+      const opt = copyIdArgs(ctx.args);
+      if (!opt) { ctx.err(COPY_ID_USAGE); return 1; }
+      const note = (level, msg) => ctx.err(COPY_ID + ': ' + level + ': ' + msg + '\n');
+      let pubFile = opt.i ? (/\.pub$/.test(opt.i) ? opt.i : opt.i + '.pub') : newestPublicKey(ctx);
+      if (!pubFile) { note('ERROR', 'No identities found'); return 1; }
+      const privFile = pubFile.replace(/\.pub$/, '');
+      let text;
+      try {
+        text = ctx.fs.read(pubFile);
+        if (!opt.f) ctx.fs.read(privFile);
+      } catch (e) {
+        const missing = text == null ? pubFile : privFile;
+        ctx.out('\n' + COPY_ID + ": ERROR: failed to open ID file '" + missing + "': " + (e.code === 'ENOENT' ? 'No such file' : e.message) +
+          (text == null ? '' : "\n\t(to install the contents of '" + pubFile + "' anyway, look at the -f option)") + '\n');
+        return 1;
+      }
+      const keys = text.split('\n').filter((line) => parsePublicLine(line));
+      note('INFO', 'Source of key(s) to be installed: "' + pubFile + '"');
+
+      const dest = parseDestination(opt.hosts[0]);
+      const cli = cliOptions(opt.o);
+      if (cli.err) { note('ERROR', cli.err); return 1; }
+      let fresh = keys;
+      // Failures of the ssh that ssh-copy-id runs for the check come back with its own prefix.
+      const relay = Object.assign(Object.create(ctx), { err: (s) => ctx.err(s.replace(/^(?=ssh: )/gm, COPY_ID + ': ERROR: ')) });
+      const login = await sshLogin(relay, {
+        host: dest.host, user: dest.user, port: opt.p, identities: opt.i ? [privFile] : [], options: cli.conf, configFile: opt.F,
+        beforeAuth(machine, account) {
+          if (opt.f) return true;
+          note('INFO', 'attempting to log in with the new key(s), to filter out any that are already installed');
+          const installed = account ? authorizedBlobs(machine, account) : [];
+          fresh = keys.filter((line) => !installed.includes(parsePublicLine(line).blob));
+          if (fresh.length && !opt.n) note('INFO', fresh.length + ' key(s) remain to be installed -- if you are prompted now it is to install the new keys');
+          return fresh.length > 0 && !opt.n;
+        },
+      });
+      if (!fresh.length) {
+        ctx.err('\n' + COPY_ID + ': WARNING: All keys were skipped because they already exist on the remote system.\n\t\t(if you think this is a mistake, you may want to use -f option)\n\n');
+        return 0;
+      }
+      if (opt.n) { ctx.out('=-=-=-=-=-=-=-=\nWould have added the following key(s):\n\n' + fresh.join('\n') + '\n=-=-=-=-=-=-=-=\n'); return 0; }
+      if (!login) return 1;
+      const targetPath = opt.t || '.ssh/authorized_keys';
+      try {
+        const rfs = remoteFs(login, 0o077); // the remote half runs under "umask 077"
+        if (!opt.t && !rfs.exists('.ssh')) rfs.mkdir('.ssh');
+        const unfinished = rfs.exists(targetPath) && /[^\n]$/.test(rfs.read(targetPath));
+        rfs.append(targetPath, (unfinished ? '\n' : '') + fresh.join('\n') + '\n');
+      } catch (e) {
+        ctx.err('sh: 1: cannot create ' + targetPath + ': ' + e.message + '\n');
+        return 1;
+      } finally { login.close(); }
+      const how = (opt.i ? ' -i ' + privFile : '') + (opt.p ? " -p '" + opt.p + "'" : '');
+      ctx.out('\nNumber of key(s) added: ' + fresh.length + '\n\nNow try logging into the machine, with: "ssh' + how + " '" + opt.hosts[0] + "'\"\nand check to make sure that only the key(s) you wanted were added.\n\n");
+      return 0;
     },
   });
 

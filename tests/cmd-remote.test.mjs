@@ -492,3 +492,137 @@ test('ssh-keygen: known_hosts fingerprints and -R', async () => {
   r = await sim.run('ssh-keygen -R web01 -f /tmp/none');
   assert.deepEqual([r.code, r.err], [255, 'Cannot stat /tmp/none: No such file or directory\n']);
 });
+
+test('scp: local to remote and back, with the progress line on a terminal', async () => {
+  const sim = await boot();
+  await trustWeb01(sim);
+  await sim.run('echo hello lab > notes.txt; mkdir -p proj/sub; echo one > proj/a.txt; echo two > proj/sub/b.txt; chmod 640 proj/a.txt');
+  let r = await withInput(sim, `scp notes.txt ${WEB01}:`, ['student'], { tty: true });
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^\rnotes\.txt {35} 100% {3}10 {3}[ \d]{3}\.\dKB\/s {3}00:00 {4}\n$/, 'the layout of progressmeter.c at 80 columns');
+  assert.equal(r.screen, "student@web01.halcyon.lab's password: \n");
+  const web01 = sim.K.net.machines.web01;
+  assert.equal(web01.vfs.read('/home/student/notes.txt'), 'hello lab\n');
+  assert.equal(web01.vfs.stat('/home/student/notes.txt').uid, 1001, 'owned by the account that logged in');
+
+  r = await withInput(sim, `scp ${WEB01}:/etc/hostname copy.txt`, ['student']);
+  assert.deepEqual([r.code, r.output], [0, ''], 'no progress line when stdout is not a terminal');
+  assert.equal((await sim.run('cat copy.txt')).out, 'web01\n');
+  r = await withInput(sim, `scp -q ${WEB01}:notes.txt ${WEB01}:/etc/hostname /tmp`, ['student', 'student'], { tty: true });
+  assert.deepEqual([r.code, r.output], [0, ''], '-q hides the meter');
+  assert.equal((await sim.run('cat /tmp/notes.txt /tmp/hostname')).out, 'hello lab\nweb01\n');
+
+  // -r copies trees, -p keeps mode and time
+  r = await withInput(sim, `scp -rp proj ${WEB01}:work`, ['student'], { tty: true });
+  assert.match(r.out, /^\ra\.txt .* 100% .*\n\rb\.txt .* 100% .*\n$/);
+  assert.equal(web01.vfs.read('/home/student/work/sub/b.txt'), 'two\n');
+  assert.equal(web01.vfs.stat('/home/student/work/a.txt').mode & 0o777, 0o640);
+  assert.equal(web01.vfs.stat('/home/student/work/a.txt').mtime, sim.machine.vfs.stat('/home/kali/proj/a.txt').mtime);
+  r = await withInput(sim, `scp -r ${WEB01}:work /tmp/back`, ['student']);
+  assert.equal((await sim.run('cat /tmp/back/a.txt /tmp/back/sub/b.txt')).out, 'one\ntwo\n');
+  r = await withInput(sim, `scp '${WEB01}:/etc/host*' /tmp/`, ['student'], { tty: true });
+  assert.match(r.out, /^\rhostname .*\n\rhosts .*\n$/);
+
+  // two local names: plain cp
+  r = await sim.run('scp notes.txt /tmp/n2 && cat /tmp/n2');
+  assert.equal(r.out, 'hello lab\n');
+});
+
+test('scp: error messages and exit codes', async () => {
+  const sim = await boot();
+  await trustWeb01(sim);
+  await sim.run('echo x > f.txt');
+  const fail = async (line, code, text, input = ['student']) => {
+    const r = await withInput(sim, line, input);
+    assert.equal(r.err, text + '\n', line);
+    assert.equal(r.code, code, line);
+  };
+  await fail(`scp nofile ${WEB01}:`, 255, 'scp: stat local "nofile": No such file or directory');
+  await fail(`scp ${WEB01}:nofile .`, 1, 'scp: nofile: No such file or directory');
+  await fail(`scp ${WEB01}:/etc/shadow .`, 1, 'scp: remote open "/etc/shadow": Permission denied');
+  await fail(`scp ${WEB01}:/etc/ssh .`, 1, 'scp: download /etc/ssh/: not a regular file');
+  await fail(`scp ${WEB01}:/etc/hostname /nodir/x`, 1, 'scp: open local "/nodir/x": No such file or directory');
+  await fail(`scp f.txt ${WEB01}:/etc/f.txt`, 1, 'scp: dest open "/etc/f.txt": Permission denied\nscp: failed to upload file f.txt to /etc/f.txt');
+  await fail(`scp f.txt ${WEB01}:nodir/f.txt`, 1, 'scp: dest open "/home/student/nodir/f.txt": No such file\nscp: failed to upload file f.txt to nodir/f.txt');
+  await fail(`scp /etc ${WEB01}:`, 1, 'scp: local "/etc" is not a regular file\nscp: failed to upload file /etc to .');
+  await fail('scp f.txt nohost.halcyon.lab:', 255, 'ssh: Could not resolve hostname nohost.halcyon.lab: Name or service not known\nscp: Connection closed', []);
+  await fail(`scp -P 2222 f.txt ${WEB01}:`, 255, 'ssh: connect to host web01.halcyon.lab port 2222: Connection refused\nscp: Connection closed', []);
+  await fail(`scp f.txt ${WEB01}:`, 255, 'Permission denied, please try again.\nPermission denied, please try again.\nstudent@web01.halcyon.lab: Permission denied (publickey,password).\nscp: Connection closed', ['a', 'b', 'c']);
+  await fail('scp -P http f.txt web01:', 255, 'scp: bad port "http"', []);
+  let r = await sim.run('scp f.txt');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^usage: scp \[-346ABCOpqRrsTv\] \[-c cipher\] \[-D sftp_server_path\] \[-F ssh_config\]\n/);
+  r = await sim.run('scp -Z a b');
+  assert.match(r.err, /^unknown option -- Z\nusage: scp /);
+  r = await sim.run('scp nofile /tmp/x');
+  assert.deepEqual([r.code, r.err], [1, "cp: cannot stat 'nofile': No such file or directory\n"]);
+});
+
+test('ssh-copy-id: installs the key, after which ssh and scp need no password', async () => {
+  const sim = await boot();
+  let r = await sim.run(`ssh-copy-id ${WEB01}`);
+  assert.deepEqual([r.code, r.err], [1, '/usr/bin/ssh-copy-id: ERROR: No identities found\n']);
+  await sim.run("ssh-keygen -q -N '' -f ~/.ssh/id_ed25519");
+  const pub = (await sim.run('cat ~/.ssh/id_ed25519.pub')).out;
+
+  r = await withInput(sim, `ssh-copy-id ${WEB01}`, ['yes', 'student']);
+  assert.equal(r.code, 0);
+  assert.equal(r.err, '/usr/bin/ssh-copy-id: INFO: Source of key(s) to be installed: "/home/kali/.ssh/id_ed25519.pub"\n' +
+    r.err.split('\n').slice(1, 5).join('\n') + '\n' +
+    '/usr/bin/ssh-copy-id: INFO: attempting to log in with the new key(s), to filter out any that are already installed\n' +
+    '/usr/bin/ssh-copy-id: INFO: 1 key(s) remain to be installed -- if you are prompted now it is to install the new keys\n');
+  assert.match(r.err.split('\n')[1], /^The authenticity of host 'web01\.halcyon\.lab \(10\.10\.10\.10\)' can't be established\.$/);
+  assert.equal(r.out, '\nNumber of key(s) added: 1\n\nNow try logging into the machine, with: "ssh \'student@web01.halcyon.lab\'"\nand check to make sure that only the key(s) you wanted were added.\n\n');
+  assert.match(r.screen, /student@web01\.halcyon\.lab's password: \n$/);
+  const web01 = sim.K.net.machines.web01;
+  assert.equal(web01.vfs.read('/home/student/.ssh/authorized_keys'), pub);
+  assert.equal(web01.vfs.stat('/home/student/.ssh').mode & 0o777, 0o700);
+  assert.equal(web01.vfs.stat('/home/student/.ssh/authorized_keys').mode & 0o777, 0o600);
+
+  // the key now opens the door: no password prompt
+  r = await withInput(sim, `ssh ${WEB01} whoami`, []);
+  assert.deepEqual([r.code, r.out, r.screen], [0, 'student\n', '']);
+  assert.match(web01.vfs.read('/var/log/auth.log'), /Accepted publickey for student from 10\.10\.10\.5 port \d+ ssh2: ED25519 SHA256:\S{43}\n/);
+  r = await withInput(sim, `scp ${WEB01}:/etc/hostname /tmp/h && cat /tmp/h`, []);
+  assert.deepEqual([r.code, r.out, r.screen], [0, 'web01\n', '']);
+  r = await sim.run(`ssh -v ${WEB01} true`);
+  assert.match(r.err, /debug1: Offering public key: \/home\/kali\/\.ssh\/id_ed25519 ED25519 SHA256:\S+\ndebug1: Server accepts key: \/home\/kali\/\.ssh\/id_ed25519 ED25519 SHA256:\S+\nAuthenticated to web01\.halcyon\.lab \(\[10\.10\.10\.10\]:22\) using "publickey"\.\n/);
+
+  // a second run has nothing to do
+  r = await sim.run(`ssh-copy-id ${WEB01}`);
+  assert.equal(r.code, 0);
+  assert.match(r.err, /filter out any that are already installed\n\n\/usr\/bin\/ssh-copy-id: WARNING: All keys were skipped because they already exist on the remote system\.\n\t\t\(if you think this is a mistake, you may want to use -f option\)\n\n$/);
+  assert.equal(web01.vfs.read('/home/student/.ssh/authorized_keys'), pub);
+
+  // a key with a passphrase asks for it instead of the password
+  await sim.run("ssh-keygen -q -t rsa -N 'open sesame' -f /tmp/lab_rsa");
+  r = await withInput(sim, `ssh-copy-id -n -i /tmp/lab_rsa ${WEB01}`, []);
+  assert.match(r.out, /^=-=-=-=-=-=-=-=\nWould have added the following key\(s\):\n\nssh-rsa \S+ kali@kali\n=-=-=-=-=-=-=-=\n$/);
+  r = await withInput(sim, `ssh-copy-id -i /tmp/lab_rsa.pub -p 22 ${WEB01}`, []);
+  assert.match(r.out, /Now try logging into the machine, with: "ssh -i \/tmp\/lab_rsa -p '22' 'student@web01\.halcyon\.lab'"\n/);
+  assert.equal(web01.vfs.read('/home/student/.ssh/authorized_keys').split('\n').length, 3);
+  await sim.run('mv ~/.ssh/id_ed25519 /tmp/aside');
+  r = await withInput(sim, `ssh -i /tmp/lab_rsa ${WEB01} hostname`, ['open sesame']);
+  assert.deepEqual([r.out, r.screen], ['web01\n', "Enter passphrase for key '/tmp/lab_rsa': \n"]);
+});
+
+test('ssh-copy-id: failures', async () => {
+  const sim = await boot();
+  await sim.run("ssh-keygen -q -N '' -f ~/.ssh/id_ed25519");
+  const source = '/usr/bin/ssh-copy-id: INFO: Source of key(s) to be installed: "/home/kali/.ssh/id_ed25519.pub"\n';
+  let r = await sim.run('ssh-copy-id student@nohost.halcyon.lab');
+  assert.deepEqual([r.code, r.err], [1, source + '/usr/bin/ssh-copy-id: ERROR: ssh: Could not resolve hostname nohost.halcyon.lab: Name or service not known\n']);
+  r = await sim.run('ssh-copy-id student@printer.halcyon.lab');
+  assert.deepEqual([r.code, r.err], [1, source + '/usr/bin/ssh-copy-id: ERROR: ssh: connect to host printer.halcyon.lab port 22: Connection refused\n']);
+  r = await sim.run('ssh-copy-id -i /tmp/nokey student@web01.halcyon.lab');
+  assert.deepEqual([r.code, r.out], [1, "\n/usr/bin/ssh-copy-id: ERROR: failed to open ID file '/tmp/nokey.pub': No such file\n"]);
+  r = await withInput(sim, `ssh-copy-id -o StrictHostKeyChecking=accept-new ${WEB01}`, ['x', 'y', 'z']);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /student@web01\.halcyon\.lab: Permission denied \(publickey,password\)\.\n$/);
+  assert.equal(sim.K.net.machines.web01.vfs.exists('/home/student/.ssh/authorized_keys'), false);
+  for (const line of ['ssh-copy-id', 'ssh-copy-id -h', 'ssh-copy-id -Z web01', 'ssh-copy-id a b']) {
+    r = await sim.run(line);
+    assert.equal(r.code, 1, line);
+    assert.match(r.err, /^Usage: \/usr\/bin\/ssh-copy-id \[-h\|-\?\|-f\|-n\|-s\|-x\] \[-i \[identity_file\]\] /, line);
+  }
+});
