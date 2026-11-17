@@ -426,13 +426,245 @@
     refs: ['cut(1)', 'sort(1)', 'uniq(1)', 'tr(1)', 'wc(1)', 'head(1)', 'The Linux Command Line (W. Shotts), ch. 6 and ch. 20'],
   };
 
+  /* ------------------------------------------------------------------- csv */
+  const DATA = '/usr/share/kalima/data';
+  const REVISED = DATA + '/shipments-revised.csv';
+
+  /* A second export of the consignment table, made "a week later", for the diff
+   * steps. It is derived from the content pack's shipments.csv so that the two
+   * files differ only in the four edits below: two status changes, one row
+   * removed and one row added. */
+  K.fsSeeds.push((machine) => {
+    if (machine.profile !== 'kali') return;
+    const vfs = machine.vfs;
+    let base; let mtime;
+    try { base = vfs.read(DATA + '/shipments.csv'); mtime = vfs.stat(DATA + '/shipments.csv').mtime; } catch (e) { return; }
+    const delivered = { 'HF-2026-10433': 1, 'HF-2026-10474': 1 };
+    const rows = [];
+    for (const row of base.split('\n')) {
+      if (!row) continue;
+      const f = row.split(',');
+      if (f[0] === 'HF-2026-10460') continue;
+      if (delivered[f[0]]) f[7] = 'delivered';
+      rows.push(f.join(','));
+    }
+    rows.push('HF-2026-10481,2026-10-31,Hull,Lincoln,1890,5,economy,in_transit,Albion Tool Hire');
+    vfs.seed(REVISED, rows.join('\n') + '\n', { mode: 0o644, uid: 0, gid: 0, mtime: mtime + 8 * 86400000 });
+  });
+
+  const csvLesson = {
+    id: 'text-csv',
+    title: 'Questioning a CSV file',
+    minutes: 10,
+    objectives: [
+      'Select columns of a comma-separated file with `cut` and rows with `grep`',
+      'Count rows by category and sort a table numerically on one column',
+      'Compare two versions of a file with `diff` and read what changed',
+    ],
+    intro: T(
+      'Inventories, exported records and the results of many tools arrive as CSV: a table in plain text, one row per line, with commas between the columns. You do not need a spreadsheet to question one. `cut` selects columns, `grep` selects rows, `sort` orders them and `diff` shows what changed between two versions.',
+      '',
+      'The table in this lesson lists sixty consignments shipped by Halcyon Freight, the fictional client of your lab engagement. You will work on a copy in your own practice directory, which is the right habit for any file you have been handed as a record.'
+    ),
+    steps: [
+      {
+        id: 'setup',
+        prompt: T(
+          'Make a working copy in your practice directory. The original stays untouched under `/usr/share/kalima`.',
+          '',
+          '```',
+          'mkdir -p ~/practice/text',
+          'cd ~/practice/text',
+          'cp /usr/share/kalima/data/shipments.csv .',
+          '```',
+          '',
+          '`mkdir -p` creates the directory if it is missing and does nothing if it is already there. The `.` at the end tells `cp` to copy into the current directory.',
+          '',
+          'The rest of this lesson assumes you stay in `~/practice/text`.'
+        ),
+        hint: 'Run the three commands in order. The step completes when you are in `~/practice/text` and the copy is there.',
+        solution: 'mkdir -p ~/practice/text && cd ~/practice/text && cp /usr/share/kalima/data/shipments.csv .',
+        check: { cwd: WORK, file: { path: WORK + '/shipments.csv', type: 'file', contains: /^id,date,origin,/ } },
+      },
+      {
+        id: 'header',
+        prompt: T(
+          'The first line of a CSV file is usually a header that names the columns. Print the first three lines:',
+          '',
+          '```',
+          'head -n 3 shipments.csv',
+          '```',
+          '',
+          'Line 1 is the header, and lines 2 and 3 are consignments. To work on a column you need its position, counted from 1: `id` is field 1, `date` is field 2, and so on.',
+          '',
+          'Which field number is `status`?'
+        ),
+        hint: 'Count the names in the header line from the left, starting at 1.',
+        solution: '8',
+        answer: /^(field\s*|column\s*)?(8|eight)\.?$/i,
+      },
+      {
+        id: 'columns',
+        prompt: T(
+          '`cut` selects columns. `-d ,` sets the separator to a comma, and `-f` lists the fields you want, here the id and the status:',
+          '',
+          '```',
+          'cut -d , -f 1,8 shipments.csv',
+          '```',
+          '',
+          'Every row is still there, 61 lines with the header, but each is reduced to two columns. A table this narrow is far easier to scan by eye.'
+        ),
+        hint: 'After `-f`, give the two field numbers separated by a comma, without spaces.',
+        solution: 'cut -d , -f 1,8 shipments.csv',
+        check: { fn: (ev) => { const l = linesOf(ev); return l.indexOf('HF-2026-10421,delivered') >= 0 && l.indexOf('HF-2026-10433,in_transit') >= 0 && l.every((x) => x.split(',').length === 2); } },
+      },
+      {
+        id: 'rows',
+        prompt: T(
+          '`grep` selects rows. To see only the consignments that came back, search for the status with a comma on each side:',
+          '',
+          '```',
+          'grep ,returned, shipments.csv',
+          '```',
+          '',
+          'Five rows. The commas tie the word to a whole field, so the search cannot match the same letters inside some other column. The header is gone as well, because it does not contain the pattern.'
+        ),
+        hint: 'The pattern is `,returned,` and the file comes after it.',
+        solution: 'grep ,returned, shipments.csv',
+        check: { cmd: GREP, fn: (ev) => { const l = linesOf(ev); return l.length === 5 && l.every((x) => /^HF-2026-\d+,.*,returned,/.test(x)); } },
+      },
+      {
+        id: 'both',
+        prompt: T(
+          'Now combine the two. Three consignments have the status `delayed`. Print only their ids and their destinations.',
+          '',
+          'Select the rows first, then pipe them into `cut` to keep the two columns you need. The header you printed earlier tells you which field holds the destination.'
+        ),
+        hint: '`grep ,delayed, shipments.csv` selects the rows. Add `| cut -d , -f` and the field numbers of `id` and `destination`.',
+        solution: 'grep ,delayed, shipments.csv | cut -d , -f 1,4',
+        check: { fn: (ev) => linesOf(ev).sort().join('|') === 'HF-2026-10453,Newcastle|HF-2026-10474,Blackpool|HF-2026-10477,Sheffield' },
+      },
+      {
+        id: 'services',
+        prompt: T(
+          'Counting by category takes three stages: cut the column out, `sort` it so that equal values sit together, and let `uniq -c` count each group.',
+          '',
+          'How many consignments used each service level? The service is field 7. Build the pipeline.',
+          '',
+          'When it works, look for the line `1 service`. That is the header row, counted like any other line. Keep it in mind whenever you count the rows of a CSV file.'
+        ),
+        hint: 'Three stages joined by `|`: `cut -d , -f 7 shipments.csv`, then `sort`, then `uniq -c`.',
+        solution: 'cut -d , -f 7 shipments.csv | sort | uniq -c',
+        check: { out: /^\s*30 next-day\s*$/m, all: [{ out: /^\s*16 economy\s*$/m }, { out: /^\s*14 timed\s*$/m }] },
+      },
+      {
+        id: 'weight',
+        prompt: T(
+          'To order the table by one column, `sort` needs three things: `-t ,` names the separator, `-k 5,5` says that the sort key starts and ends at field 5, the weight in kilograms, and `-n` compares the keys as numbers.',
+          '',
+          '```',
+          'sort -t , -k 5,5 -n shipments.csv',
+          '```',
+          '',
+          'The lightest consignment comes first and the heaviest last. Scroll to the top of the output: the header is the very first line, because its field 5 is the text `weight_kg`, and text counts as zero in a numeric sort.'
+        ),
+        hint: 'Type it as shown. `-k 5,5` is one argument: the field to start at, a comma, the field to stop at.',
+        solution: 'sort -t , -k 5,5 -n shipments.csv',
+        check: { cmd: 'sort', fn: (ev) => { const l = linesOf(ev); return l.length === 61 && /^id,date,/.test(l[0]) && /^HF-2026-10440,/.test(l[1]) && /^HF-2026-10466,/.test(l[60]); } },
+      },
+      {
+        id: 'heaviest',
+        prompt: T(
+          'Turn the order around and keep only the start of the list: add `-r` to the sort, and pipe the result into `head` so that three lines are printed.',
+          '',
+          'What is the id of the heaviest consignment?'
+        ),
+        hint: '`sort -t , -k 5,5 -n -r shipments.csv | head -n 3` puts the heaviest first. The id is the first column of the first line.',
+        solution: 'HF-2026-10466',
+        answer: /^(HF-2026-)?10466$/i,
+      },
+      {
+        id: 'diff',
+        prompt: T(
+          'A week later the depot exported the table again. Did anything change? `diff` compares two files line by line and prints only the differences:',
+          '',
+          '```',
+          'diff shipments.csv /usr/share/kalima/data/shipments-revised.csv',
+          '```',
+          '',
+          'Lines marked `<` come from the first file and lines marked `>` from the second. Each group starts with a short code: `14c14` means that line 14 was *changed*, `41d40` that line 41 of the first file was *deleted*, and `61a61` that a line was *added* after line 61. The 58 lines that are the same in both files are not shown at all.'
+        ),
+        hint: 'Give `diff` the older file first and the newer file second.',
+        solution: 'diff shipments.csv /usr/share/kalima/data/shipments-revised.csv',
+        check: { cmd: 'diff', out: /^41d40$/m, all: [{ out: /^> HF-2026-10481,/m }, { out: /^< HF-2026-10433,.*,in_transit,/m }] },
+      },
+      {
+        id: 'removed',
+        prompt: T(
+          'Read the output of `diff` once more. Two consignments changed status and one was added.',
+          '',
+          'One consignment is in the original table but missing from the revised one. What is its id?'
+        ),
+        hint: 'Find the group whose code contains the letter `d`. The line below it starts with `<`, because it exists only in the first file.',
+        solution: 'HF-2026-10460',
+        answer: /^(HF-2026-)?10460$/i,
+      },
+    ],
+    quiz: [
+      {
+        q: '`grep -c , shipments.csv` prints 61, yet the table lists 60 consignments. Why?',
+        choices: [
+          'The header line contains commas too, so it is counted',
+          '`grep -c` counts commas, not lines',
+          'The last line of the file is counted twice',
+          'One consignment was entered twice',
+        ],
+        answer: 0,
+        why: '`-c` counts matching lines, and the header matches as well. Whenever you count the rows of a CSV file, decide whether the header should be part of the number.',
+      },
+      {
+        q: 'What changes if you leave `-n` out of `sort -t , -k 5,5 -n shipments.csv`?',
+        choices: [
+          'Nothing: sort recognizes numbers on its own',
+          'The weights are compared as text, so `1028` is placed before `244`',
+          'sort stops with an error because the key is not text',
+          'The rows are ordered by the first column instead',
+        ],
+        answer: 1,
+        why: 'Without `-n`, sort compares the key one character at a time, and `1` comes before `2`. The result looks sorted at a glance but is not in order of weight.',
+      },
+      {
+        q: 'You run `diff old.csv new.csv` and it prints nothing. What does that tell you?',
+        choices: [
+          'diff could not read one of the files',
+          'The two files have the same lines in a different order',
+          'The two files are identical',
+          'One of the files is empty',
+        ],
+        answer: 2,
+        why: 'diff prints only differences, so no output means there are none. An unreadable file would produce an error message, and lines in another order would be reported as changes.',
+      },
+      {
+        q: '`cut -d ,` splits a line at every comma. For which kind of CSV file does that give the wrong columns?',
+        choices: [
+          'A file with more than nine columns',
+          'A file with a header line',
+          'A file in which a value itself contains a comma, such as a quoted company name',
+          'A file in which values contain spaces',
+        ],
+        answer: 2,
+        why: 'cut knows nothing about the quoting rules of CSV, so a comma inside a quoted value shifts every column after it. For simple tables like this one cut is fine. For anything else, use a tool that understands CSV.',
+      },
+    ],
+    refs: ['cut(1)', 'sort(1)', 'uniq(1)', 'diff(1)', 'RFC 4180'],
+  };
+
   K.lessons.register({
     id: 'text',
     title: 'Searching and shaping text',
     order: 25,
     summary: 'Find the lines that matter with grep, build pipelines one stage at a time, and answer questions about logs and tables without opening an editor.',
-    lessons: [grepLesson, pipelineLesson],
+    lessons: [grepLesson, pipelineLesson, csvLesson],
   });
 
-  void WORK;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
