@@ -468,7 +468,7 @@ test('completion offers lab names, servers and record types', async () => {
   assert.deepEqual(items('dig @10.10.10.5'), ['@10.10.10.50', '@10.10.10.53']);
   assert.deepEqual(items('dig +tr'), ['+trace', '+tries']);
   assert.ok(!items('dig +').includes('+yaml'), 'only keywords the simulator accepts are offered');
-  assert.deepEqual(items('dig -x 10.10.10.5'), ['10.10.10.50', '10.10.10.53']);
+  assert.deepEqual(items('dig -x 10.10.10.5'), ['10.10.10.5', '10.10.10.50', '10.10.10.53']);
   assert.deepEqual(items('host -t S'), ['SOA', 'SPF', 'SRV', 'SVCB']);
   assert.deepEqual(items('host db'), ['db01.halcyon.lab']);
   assert.deepEqual(items('host db01.halcyon.lab 9'), ['9.9.9.9']);
