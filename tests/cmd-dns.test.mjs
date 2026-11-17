@@ -207,7 +207,8 @@ test('host: addresses, aliases, mail, reverse and search list', async () => {
   assert.equal(await out('host halcyon.lab'), 'halcyon.lab mail is handled by 10 mail01.halcyon.lab.\n');
   assert.equal(await out('host web01'), 'web01.halcyon.lab has address 10.10.10.10\n', 'single labels go through the search list');
   assert.equal(await out('host 10.10.10.40'), '40.10.10.10.in-addr.arpa domain name pointer mail01.halcyon.lab.\n');
-  assert.equal(await out('host example.com 8.8.8.8'), 'Using domain server:\nName: 8.8.8.8\nAddress: 8.8.8.8#53\nAliases: \n\nexample.com has address 93.184.215.14\n');
+  assert.equal(await out('host example.com 8.8.8.8'), 'Using domain server:\nName: 8.8.8.8\nAddress: 8.8.8.8#53\nAliases: \n\nexample.com has address 93.184.215.14\n' +
+    'example.com mail is handled by 10 mail.example.com.\nexample.com mail is handled by 20 mail2.example.com.\n');
   assert.equal(await out('host -t ns halcyon.lab'), 'halcyon.lab name server ns1.halcyon.lab.\n');
   assert.equal(await out('host -t txt halcyon.lab'), 'halcyon.lab descriptive text "v=spf1 mx -all"\n');
   assert.equal(await out('host -t soa halcyon.lab'), 'halcyon.lab has SOA record ns1.halcyon.lab. hostmaster.halcyon.lab. 2026111201 3600 900 604800 86400\n');
