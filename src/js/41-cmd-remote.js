@@ -2186,4 +2186,18 @@
       return out;
     },
   });
+
+  /* ============================================================= completion */
+
+  const OPTIONS_WITH_VALUES = /^-[bCEeFilNoPpqstwX]$/;
+
+  /** Lab machine names for a host argument, keeping a typed "user@" in front. An option's value is left to path completion. */
+  function completeHost(info) {
+    if (OPTIONS_WITH_VALUES.test(info.words[info.index - 1] || '')) return [];
+    const prefix = info.cur.slice(0, info.cur.lastIndexOf('@') + 1);
+    return K.net.world.hosts.filter((h) => h.fqdn).map((h) => prefix + h.fqdn);
+  }
+  for (const name of ['ssh', 'ssh-copy-id', 'nc', 'telnet', 'ftp']) K.cmd.get(name).complete = completeHost;
+  // scp arguments are files unless they name a user: only then are hosts offered, ready for the path.
+  K.cmd.get('scp').complete = (info) => (info.cur.includes('@') && !info.cur.includes(':') ? completeHost(info).map((h) => h + ':') : []);
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -830,3 +830,16 @@ test('pop3 protocol handler: Dovecot replies, logins always fail', async () => {
   assert.equal(r.err, 'mail01.halcyon.lab [10.10.10.40] 110 (pop3) open\n');
   assert.equal(r.out, '+OK Dovecot (Debian) ready.\r\n+OK\r\n-ERR [AUTH] Authentication failed.\r\n+OK Logging out\r\n');
 });
+
+test('completion offers lab hosts where a host belongs', async () => {
+  const sim = await boot();
+  const items = (line) => sim.shell.complete(line).items.map((i) => i.display);
+  assert.deepEqual(items('ssh student@we'), ['student@web01.halcyon.lab']);
+  assert.deepEqual(items('nc -v fi'), ['files01.halcyon.lab']);
+  assert.deepEqual(items('telnet ma'), ['mail01.halcyon.lab']);
+  assert.deepEqual(items('ftp files'), ['files01.halcyon.lab']);
+  assert.deepEqual(items('scp notes.txt student@db'), ['student@db01.halcyon.lab:']);
+  await sim.run('mkdir -p ~/.ssh && touch ~/.ssh/web_key notes.txt');
+  assert.deepEqual(items('ssh -i ~/.ssh/we'), ['web_key'], 'an identity file is a path');
+  assert.deepEqual(items('scp no'), ['notes.txt']);
+});
