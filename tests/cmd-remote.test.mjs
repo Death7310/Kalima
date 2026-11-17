@@ -626,3 +626,207 @@ test('ssh-copy-id: failures', async () => {
     assert.match(r.err, /^Usage: \/usr\/bin\/ssh-copy-id \[-h\|-\?\|-f\|-n\|-s\|-x\] \[-i \[identity_file\]\] /, line);
   }
 });
+
+const FILES01 = 'files01.halcyon.lab';
+
+test('ftp: anonymous session with the tnftp prompts and vsftpd replies', async () => {
+  const sim = await boot();
+  const r = await withInput(sim, `ftp ${FILES01}`, ['anonymous', 'kali@lab', 'pwd', 'ls', 'cd pub', 'dir', 'get README.txt', 'get nofile', 'cd /nodir', 'ascii', 'binary', 'bogus', 's', 'bye'], { tty: true });
+  assert.equal(r.code, 0);
+  assert.equal(r.screen, `Name (${FILES01}:kali): anonymous\nPassword: \n` + ['pwd', 'ls', 'cd pub', 'dir', 'get README.txt', 'get nofile', 'cd /nodir', 'ascii', 'binary', 'bogus', 's', 'bye'].map((c) => 'ftp> ' + c + '\n').join(''));
+  const out = r.out.split('\n');
+  assert.deepEqual(out.slice(0, 7), [`Connected to ${FILES01}.`, '220 (vsFTPd 3.0.5)', '331 Please specify the password.', '230 Login successful.',
+    'Remote system type is UNIX.', 'Using binary mode to transfer files.', 'Remote directory: /']);
+  assert.match(out[7], /^229 Entering Extended Passive Mode \(\|\|\|\d+\|\)$/);
+  assert.deepEqual(out.slice(8, 12), ['150 Here comes the directory listing.', 'drwxr-xr-x    5 0        0            4096 Nov 02 08:05 pub', '226 Directory send OK.', '250 Directory successfully changed.']);
+  const size = sim.K.net.hostById('files01').ftp.files['/pub/README.txt'].length;
+  assert.equal(out[14], '-rw-r--r--    1 0        0        ' + String(size).padStart(8) + ' Nov 02 08:05 README.txt');
+  assert.equal(out[15], 'drwxr-xr-x    2 0        0            4096 Nov 02 08:05 forms');
+  const get = out.indexOf('local: README.txt remote: README.txt');
+  assert.equal(get, 19);
+  assert.equal(out[get + 2], `150 Opening BINARY mode data connection for README.txt (${size} bytes).`);
+  assert.match(out[get + 3], new RegExp(`^\\r100% \\|\\*{35}\\| {3}${size} {6}[ \\d]{3}\\.\\d\\d [KM]iB/s {4}00:00 ETA$`), 'the progress bar at 80 columns');
+  assert.equal(out[get + 4], '226 Transfer complete.');
+  assert.match(out[get + 5], new RegExp(`^${size} bytes received in 00:00 \\(\\d+\\.\\d\\d [KM]iB/s\\)$`));
+  assert.deepEqual(out.slice(get + 6, get + 9).filter((l) => !/^229/.test(l)), ['local: nofile remote: nofile', '550 Failed to open file.']);
+  assert.deepEqual(out.slice(get + 9), ['550 Failed to change directory.', '200 Switching to ASCII mode.', '200 Switching to Binary mode.', '?Invalid command.', '?Ambiguous command.', '221 Goodbye.', '']);
+  assert.equal((await sim.run('cat README.txt')).out, sim.K.net.hostById('files01').ftp.files['/pub/README.txt']);
+});
+
+test('ftp: logins, local accounts and client commands', async () => {
+  const sim = await boot();
+  // a wrong password, then the user command; a local account sees the real files of the server
+  let r = await withInput(sim, `ftp ${FILES01}`, ['student', 'wrong', 'ls', 'user student', 'student', 'pwd', 'cd /root', 'get /etc/shadow', 'get /etc/hostname /tmp/h', 'mkdir x', 'close', 'pwd', 'quit'], { tty: true });
+  assert.match(r.out, /331 Please specify the password\.\n530 Login incorrect\.\n530 Please login with USER and PASS\.\n331 Please specify the password\.\n230 Login successful\.\n/);
+  assert.match(r.err, /^ftp: Login failed\n$/);
+  assert.match(r.out, /Remote directory: \/home\/student\n550 Failed to change directory\.\nlocal: shadow remote: \/etc\/shadow\n229 .*\n550 Failed to open file\.\n/);
+  assert.match(r.out, /550 Permission denied\.\n221 Goodbye\.\nNot connected\.\n$/, 'the server is read-only');
+  assert.equal((await sim.run('cat /tmp/h')).out, 'files01\n');
+  const log = sim.K.net.machines.files01.vfs.read('/var/log/vsftpd.log');
+  assert.match(log, /\[pid 1\] \[student\] FAIL LOGIN: Client "10\.10\.10\.5"\n.*\[pid 1\] \[student\] OK LOGIN: Client "10\.10\.10\.5"\n.*\[pid 3\] \[student\] OK DOWNLOAD: Client "10\.10\.10\.5", "\/etc\/hostname", 8 bytes, [\d.]+Kbyte\/sec\n$/);
+
+  // -a logs in as anonymous; without a terminal on stdout only data and errors are shown
+  r = await sim.run(`printf 'ls pub/forms\\nnlist pub\\ncd nodir\\nget pub/README.txt /tmp/readme\\nbye\\n' | ftp -a ${FILES01}`);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^(-rw-r--r-- {4}1 0 {8}0 +\d+ Nov 02 08:05 \S+\.txt\n){2}pub\/README\.txt\npub\/forms\npub\/rates\npub\/schedules\n550 Failed to change directory\.\n$/);
+  assert.equal((await sim.run('cmp /tmp/readme README.txt 2>&1; wc -l < /tmp/readme')).code, 0);
+
+  // -n: no automatic login; open and status from the prompt
+  r = await withInput(sim, 'ftp -n', ['status', 'ls', `open ${FILES01}`, 'user anonymous x', 'passive', 'ls', 'status', 'lcd /tmp', 'lpwd', 'help get', 'exit'], { tty: true });
+  assert.match(r.out, /^Not connected\.\nNo proxy connection\.\n[\s\S]*Version: tnftp \d+\nNot connected\.\nConnected to files01\.halcyon\.lab\.\n220 \(vsFTPd 3\.0\.5\)\n331 /);
+  assert.match(r.out, /Passive mode: off; fallback to active mode: off\.\n200 EPRT command successful\. Consider using EPSV\.\n150 Here comes the directory listing\.\n/);
+  assert.match(r.out, /Connected and logged into files01\.halcyon\.lab\.\n/);
+  assert.match(r.out, /Local directory now: \/tmp\nLocal directory: \/tmp\nget {8}\treceive file\n221 Goodbye\.\n$/);
+  r = await withInput(sim, 'ftp', ['help', 'quit'], { tty: true });
+  assert.match(r.out, /^Commands may be abbreviated\. {2}Commands are:\n\n!\t\tepsv6\t\tmget\t\tpreserve\tsend\n\$\t\texit\t\tmkdir\t\tprogress\tsendport\n/);
+});
+
+test('ftp: connection failures leave the prompt, bad options print the usage', async () => {
+  const sim = await boot();
+  let r = await withInput(sim, 'ftp printer.halcyon.lab', ['ls', 'quit']);
+  assert.equal(r.err, "ftp: Can't connect to `10.10.10.60:21': Connection refused\nftp: Can't connect to `printer.halcyon.lab:ftp'\n");
+  assert.equal(r.out, 'Not connected.\n');
+  assert.equal(r.screen, 'ftp> ls\nftp> quit\n');
+  assert.equal(r.code, 0);
+  r = await sim.run('ftp nohost.halcyon.lab < /dev/null');
+  assert.equal(r.err, "ftp: Can't lookup `nohost.halcyon.lab:ftp': Name or service not known\n");
+  r = await sim.run('ftp -Z');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^ftp: invalid option -- 'Z'\nusage: ftp \[-46AadefginpRtVv\] \[-N netrc\] \[-o outfile\] \[-P port\] \[-q quittime\]\n/);
+  assert.match(sim.K.cmd.get('ftp').man, /^DESCRIPTION\n[\s\S]*\nOPTIONS\n[\s\S]*\nEXAMPLES\n {7}ftp files01\.halcyon\.lab\n/);
+});
+
+/** Open a raw session and return a function that sends one line and returns the reply. */
+function raw(sim, ip, port) {
+  const s = sim.K.net.connect(sim.machine, ip, port);
+  return Object.assign((line) => s.send(line + '\r\n'), { session: s });
+}
+
+test('ftp protocol handler: the vsftpd state machine', async () => {
+  const sim = await boot();
+  const ftp = raw(sim, '10.10.10.20', 21);
+  assert.equal(ftp.session.greeting, '220 (vsFTPd 3.0.5)\r\n');
+  assert.equal(ftp('PWD'), '530 Please login with USER and PASS.\r\n');
+  assert.equal(ftp('PASS x'), '503 Login with USER first.\r\n');
+  assert.equal(ftp('FEAT'), '211-Features:\r\n EPRT\r\n EPSV\r\n MDTM\r\n PASV\r\n REST STREAM\r\n SIZE\r\n TVFS\r\n UTF8\r\n211 End\r\n');
+  assert.equal(ftp('user anonymous'), '331 Please specify the password.\r\n', 'commands are case-insensitive');
+  assert.equal(ftp('PASS guest@'), '230 Login successful.\r\n');
+  assert.equal(ftp('USER student'), "530 Can't change to another user.\r\n");
+  assert.equal(ftp('SYST'), '215 UNIX Type: L8\r\n');
+  assert.equal(ftp('PWD'), '257 "/" is the current directory\r\n');
+  assert.equal(ftp('CWD pub/forms'), '250 Directory successfully changed.\r\n');
+  assert.equal(ftp('CDUP'), '250 Directory successfully changed.\r\n');
+  assert.equal(ftp('PWD'), '257 "/pub" is the current directory\r\n');
+  assert.equal(ftp('CWD README.txt'), '550 Failed to change directory.\r\n');
+  assert.equal(ftp('TYPE I'), '200 Switching to Binary mode.\r\n');
+  assert.equal(ftp('TYPE A'), '200 Switching to ASCII mode.\r\n');
+  assert.equal(ftp('TYPE Q'), '500 Unrecognised TYPE command.\r\n');
+  assert.match(ftp('SIZE README.txt'), /^213 \d+\r\n$/);
+  assert.equal(ftp('SIZE forms'), '550 Could not get file size.\r\n');
+  assert.equal(ftp('NOOP'), '200 NOOP ok.\r\n');
+  assert.match(ftp('HELP'), /^214-The following commands are recognized\.\r\n ABOR ACCT ALLO APPE CDUP CWD {2}DELE EPRT EPSV FEAT HELP LIST MDTM MKD\r\n[\s\S]*\r\n214 Help OK\.\r\n$/);
+  assert.equal(ftp('STOR x'), '550 Permission denied.\r\n');
+  assert.equal(ftp('XYZZY'), '500 Unknown command.\r\n');
+
+  // a transfer needs PASV first, and a data connection that a typed session never makes
+  assert.equal(ftp('LIST'), '425 Use PORT or PASV first.\r\n');
+  assert.match(ftp('PASV'), /^227 Entering Passive Mode \(10,10,10,20,\d+,\d+\)\.\r\n$/);
+  assert.equal(ftp('LIST'), '425 Failed to establish connection.\r\n');
+  ftp('PASV');
+  ftp.session.state.data = ''; // what the ftp client does once it has connected to the passive port
+  assert.equal(ftp('RETR README.txt'), `150 Opening BINARY mode data connection for README.txt (${ftp.session.state.data.length} bytes).\r\n226 Transfer complete.\r\n`);
+  assert.equal(ftp.session.state.data, sim.K.net.hostById('files01').ftp.files['/pub/README.txt']);
+  assert.equal(ftp('RETR nofile'), '550 Failed to open file.\r\n');
+  assert.equal(ftp('NOOP\r\nPWD'), '200 NOOP ok.\r\n257 "/pub" is the current directory\r\n', 'several lines in one write');
+  assert.equal(ftp('QUIT'), '221 Goodbye.\r\n');
+  assert.equal(ftp.session.open, false);
+});
+
+test('ftp protocol handler: policy from host.ftp, and a default tree without it', async () => {
+  const sim = await boot();
+  const host = sim.K.net.hostById('files01');
+  host.ftp = { anonymous: false, users: { carol: 'depot-pass' }, files: { '/drop/readme.txt': 'for carol\n' } };
+  let ftp = raw(sim, '10.10.10.20', 21);
+  assert.equal(ftp('USER anonymous'), '331 Please specify the password.\r\n');
+  assert.equal(ftp('PASS x'), '530 Login incorrect.\r\n');
+  assert.equal(ftp('USER carol'), '331 Please specify the password.\r\n');
+  assert.equal(ftp('PASS nope'), '530 Login incorrect.\r\n');
+  assert.equal(ftp('USER carol'), '331 Please specify the password.\r\n');
+  assert.equal(ftp('PASS depot-pass'), '230 Login successful.\r\n');
+  assert.equal(ftp('SIZE /drop/readme.txt'), '213 10\r\n');
+  ftp = raw(sim, '10.10.10.20', 21);
+  for (let i = 0; i < 3; i++) { ftp('USER carol'); assert.equal(ftp('PASS wrong' + i), '530 Login incorrect.\r\n'); }
+  assert.equal(ftp.session.open, false, 'three failed logins end the session');
+
+  delete host.ftp;
+  ftp = raw(sim, '10.10.10.20', 21);
+  assert.equal(ftp('USER carol'), '530 This FTP server is anonymous only.\r\n');
+  ftp('USER ftp');
+  assert.equal(ftp('PASS x'), '230 Login successful.\r\n');
+  ftp('EPSV');
+  ftp.session.state.data = '';
+  ftp('NLST');
+  assert.equal(ftp.session.state.data, 'README\r\npub\r\n');
+  // the client and a typed session meet the same handler
+  const r = await sim.run(`printf 'ls\\nbye\\n' | ftp -a ${FILES01}`);
+  assert.match(r.out, /^-rw-r--r-- {4}1 0 {8}0 +\d+ \w{3} \d\d \d\d:\d\d README\ndrwxr-xr-x {4}2 0 {8}0 {12}4096 \w{3} \d\d \d\d:\d\d pub\n$/);
+  const typed = await withInput(sim, `nc ${FILES01} 21`, ['USER anonymous', 'PASS x', 'PWD', 'QUIT']);
+  assert.equal(typed.out, '220 (vsFTPd 3.0.5)\r\n331 Please specify the password.\r\n230 Login successful.\r\n257 "/" is the current directory\r\n221 Goodbye.\r\n');
+});
+
+test('smtp protocol handler: Postfix replies, nothing is delivered', async () => {
+  const sim = await boot();
+  const smtp = raw(sim, '10.10.10.40', 25);
+  assert.equal(smtp.session.greeting, '220 mail01.halcyon.lab ESMTP Postfix (Debian/GNU)\r\n');
+  assert.equal(smtp('HELO'), '501 Syntax: HELO hostname\r\n');
+  assert.equal(smtp('HELO kali'), '250 mail01.halcyon.lab\r\n');
+  assert.equal(smtp('EHLO kali'), '250-mail01.halcyon.lab\r\n250-PIPELINING\r\n250-SIZE 10240000\r\n250-ETRN\r\n250-STARTTLS\r\n250-ENHANCEDSTATUSCODES\r\n250-8BITMIME\r\n250-DSN\r\n250-SMTPUTF8\r\n250 CHUNKING\r\n');
+  assert.equal(smtp('VRFY root'), '502 5.5.1 VRFY command is disabled\r\n');
+  assert.equal(smtp('HELP'), '502 5.5.2 Error: command not recognized\r\n');
+  assert.equal(smtp('RCPT TO:<ops@halcyon.lab>'), '503 5.5.1 Error: need MAIL command\r\n');
+  assert.equal(smtp('MAIL kali'), '501 5.5.4 Syntax: MAIL FROM:<address>\r\n');
+  assert.equal(smtp('mail from:<kali@kali>'), '250 2.1.0 Ok\r\n');
+  assert.equal(smtp('MAIL FROM:<kali@kali>'), '503 5.5.1 Error: nested MAIL command\r\n');
+  assert.equal(smtp('DATA'), '554 5.5.1 Error: no valid recipients\r\n');
+  assert.equal(smtp('RCPT TO:<someone@example.com>'), '454 4.7.1 <someone@example.com>: Relay access denied\r\n');
+  assert.equal(smtp('RCPT TO:<ops@halcyon.lab>'), '250 2.1.5 Ok\r\n');
+  assert.equal(smtp('DATA'), '354 End data with <CR><LF>.<CR><LF>\r\n');
+  assert.equal(smtp('Subject: test'), '');
+  assert.equal(smtp('QUIT'), '', 'inside DATA a command is just text');
+  assert.match(smtp('.'), /^250 2\.0\.0 Ok: queued as [0-9A-F]{11}\r\n$/);
+  assert.equal(smtp('RSET'), '250 2.0.0 Ok\r\n');
+  assert.equal(smtp('NOOP'), '250 2.0.0 Ok\r\n');
+  assert.equal(smtp('DATA'), '503 5.5.1 Error: need RCPT command\r\n');
+  assert.equal(smtp('QUIT'), '221 2.0.0 Bye\r\n');
+  assert.equal(smtp.session.open, false);
+
+  // typed by hand, piped through nc, and on the submission port
+  let r = await withInput(sim, 'telnet mail01.halcyon.lab 25', ['HELO kali', 'QUIT']);
+  assert.equal(r.out, "Trying 10.10.10.40...\nConnected to mail01.halcyon.lab.\nEscape character is '^]'.\n220 mail01.halcyon.lab ESMTP Postfix (Debian/GNU)\r\n250 mail01.halcyon.lab\r\n221 2.0.0 Bye\r\n");
+  const t0 = sim.K.clock.now();
+  r = await sim.run("printf 'EHLO kali\\r\\nQUIT\\r\\n' | nc -C mail.halcyon.lab 587 | tail -1");
+  assert.equal(r.out, '221 2.0.0 Bye\r\n');
+  assert.equal(sim.K.clock.now() - t0 < 1000, true, 'the server hangs up after QUIT, so nc returns');
+  const web = raw(sim, '10.10.10.40', 25);
+  assert.equal(web('GET / HTTP/1.1'), '221 2.7.0 Error: I can break rules, too. Goodbye.\r\n');
+  assert.equal(web.session.open, false);
+});
+
+test('pop3 protocol handler: Dovecot replies, logins always fail', async () => {
+  const sim = await boot();
+  const pop = raw(sim, '10.10.10.40', 110);
+  assert.equal(pop.session.greeting, '+OK Dovecot (Debian) ready.\r\n');
+  assert.equal(pop('CAPA'), '+OK\r\nCAPA\r\nTOP\r\nUIDL\r\nRESP-CODES\r\nPIPELINING\r\nAUTH-RESP-CODE\r\nSTLS\r\nUSER\r\nSASL PLAIN\r\n.\r\n');
+  assert.equal(pop('PASS secret'), '-ERR No username given.\r\n');
+  assert.equal(pop('USER'), '-ERR No username given.\r\n');
+  assert.equal(pop('USER ops'), '+OK\r\n');
+  assert.equal(pop('PASS anything'), '-ERR [AUTH] Authentication failed.\r\n');
+  assert.equal(pop('user ops'), '+OK\r\n');
+  assert.equal(pop('pass ops'), '-ERR [AUTH] Authentication failed.\r\n');
+  assert.equal(pop('STAT'), '-ERR Unknown command.\r\n');
+  assert.equal(pop('QUIT'), '+OK Logging out\r\n');
+  assert.equal(pop.session.open, false);
+  const r = await withInput(sim, 'nc -v mail01.halcyon.lab 110', ['USER ops', 'PASS x', 'QUIT']);
+  assert.equal(r.err, 'mail01.halcyon.lab [10.10.10.40] 110 (pop3) open\n');
+  assert.equal(r.out, '+OK Dovecot (Debian) ready.\r\n+OK\r\n-ERR [AUTH] Authentication failed.\r\n+OK Logging out\r\n');
+});

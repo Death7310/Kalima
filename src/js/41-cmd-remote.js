@@ -1,8 +1,10 @@
 /* Kalima — remote login, file transfer and plain TCP clients.
  *
- *   remote login        ssh
+ *   remote login        ssh ssh-keygen ssh-copy-id
+ *   file transfer       scp ftp
  *   plain TCP clients   nc (netcat, ncat) telnet
- *   protocol handlers   ssh (what a raw connection to that port answers)
+ *   protocol handlers   ssh ftp smtp pop3 (what a connection to those ports answers,
+ *                       whether it comes from a client here or is typed by hand into nc)
  *
  * Every connection goes through K.net, so nothing leaves the simulator.
  * Keys are simulated: the files use the real OpenSSH layouts, but the key
@@ -1551,6 +1553,637 @@
         if (/^(o|op|ope|open)$/.test(words[0] || '') && words[1]) return telnetOpen(ctx, words[1], words[2]);
         if (words.length) ctx.out(/^o/.test(words[0]) ? 'usage: open [-l user] [-a] host-name [port]\n' : '?Invalid command\n');
       }
+    },
+  });
+
+  /* ============================================================= ftp client */
+
+  const FTP_VERSION = 'tnftp 20230507';
+  const FTP_USAGE = 'usage: ftp [-46AadefginpRtVv] [-N netrc] [-o outfile] [-P port] [-q quittime]\n           [-r retry] [-s srcaddr] [-T dir,max[,inc]] [-x xfersize]\n' +
+    '           [[user@]host [port]] [host:path[/]] [file:///file]\n           [ftp://[user[:pass]@]host[:port]/path[/]]\n           [http://[user[:pass]@]host[:port]/path] [...]\n       ftp -u URL file [...]\n';
+  // tnftp's command table, in the order `help` lists it.
+  const FTP_COMMANDS = ('! $ account append ascii bell binary bye case cd cdup chmod close cr debug delete dir disconnect edit epsv epsv4 epsv6 exit features fget form ftp gate get glob hash help ' +
+    'idle image lcd less lpage lpwd ls macdef mdelete mdir mget mkdir mls mlsd mlst mode modtime more mput mreget msend newer nlist nmap ntrans open page passive pdir pls pmlsd preserve ' +
+    'progress prompt proxy put pwd quit quote radix rate rcvbuf recv reget remopts rename reset restart rhelp rmdir rstatus runique send sendport set site size sndbuf status struct sunique ' +
+    'system tenex throttle trace type umask unset usage user verbose xferbuf ?').split(' ');
+  const FTP_UNITS = ['', 'Ki', 'Mi', 'Gi', 'Ti'];
+  const onOff = (flag) => (flag ? 'on' : 'off');
+
+  /** tnftp's list_vertical: names down the columns, tab-separated. */
+  function listVertical(names, cols) {
+    const width = (Math.max(...names.map((n) => n.length)) + 8) & ~7;
+    const columns = Math.max(1, Math.floor(cols / width));
+    const lines = Math.ceil(names.length / columns);
+    let out = '';
+    for (let i = 0; i < lines; i++) {
+      for (let j = 0; j < columns; j++) {
+        const name = names[j * lines + i];
+        out += name;
+        if (j * lines + i + lines >= names.length) break;
+        out += '\t'.repeat(Math.ceil((width - name.length) / 8));
+      }
+      out += '\n';
+    }
+    return out;
+  }
+
+  /** "12.34 KiB/s" as tnftp prints a rate: kibibytes at least, two decimals. */
+  function ftpRate(bytesPerSecond) {
+    let n = Math.floor(bytesPerSecond); let i = 1;
+    for (; n >= 1024000 && i < FTP_UNITS.length - 1; i++) n = Math.floor(n / 1024);
+    return Math.floor(n / 1024) + '.' + U.pad2(Math.floor((n % 1024) * 100 / 1024)) + ' ' + FTP_UNITS[i] + 'B/s';
+  }
+  /** The finished progress bar of a transfer (progressbar.c). */
+  function ftpProgressBar(bytes, seconds, cols) {
+    let shown = bytes; let unit = 0;
+    for (; shown >= 100000 && unit < FTP_UNITS.length - 1; unit++) shown = Math.floor(shown / 1024);
+    const stars = Math.max(0, Math.min(255, cols) - 45);
+    return '\r100% |' + '*'.repeat(stars) + '| ' + U.padStart(shown, 5) + ' ' + U.padEnd(FTP_UNITS[unit], 3) + ' ' + ' ' + U.padStart(ftpRate(bytes / seconds), 12) + ' ' + '   00:00 ETA\n';
+  }
+
+  /** Print reply lines the way ftp does: all of them when verbose, otherwise only permanent errors. */
+  function ftpShow(c, lines) {
+    if (c.verbose || /^5/.test(lines[lines.length - 1] || '')) for (const l of lines) c.ctx.out(l + '\n');
+  }
+
+  /** Send one command over the control connection; resolves { code, lines }. `quiet` keeps the reply off the screen. */
+  async function ftpSay(c, line, quiet) {
+    const ctx = c.ctx;
+    if (!c.session || !c.session.open) { c.session = null; ctx.out('Not connected.\n'); return { code: 0, lines: [] }; }
+    const reply = c.session.send(line + '\r\n');
+    await ctx.sleep(c.session.rtt);
+    const lines = reply.split('\r\n').filter(Boolean);
+    if (!quiet) ftpShow(c, lines);
+    if (!lines.length) { c.session = null; ctx.out('421 Service not available, remote server has closed connection.\n'); return { code: 421, lines }; }
+    return { code: parseInt(lines[lines.length - 1], 10), lines };
+  }
+
+  /** USER and PASS, then the remote system check tnftp makes after a login. Resolves true when logged in. */
+  async function ftpLogin(c, user, password) {
+    const ctx = c.ctx;
+    let r = await ftpSay(c, 'USER ' + user);
+    if (r.code === 331) {
+      if (password == null) password = (await ctx.term.readLine({ prompt: 'Password: ', hidden: true })) || '';
+      r = await ftpSay(c, 'PASS ' + password, true);
+      if (r.code === 530) await ctx.sleep(1000); // vsftpd's delay_failed_login
+      ftpShow(c, r.lines);
+    }
+    if (r.code !== 230) return false;
+    c.loggedIn = true;
+    const syst = await ftpSay(c, 'SYST', true);
+    if (c.verbose && syst.code === 215) {
+      ctx.out('Remote system type is ' + syst.lines[0].split(' ')[1] + '.\n');
+      if (/UNIX Type: L8/.test(syst.lines[0])) ctx.out('Using binary mode to transfer files.\n');
+    }
+    await ftpSay(c, 'TYPE I', true);
+    c.binary = true;
+    return true;
+  }
+
+  /** Look the host up, connect and (unless -n) log in. */
+  async function ftpOpen(c, target, portText) {
+    const ctx = c.ctx;
+    if (c.session && c.session.open) { ctx.out('Already connected to ' + c.host + ', use close first.\n'); return; }
+    const at = target.lastIndexOf('@');
+    const host = target.slice(at + 1); let user = at > 0 ? target.slice(0, at) : null;
+    const port = portNumber(ctx.machine, portText || 'ftp', 'tcp');
+    const res = K.net.resolve(ctx.machine, host);
+    if (!res || !port) {
+      ctx.err("ftp: Can't lookup `" + host + ':' + (portText || 'ftp') + "': " + (res ? 'Servname not supported for ai_socktype' : resolveFailure(ctx.machine, host)) + '\n');
+      return;
+    }
+    await ctx.sleep(res.ms);
+    try { c.session = await dial(ctx, res.ip, port); }
+    catch (e) {
+      if (!(e instanceof K.NetError)) throw e;
+      ctx.err("ftp: Can't connect to `" + res.ip + ':' + port + "': " + e.message + "\nftp: Can't connect to `" + host + ':' + (portText || 'ftp') + "'\n");
+      return;
+    }
+    Object.assign(c, { host, loggedIn: false, binary: false });
+    if (c.verbose) ctx.out('Connected to ' + host + '.\n' + c.session.greeting.replace(/\r\n/g, '\n'));
+    if (!c.autoLogin) return;
+    let password;
+    if (c.anonymous) { user = 'anonymous'; password = ctx.user.name + '@'; }
+    if (!user) {
+      const typed = await ask(ctx, 'Name (' + host + ':' + ctx.user.name + '): ');
+      user = (typed || '').trim() || ctx.user.name;
+    }
+    if (!(await ftpLogin(c, user, password)) && c.session) ctx.err('ftp: Login failed\n');
+  }
+
+  /** Ask for a data connection, send a transfer command and collect what arrives. null when the server refuses. */
+  async function ftpTransfer(c, command) {
+    const opened = await ftpSay(c, c.passive ? 'EPSV' : 'EPRT |1|' + c.session.client + '|' + ephemeralPort() + '|');
+    if (opened.code !== 229 && opened.code !== 200) return null;
+    c.session.state.data = ''; // our end of the data connection
+    const r = await ftpSay(c, command, true);
+    const data = c.session ? c.session.state.data : '';
+    if (c.session) c.session.state.data = null;
+    if (!/^150/.test(r.lines[0] || '')) { ftpShow(c, r.lines); return null; }
+    if (c.verbose) c.ctx.out(r.lines[0] + '\n');
+    return { data, rest: r.lines.slice(1) };
+  }
+
+  async function ftpListing(c, verb, args) {
+    if (c.binary) { await ftpSay(c, 'TYPE A', true); c.binary = false; }
+    const t = await ftpTransfer(c, [verb].concat(args).join(' '));
+    if (!t) return;
+    c.ctx.out(t.data.replace(/\r\n/g, '\n'));
+    ftpShow(c, t.rest);
+  }
+
+  async function ftpGet(c, args) {
+    const ctx = c.ctx;
+    if (!args.length) { ctx.out('usage: get remote-file [local-file]\n'); return; }
+    const remote = args[0]; const local = args[1] || K.VFS.basename(remote);
+    const path = K.VFS.abs(local, c.lcwd); const dir = K.VFS.dirname(path);
+    if (c.verbose) ctx.out('local: ' + local + ' remote: ' + remote + '\n');
+    if (!ctx.fs.can(ctx.fs.exists(path) ? path : dir, 'w')) {
+      ctx.err("ftp: Can't access `" + local + "': " + (ctx.fs.exists(dir) ? 'Permission denied' : 'No such file or directory') + '\n');
+      return;
+    }
+    if (!c.binary) { await ftpSay(c, 'TYPE I', true); c.binary = true; }
+    const t = await ftpTransfer(c, 'RETR ' + remote);
+    if (!t) return;
+    const bytes = U.byteLen(t.data);
+    const ms = Math.max(0.5, 2 * c.session.rtt + bytes / LAN_THROUGHPUT);
+    await ctx.sleep(ms);
+    try { ctx.fs.write(path, t.data); } catch (e) { ctx.err("ftp: Can't open `" + local + "': " + e.message + '\n'); return; }
+    if (c.verbose && ctx.isTTY) ctx.out(ftpProgressBar(bytes, ms / 1000, ctx.cols));
+    ftpShow(c, t.rest);
+    if (c.verbose) {
+      ctx.out(bytes + ' byte' + (bytes === 1 ? '' : 's') + ' received in 00:' + U.pad2(Math.floor(ms / 1000)) + ' (' + ftpRate(bytes / (ms / 1000)) + ')\n');
+    }
+  }
+
+  async function ftpStatusReport(c) {
+    const connected = c.session && c.session.open;
+    c.ctx.out([
+      connected ? 'Connected ' + (c.loggedIn ? 'and logged in' : '') + 'to ' + c.host + '.' : 'Not connected.', 'No proxy connection.', 'Gate ftp: off, server (none), port ftpgate.',
+      'Passive mode: ' + onOff(c.passive) + '; fallback to active mode: ' + onOff(c.passive) + '.', 'Mode: stream; Type: ' + (c.binary ? 'binary' : 'ascii') + '; Form: non-print; Structure: file.',
+      'Verbose: ' + onOff(c.verbose) + '; Bell: off; Prompting: on; Globbing: on.', 'Store unique: off; Receive unique: off.', 'Preserve modification times: on.', 'Case: off; CR stripping: on.',
+      'Ntrans: off.', 'Nmap: off.', 'Hash mark printing: off; Mark count: 1024; Progress bar: ' + onOff(c.ctx.isTTY) + '.', 'Get transfer rate throttle: off; maximum: 0; increment 1024.',
+      'Put transfer rate throttle: off; maximum: 0; increment 1024.', 'Socket buffer sizes: send 16384, receive 131072.', 'Use of PORT cmds: on.', 'Use of EPSV/EPRT cmds for IPv4: on.',
+      'Use of EPSV/EPRT cmds for IPv6: on.', 'Command line editing: ' + onOff(c.ctx.stdinTTY) + '.', 'Version: ' + FTP_VERSION, '',
+    ].join('\n'));
+  }
+
+  /** Commands that are one protocol command each: name -> how to build the line sent to the server. */
+  const FTP_SIMPLE = {
+    cd: (a) => 'CWD ' + a[0], cdup: () => 'CDUP', system: () => 'SYST', mkdir: (a) => 'MKD ' + a[0], rmdir: (a) => 'RMD ' + a[0], delete: (a) => 'DELE ' + a[0],
+    size: (a) => 'SIZE ' + a[0], quote: (a) => a.join(' '), rhelp: (a) => ('HELP ' + a.join(' ')).trim(), rstatus: () => 'STAT', features: () => 'FEAT',
+  };
+  const FTP_NEEDS_ARG = { cd: 'remote-directory', mkdir: 'directory-name', rmdir: 'directory-name', delete: 'remote-file', size: 'remote-file', quote: 'line to send' };
+  const FTP_HELP_TEXT = {
+    ascii: 'set ascii transfer type', binary: 'set binary transfer type', bye: 'terminate ftp session and exit', cd: 'change remote working directory', cdup: 'change remote working directory to parent directory',
+    close: 'terminate ftp session', dir: 'list contents of remote path', disconnect: 'terminate ftp session', exit: 'terminate ftp session and exit', get: 'receive file', help: 'print local help information',
+    lcd: 'change local working directory', lpwd: 'print local working directory', ls: 'list contents of remote path', nlist: 'nlist contents of remote path', open: 'connect to remote ftp',
+    passive: 'toggle use of passive transfer mode', pwd: 'print working directory on remote machine', quit: 'terminate ftp session and exit', status: 'show current status',
+    system: 'show remote system type', user: 'send new user information', '?': 'print local help information',
+  };
+
+  /** Run one line typed at the ftp> prompt. Resolves false when the client should exit. */
+  async function ftpDispatch(c, line) {
+    const ctx = c.ctx;
+    const words = (line.match(/"[^"]*"|\S+/g) || []).map((w) => w.replace(/^"(.*)"$/, '$1'));
+    if (!words.length) return true;
+    const matches = FTP_COMMANDS.includes(words[0]) ? [words[0]] : FTP_COMMANDS.filter((n) => n.startsWith(words[0]));
+    if (matches.length !== 1) { ctx.out(matches.length ? '?Ambiguous command.\n' : '?Invalid command.\n'); return true; }
+    const name = matches[0]; const args = words.slice(1);
+    const online = c.session && c.session.open;
+    switch (name) {
+      case 'bye': case 'quit': case 'exit':
+        if (online) await ftpSay(c, 'QUIT');
+        return false;
+      case 'help': case '?':
+        if (!args.length) ctx.out('Commands may be abbreviated.  Commands are:\n\n' + listVertical(FTP_COMMANDS, ctx.cols));
+        for (const a of args) ctx.out(FTP_COMMANDS.includes(a) ? U.padEnd(a, 11) + '\t' + (FTP_HELP_TEXT[a] || 'not part of this simulator') + '\n' : "?Invalid help command `" + a + "'\n");
+        return true;
+      case 'status': await ftpStatusReport(c); return true;
+      case 'passive':
+        c.passive = !c.passive;
+        ctx.out('Passive mode: ' + onOff(c.passive) + '; fallback to active mode: ' + onOff(c.passive) + '.\n');
+        return true;
+      case 'verbose': c.verbose = !c.verbose; ctx.out('Verbose mode ' + onOff(c.verbose) + '.\n'); return true;
+      case 'lpwd': ctx.out('Local directory: ' + c.lcwd + '\n'); return true;
+      case 'lcd': {
+        const dir = K.VFS.abs(args[0] || ctx.user.home, c.lcwd);
+        if (ctx.fs.isDir(dir)) { c.lcwd = dir; ctx.out('Local directory now: ' + dir + '\n'); } else ctx.err('ftp: Can\'t chdir `' + dir + "': " + (ctx.fs.exists(dir) ? 'Not a directory' : 'No such file or directory') + '\n');
+        return true;
+      }
+      case 'open':
+        if (!args.length) ctx.out('usage: open host-name [port]\n'); else await ftpOpen(c, args[0], args[1]);
+        return true;
+      default:
+    }
+    if (!online) { ctx.out('Not connected.\n'); return true; }
+    if (FTP_SIMPLE[name]) {
+      if (FTP_NEEDS_ARG[name] && !args.length) ctx.out('usage: ' + name + ' ' + FTP_NEEDS_ARG[name] + '\n'); else await ftpSay(c, FTP_SIMPLE[name](args));
+    } else if (name === 'close' || name === 'disconnect') {
+      await ftpSay(c, 'QUIT');
+      c.session = null;
+    } else if (name === 'user') {
+      if (!args.length) ctx.out('usage: user username [password [account]]\n');
+      else if (!(await ftpLogin(c, args[0], args[1]))) ctx.out('Login failed.\n');
+    } else if (name === 'pwd') {
+      const r = await ftpSay(c, 'PWD', true);
+      const m = /^257 "(.*)"/.exec(r.lines[0] || '');
+      ctx.out(m ? 'Remote directory: ' + m[1] + '\n' : (r.lines.length ? r.lines.join('\n') + '\n' : '') + 'Unable to determine remote directory\n');
+    } else if (name === 'ascii' || name === 'binary' || name === 'image') {
+      const r = await ftpSay(c, name === 'ascii' ? 'TYPE A' : 'TYPE I');
+      if (r.code === 200) c.binary = name !== 'ascii';
+    } else if (name === 'ls' || name === 'dir') await ftpListing(c, 'LIST', args);
+    else if (name === 'nlist') await ftpListing(c, 'NLST', args);
+    else if (name === 'get' || name === 'recv') await ftpGet(c, args);
+    else ctx.out('ftp: ' + name + ' is not part of this simulator\n');
+    return true;
+  }
+
+  K.cmd.register({
+    name: 'ftp', aliases: ['tnftp'], pkg: 'tnftp', section: 1,
+    summary: 'Internet file transfer program',
+    synopsis: 'ftp [-46AadefginpRtVv] [-N netrc] [-o outfile] [-P port] [-q quittime] [-r retry] [-s srcaddr] [-T dir,max[,inc]] [-x xfersize] [[user@]host [port]]',
+    man: 'DESCRIPTION\n       ftp is the user interface to the Internet standard File Transfer Protocol. The program allows a user to transfer files to and from a remote network site. FTP sends everything, passwords included, as plain text; prefer scp(1) where the server offers SSH.\n\n' +
+      '       The host with which ftp is to communicate may be specified on the command line. If this is done, ftp will immediately attempt to establish a connection to an FTP server on that host and asks for a login name and password; otherwise, ftp will enter its command interpreter and await instructions from the user at the prompt "ftp> ". Many servers accept the name anonymous with any password for their public area.\n\n' +
+      'OPTIONS\n       -a     Causes ftp to bypass normal login procedure, and use an anonymous login instead.\n       -n     Restrains ftp from attempting "auto-login" upon initial connection.\n       -P port\n              Sets the port number to port.\n       -p     Enable passive mode operation (the default).\n' +
+      '       -V     Disable verbose and progress, overriding the default of enabled when output is to a terminal.\n       -v     Enable verbose and progress.\n\n' +
+      'COMMANDS\n       ascii, binary\n              Set the file transfer type.\n       bye, exit, quit\n              Terminate the FTP session with the remote server and exit ftp. An end of file will also terminate the session and exit.\n' +
+      '       cd remote-directory, cdup\n              Change the working directory on the remote machine.\n       close, disconnect\n              Terminate the FTP session with the remote server, and return to the command interpreter.\n' +
+      '       dir [remote-path], ls [remote-path]\n              Print a listing of the contents of a directory on the remote machine.\n       get remote-file [local-file]\n              Retrieve the remote-file and store it on the local machine.\n' +
+      '       help [command], ? [command]\n              Print an informative message about the meaning of command, or a list of the known commands.\n       lcd [directory], lpwd\n              Change or print the working directory on the local machine.\n' +
+      '       open host [port]\n              Establish a connection to the specified host FTP server.\n       passive\n              Toggle passive mode.\n       pwd    Print the name of the current working directory on the remote machine.\n' +
+      '       status Show the current status of ftp.\n       user user-name [password]\n              Identify yourself to the remote FTP server.\n\n' +
+      'EXAMPLES\n       ftp files01.halcyon.lab\n              Connect to the lab file server; log in as anonymous, then try ls, cd pub and get README.txt.\n       ftp -a files01.halcyon.lab\n              The same, with the anonymous login done for you.',
+    async run(ctx) {
+      const g = K.getopt(ctx.args, { short: '46AadefginpRtVvN:o:P:q:r:s:T:x:u', stopAtNonOption: true });
+      if (g.err || g.opts.u) { ctx.err((g.err ? 'ftp: ' + g.err + '\n' : '') + FTP_USAGE); return 1; }
+      const o = g.opts;
+      const c = {
+        ctx, session: null, host: '', loggedIn: false, binary: false, lcwd: ctx.cwd,
+        verbose: o.V ? false : !!o.v || ctx.isTTY, passive: !o.A, autoLogin: !o.n, anonymous: !!o.a,
+      };
+      try {
+        if (g.rest.length) await ftpOpen(c, g.rest[0], g.rest[1] || o.P);
+        for (;;) {
+          const line = await ctx.readLine('ftp> ');
+          if (line == null) { if (c.session && c.session.open) await ftpSay(c, 'QUIT'); break; }
+          if (!(await ftpDispatch(c, line))) break;
+        }
+      } finally { if (c.session) c.session.close(); }
+      return 0;
+    },
+  });
+
+  /* =========================================================== ftp protocol */
+
+  // What an FTP server offers when its host record says nothing: a harmless anonymous area.
+  const DEFAULT_FTP = {
+    anonymous: true, users: {},
+    files: {
+      '/README': 'This FTP server is part of a training lab. Nothing here is real.\n',
+      '/pub/welcome.txt': 'Welcome to the public area.\nFiles placed here can be read by anyone who connects.\n',
+    },
+  };
+  const VSFTPD_LOG = '/var/log/vsftpd.log';
+  const FTP_HELP = ['214-The following commands are recognized.', ' ABOR ACCT ALLO APPE CDUP CWD  DELE EPRT EPSV FEAT HELP LIST MDTM MKD',
+    ' MODE NLST NOOP OPTS PASS PASV PORT PWD  QUIT REIN REST RETR RMD  RNFR', ' RNTO SITE SIZE SMNT STAT STOR STOU STRU SYST TYPE USER XCUP XCWD XMKD',
+    ' XPWD XRMD', '214 Help OK.'].join('\r\n');
+  const FTP_FEATURES = ['211-Features:', ' EPRT', ' EPSV', ' MDTM', ' PASV', ' REST STREAM', ' SIZE', ' TVFS', ' UTF8', '211 End'].join('\r\n');
+  const FTP_WRITE_COMMANDS = ['STOR', 'STOU', 'APPE', 'DELE', 'MKD', 'XMKD', 'RMD', 'XRMD', 'RNFR', 'RNTO'];
+  const FTP_UNIMPLEMENTED = ['ACCT', 'REIN', 'SMNT'];
+  const FTP_BEFORE_LOGIN = ['USER', 'PASS', 'QUIT', 'FEAT', 'OPTS'];
+  const FTP_MAX_LOGIN_FAILS = 3;
+  const HALF_YEAR = 182 * 86400000;
+
+  /** The first working day of the month at 08:05 - when the lab's public files were last put in place. */
+  function publishedAt(now) {
+    const d = new Date(now);
+    const first = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 8, 5));
+    while (first.getUTCDay() % 6 === 0) first.setUTCDate(first.getUTCDate() + 1);
+    return first.getTime();
+  }
+
+  /** A read-only tree from a { '/path': 'content' } map: how host.ftp.files describes what a session sees. */
+  function mapTree(files) {
+    const dirs = new Set(['/']);
+    for (const path of Object.keys(files)) for (let d = K.VFS.dirname(path); !dirs.has(d); d = K.VFS.dirname(d)) dirs.add(d);
+    const mtime = publishedAt(K.clock.now());
+    const children = (path) => Array.from(dirs).concat(Object.keys(files)).filter((p) => p !== '/' && K.VFS.dirname(p) === path);
+    return {
+      stat(path) {
+        if (dirs.has(path)) return { isDir: true, mode: 0o755, nlink: 2 + children(path).filter((p) => dirs.has(p)).length, uid: 0, gid: 0, size: 4096, mtime };
+        return path in files ? { isDir: false, mode: 0o644, nlink: 1, uid: 0, gid: 0, size: U.byteLen(files[path]), mtime } : null;
+      },
+      list: (path) => children(path).map((p) => K.VFS.basename(p)).sort(),
+      read: (path) => (path in files ? files[path] : null),
+      canEnter: (path) => dirs.has(path),
+    };
+  }
+
+  /** The same interface over a machine's real files, with the permissions of the account that logged in. */
+  function accountTree(fs) {
+    const quietly = (fn, otherwise) => { try { return fn(); } catch (e) { return otherwise; } };
+    return {
+      stat: (path) => quietly(() => fs.stat(path), null),
+      list: (path) => quietly(() => fs.readdir(path), []),
+      read: (path) => quietly(() => (fs.stat(path).isFile ? fs.read(path) : null), null),
+      canEnter: (path) => fs.isDir(path) && fs.can(path, 'x'),
+    };
+  }
+
+  /** One line of a LIST reply in vsftpd's layout (numeric owners, zero-padded day). */
+  function ftpListLine(name, st) {
+    const bits = 'rwxrwxrwx'.split('').map((ch, i) => (st.mode & (0o400 >> i) ? ch : '-')).join('');
+    const d = new Date(st.mtime);
+    const recent = Math.abs(K.clock.now() - st.mtime) < HALF_YEAR;
+    const when = U.MONTHS[d.getUTCMonth()] + ' ' + U.pad2(d.getUTCDate()) + ' ' + (recent ? U.pad2(d.getUTCHours()) + ':' + U.pad2(d.getUTCMinutes()) : ' ' + d.getUTCFullYear());
+    return (st.isDir ? 'd' : '-') + bits + ' ' + U.padStart(st.nlink, 4) + ' ' + U.padEnd(st.uid, 8) + ' ' + U.padEnd(st.gid, 8) + ' ' + U.padStart(st.size, 8) + ' ' + when + ' ' + name;
+  }
+
+  /**
+   * vsftpd's own log on the server, when the host is one a learner can log in to and read it.
+   * `pid` is what vsftpd prints from inside its sandbox: 1 for the login process, 3 for a transfer.
+   */
+  function vsftpdLog(s, pid, who, event, details) {
+    const machine = K.net.machineFor(s.host.id);
+    if (!machine) return;
+    const line = ctime(K.clock.now()) + ' [pid ' + pid + '] [' + who + '] ' + event + ': Client "' + s.client + '"' + (details || '') + '\n';
+    try { machine.vfs.write(VSFTPD_LOG, line, { append: true }); }
+    catch (e) { /* no log directory: nothing to record */ }
+  }
+
+  /** Check a password and set the session up for the account. Returns the reply. */
+  function ftpPass(s, st, password) {
+    const conf = s.host.ftp || DEFAULT_FTP;
+    const anonymous = /^(anonymous|ftp)$/i.test(st.user);
+    const ok = anonymous ? !!conf.anonymous : (conf.users || {})[st.user] != null && conf.users[st.user] === password;
+    if (!ok) {
+      vsftpdLog(s, 1, st.user, 'FAIL LOGIN');
+      st.user = null;
+      if (++st.fails >= FTP_MAX_LOGIN_FAILS) s.open = false;
+      return '530 Login incorrect.';
+    }
+    const machine = anonymous ? null : K.net.machineFor(s.host.id);
+    const account = machine && machine.userByName(st.user);
+    // A local account sees the server's real files from its home directory; everyone else sees the public area.
+    st.tree = account ? accountTree(new K.FsView(machine.vfs, '/', machine.credFor(st.user))) : mapTree(conf.files || {});
+    st.cwd = account ? account.home : '/';
+    st.authed = true;
+    if (anonymous) st.user = 'ftp';
+    vsftpdLog(s, 1, st.user, 'OK LOGIN', anonymous ? ', anon password "' + (password || '?') + '"' : '');
+    return '230 Login successful.';
+  }
+
+  /**
+   * Send `payload` over the data connection. A client that has made that connection leaves a
+   * string in session.state.data; a raw control session never does, so its transfers fail.
+   */
+  function ftpSend(s, st, payload, opening, done) {
+    if (!st.passive) return '425 Use PORT or PASV first.';
+    st.passive = false;
+    if (typeof s.state.data !== 'string') return '425 Failed to establish connection.';
+    s.state.data += payload;
+    return opening + '\r\n' + done;
+  }
+
+  /** LIST and NLST: option words are skipped (-a shows dot files), a missing path lists nothing. */
+  function ftpList(s, st, arg, namesOnly) {
+    const words = arg.split(/\s+/).filter(Boolean);
+    const flags = words.filter((w) => w[0] === '-').join('');
+    const given = words.filter((w) => w[0] !== '-')[0];
+    const path = K.VFS.abs(given || '.', st.cwd);
+    const top = st.tree.stat(path);
+    const names = !top ? [] : top.isDir ? st.tree.list(path).filter((n) => n[0] !== '.' || /a/i.test(flags)) : [K.VFS.basename(path)];
+    const lines = names.map((name) => {
+      if (namesOnly) return given && top.isDir ? given.replace(/\/$/, '') + '/' + name : name;
+      const entry = top.isDir ? st.tree.stat((path === '/' ? '' : path) + '/' + name) : top;
+      return entry ? ftpListLine(name, entry) : null;
+    }).filter(Boolean);
+    return ftpSend(s, st, lines.map((l) => l + '\r\n').join(''), '150 Here comes the directory listing.', '226 Directory send OK.');
+  }
+
+  function ftpRetr(s, st, arg) {
+    const path = K.VFS.abs(arg, st.cwd);
+    const content = arg ? st.tree.read(path) : null;
+    if (content == null) return '550 Failed to open file.';
+    const reply = ftpSend(s, st, content, '150 Opening BINARY mode data connection for ' + arg + ' (' + U.byteLen(content) + ' bytes).', '226 Transfer complete.');
+    if (/^150/.test(reply)) vsftpdLog(s, 3, st.user, 'OK DOWNLOAD', ', "' + path + '", ' + U.byteLen(content) + ' bytes, ' + (40 + K.net.rand() * 400).toFixed(2) + 'Kbyte/sec');
+    return reply;
+  }
+
+  function ftpStatus(s, st) {
+    return ['211-FTP server status:', '     Connected to ::ffff:' + s.client, '     Logged in as ' + st.user, '     TYPE: ' + (st.binary ? 'BINARY' : 'ASCII'),
+      '     No session bandwidth limit', '     Session timeout in seconds is 300', '     Control connection is plain text', '     Data connections will be plain text',
+      '     At session startup, client count was 1', '     vsFTPd ' + (s.svc.version || '3.0.5') + ' - secure, fast, stable', '211 End of status'].join('\r\n');
+  }
+
+  /** The reply to one command line. */
+  function ftpCommand(s, st, line) {
+    const m = /^\s*(\S+)\s*(.*?)\s*$/.exec(line);
+    if (!m) return '500 Unknown command.';
+    const verb = m[1].toUpperCase(); const arg = m[2];
+    if (!st.authed && !FTP_BEFORE_LOGIN.includes(verb)) return '530 Please login with USER and PASS.';
+    switch (verb) {
+      case 'USER':
+        if (st.authed) return "530 Can't change to another user.";
+        if (!arg) return '530 Permission denied.';
+        if (!/^(anonymous|ftp)$/i.test(arg) && !Object.keys((s.host.ftp || DEFAULT_FTP).users || {}).length) return '530 This FTP server is anonymous only.';
+        st.user = arg;
+        return '331 Please specify the password.';
+      case 'PASS':
+        if (st.authed) return '230 Already logged in.';
+        return st.user ? ftpPass(s, st, arg) : '503 Login with USER first.';
+      case 'QUIT': s.open = false; return '221 Goodbye.';
+      case 'FEAT': return FTP_FEATURES;
+      case 'OPTS': return /^UTF8 ON$/i.test(arg) ? '200 Always in UTF8 mode.' : '501 Option not understood.';
+      case 'SYST': return '215 UNIX Type: L8';
+      case 'NOOP': return '200 NOOP ok.';
+      case 'HELP': return FTP_HELP;
+      case 'STAT': return ftpStatus(s, st);
+      case 'PWD': case 'XPWD': return '257 "' + st.cwd + '" is the current directory';
+      case 'CWD': case 'XCWD': case 'CDUP': case 'XCUP': {
+        const path = K.VFS.abs(/CUP|CDUP/.test(verb) ? '..' : arg || '.', st.cwd);
+        if (!st.tree.canEnter(path)) return '550 Failed to change directory.';
+        st.cwd = path;
+        return '250 Directory successfully changed.';
+      }
+      case 'TYPE':
+        if (!/^(A|A N|I|L8|L 8)$/i.test(arg)) return '500 Unrecognised TYPE command.';
+        st.binary = !/^A/i.test(arg);
+        return st.binary ? '200 Switching to Binary mode.' : '200 Switching to ASCII mode.';
+      case 'MODE': return /^S$/i.test(arg) ? '200 Mode set to S.' : '504 Bad MODE command.';
+      case 'STRU': return /^F$/i.test(arg) ? '200 Structure set to F.' : '504 Bad STRU command.';
+      case 'PASV': case 'EPSV': {
+        st.passive = true;
+        const port = 1024 + Math.floor(K.net.rand() * 64000);
+        if (verb === 'EPSV') return '229 Entering Extended Passive Mode (|||' + port + '|)';
+        return '227 Entering Passive Mode (' + s.host.ip.split('.').join(',') + ',' + (port >> 8) + ',' + (port & 255) + ').';
+      }
+      case 'PORT': case 'EPRT':
+        if (verb === 'PORT' && !/^\d+(,\d+){5}$/.test(arg)) return '500 Illegal PORT command.';
+        st.passive = true;
+        return '200 ' + verb + ' command successful. Consider using ' + (verb === 'PORT' ? 'PASV' : 'EPSV') + '.';
+      case 'LIST': return ftpList(s, st, arg, false);
+      case 'NLST': return ftpList(s, st, arg, true);
+      case 'RETR': return ftpRetr(s, st, arg);
+      case 'SIZE': case 'MDTM': {
+        const there = st.tree.stat(K.VFS.abs(arg || '.', st.cwd));
+        if (!there || there.isDir) return verb === 'SIZE' ? '550 Could not get file size.' : '550 Could not get file modification time.';
+        return '213 ' + (verb === 'SIZE' ? there.size : U.isoDate(there.mtime).replace(/\D/g, ''));
+      }
+      case 'REST': return '350 Restart position accepted (' + (parseInt(arg, 10) > 0 ? parseInt(arg, 10) : 0) + ').';
+      case 'ABOR': return '225 No transfer to ABOR.';
+      case 'ALLO': return '202 ALLO command ignored.';
+      case 'SITE': return /^HELP$/i.test(arg) ? '214 CHMOD UMASK HELP' : '500 Unknown SITE command.';
+      default:
+        if (FTP_WRITE_COMMANDS.includes(verb)) return '550 Permission denied.';
+        return FTP_UNIMPLEMENTED.includes(verb) ? '502 ' + verb + ' not implemented.' : '500 Unknown command.';
+    }
+  }
+
+  K.net.services.register('ftp', {
+    greet(s) {
+      s.state.ftp = { user: null, authed: false, fails: 0, cwd: '/', binary: false, passive: false, tree: null };
+      return (s.svc.banner || '220 (vsFTPd 3.0.5)') + '\r\n';
+    },
+    data(s, input) {
+      const st = s.state.ftp;
+      st.pending = (st.pending || '') + input;
+      let out = '';
+      for (let nl = st.pending.indexOf('\n'); nl >= 0 && s.open; nl = st.pending.indexOf('\n')) {
+        const line = st.pending.slice(0, nl).replace(/\r$/, '');
+        st.pending = st.pending.slice(nl + 1);
+        out += ftpCommand(s, st, line) + '\r\n';
+      }
+      return out;
+    },
+  });
+
+  /* ================================================= smtp and pop3 protocols */
+
+  const SMTP_EXTENSIONS = ['PIPELINING', 'SIZE 10240000', 'ETRN', 'STARTTLS', 'ENHANCEDSTATUSCODES', '8BITMIME', 'DSN', 'SMTPUTF8', 'CHUNKING'];
+  const smtpName = (s) => (s.svc.banner || '').split(' ')[1] || s.host.fqdn || s.host.hostname;
+  /** "<user@domain>" out of "FROM:<user@domain> SIZE=1"; null when the argument is not an address in that form. */
+  function smtpAddress(arg, keyword) {
+    const m = new RegExp('^' + keyword + ':\\s*<([^<>\\s]*)>', 'i').exec(arg) || new RegExp('^' + keyword + ':\\s*([^<>\\s]+)', 'i').exec(arg);
+    return m ? m[1] : null;
+  }
+  /** Is the address one this server takes mail for (its own name, its domain, or no domain at all)? */
+  function smtpLocal(s, address) {
+    const domain = address.includes('@') ? address.split('@').pop().toLowerCase() : '';
+    const name = smtpName(s).toLowerCase();
+    return !domain || domain === name || domain === name.slice(name.indexOf('.') + 1) || domain === 'localhost';
+  }
+
+  /** The reply to one SMTP command line, in Postfix's words. Nothing is ever delivered. */
+  function smtpCommand(s, st, line) {
+    const m = /^\s*(\S+)\s*(.*?)\s*$/.exec(line);
+    if (!m) return '500 5.5.2 Error: bad syntax';
+    const verb = m[1].toUpperCase(); const arg = m[2];
+    switch (verb) {
+      case 'HELO':
+        if (!arg) return '501 Syntax: HELO hostname';
+        st.mail = null; st.rcpt = 0;
+        return '250 ' + smtpName(s);
+      case 'EHLO':
+        if (!arg) return '501 Syntax: EHLO hostname';
+        st.mail = null; st.rcpt = 0;
+        return [smtpName(s)].concat(SMTP_EXTENSIONS).map((text, i, all) => '250' + (i < all.length - 1 ? '-' : ' ') + text).join('\r\n');
+      case 'MAIL': {
+        if (st.mail != null) return '503 5.5.1 Error: nested MAIL command';
+        const from = smtpAddress(arg, 'FROM');
+        if (from == null) return '501 5.5.4 Syntax: MAIL FROM:<address>';
+        st.mail = from;
+        return '250 2.1.0 Ok';
+      }
+      case 'RCPT': {
+        if (st.mail == null) return '503 5.5.1 Error: need MAIL command';
+        const to = smtpAddress(arg, 'TO');
+        if (!to) return '501 5.5.4 Syntax: RCPT TO:<address>';
+        if (!smtpLocal(s, to)) return '454 4.7.1 <' + to + '>: Relay access denied';
+        st.rcpt++;
+        return '250 2.1.5 Ok';
+      }
+      case 'DATA':
+        if (!st.rcpt) return st.mail == null ? '503 5.5.1 Error: need RCPT command' : '554 5.5.1 Error: no valid recipients';
+        st.body = true;
+        return '354 End data with <CR><LF>.<CR><LF>';
+      case 'RSET': st.mail = null; st.rcpt = 0; return '250 2.0.0 Ok';
+      case 'NOOP': return '250 2.0.0 Ok';
+      case 'VRFY': return '502 5.5.1 VRFY command is disabled';
+      case 'ETRN': return arg ? '459 <' + arg + '>: service unavailable' : '500 Syntax: ETRN domain';
+      case 'AUTH': return '503 5.5.1 Error: authentication not enabled';
+      case 'STARTTLS': st.tls = true; return '220 2.0.0 Ready to start TLS';
+      case 'QUIT': s.open = false; return '221 2.0.0 Bye';
+      case 'GET': case 'POST': case 'CONNECT': case 'HEAD': case 'PUT':
+        s.open = false;
+        return '221 2.7.0 Error: I can break rules, too. Goodbye.';
+      default: return '502 5.5.2 Error: command not recognized';
+    }
+  }
+
+  K.net.services.register('smtp', {
+    greet(s) {
+      s.state.smtp = { mail: null, rcpt: 0, body: false, tls: false, pending: '' };
+      return (s.svc.banner || '220 ' + smtpName(s) + ' ESMTP Postfix') + '\r\n';
+    },
+    data(s, input) {
+      const st = s.state.smtp;
+      st.pending += input;
+      let out = '';
+      for (let nl = st.pending.indexOf('\n'); nl >= 0 && s.open; nl = st.pending.indexOf('\n')) {
+        const line = st.pending.slice(0, nl).replace(/\r$/, '');
+        st.pending = st.pending.slice(nl + 1);
+        if (st.tls) { s.open = false; break; } // plain text where a TLS handshake belongs
+        if (!st.body) out += smtpCommand(s, st, line) + '\r\n';
+        else if (line === '.') {
+          Object.assign(st, { body: false, mail: null, rcpt: 0 });
+          out += '250 2.0.0 Ok: queued as ' + Array.from({ length: 11 }, () => '0123456789ABCDEF'[Math.floor(K.net.rand() * 16)]).join('') + '\r\n';
+        }
+      }
+      return out;
+    },
+  });
+
+  const POP3_CAPABILITIES = ['+OK', 'CAPA', 'TOP', 'UIDL', 'RESP-CODES', 'PIPELINING', 'AUTH-RESP-CODE', 'STLS', 'USER', 'SASL PLAIN', '.'].join('\r\n');
+
+  /** The reply to one POP3 command line, in Dovecot's words. Nobody can log in. */
+  function pop3Command(s, st, line) {
+    const m = /^\s*(\S+)\s*(.*?)\s*$/.exec(line);
+    const verb = m ? m[1].toUpperCase() : '';
+    switch (verb) {
+      case 'CAPA': return POP3_CAPABILITIES;
+      case 'USER':
+        if (!m[2]) return '-ERR No username given.';
+        st.user = m[2];
+        return '+OK';
+      case 'PASS':
+        if (!st.user) return '-ERR No username given.';
+        st.user = null;
+        return '-ERR [AUTH] Authentication failed.';
+      case 'AUTH': return m[2] ? '-ERR [AUTH] Authentication failed.' : '+OK\r\nPLAIN\r\n.';
+      case 'STLS': st.tls = true; return '+OK Begin TLS negotiation now.';
+      case 'QUIT': s.open = false; return '+OK Logging out';
+      default: return '-ERR Unknown command.';
+    }
+  }
+
+  K.net.services.register('pop3', {
+    greet(s) {
+      s.state.pop3 = { user: null, tls: false, pending: '' };
+      return (s.svc.banner || '+OK Dovecot ready.') + '\r\n';
+    },
+    data(s, input) {
+      const st = s.state.pop3;
+      st.pending += input;
+      let out = '';
+      for (let nl = st.pending.indexOf('\n'); nl >= 0 && s.open; nl = st.pending.indexOf('\n')) {
+        const line = st.pending.slice(0, nl).replace(/\r$/, '');
+        st.pending = st.pending.slice(nl + 1);
+        if (st.tls) { s.open = false; break; }
+        out += pop3Command(s, st, line) + '\r\n';
+      }
+      return out;
     },
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
