@@ -9,7 +9,6 @@
   'use strict';
   const K = root.K;
   const U = K.util;
-  const C = K.c;
 
   /* ------------------------------------------------------------ shared helpers */
   const pad = (s, n) => U.padEnd(s, n);
@@ -199,7 +198,7 @@
       if (!(e instanceof K.Interrupt)) throw e;
       interrupted = true;
     }
-    const elapsed = Math.round(t + (stats.sent > 1 || interrupted ? 2 + net.rand() * 5 : 0) + (stats.recv ? lastAnswer : 0));
+    const elapsed = Math.floor(t + (stats.sent > 1 || interrupted ? 2 + net.rand() * 5 : 0) + (stats.recv ? lastAnswer : 0));
     ctx.println('\n--- ' + shown + ' ping statistics ---');
     const loss = Math.floor((stats.sent - stats.recv) * 100 / stats.sent);
     ctx.println(stats.sent + ' packets transmitted, ' + stats.recv + ' received, ' + (stats.errs ? '+' + stats.errs + ' errors, ' : '') + loss + '% packet loss, time ' + elapsed + 'ms');
@@ -212,7 +211,7 @@
   }
 
   K.cmd.register({
-    name: 'ping', aliases: ['ping4'], path: '/usr/bin/ping', pkg: 'iputils-ping', section: 8,
+    name: 'ping', path: '/usr/bin/ping', pkg: 'iputils-ping', section: 8,
     summary: 'send ICMP ECHO_REQUEST to network hosts',
     synopsis: 'ping [-aAbBdDfhLnOqrRUvV46] [-c count] [-i interval] [-I interface] [-s packetsize] [-t ttl] [-w deadline] [-W timeout] destination',
     man: 'DESCRIPTION\n       ping uses the ICMP protocol mandatory ECHO_REQUEST datagram to elicit an ICMP ECHO_RESPONSE from a host or gateway. ECHO_REQUEST datagrams ("pings") have an IP and ICMP header, followed by a struct timeval and then an arbitrary number of "pad" bytes used to fill out the packet.\n\n       Without -c, ping sends one request per second until you press Ctrl-C, then prints statistics.\n\nOPTIONS\n       -c count\n              Stop after sending count ECHO_REQUEST packets.\n       -i interval\n              Wait interval seconds between sending each packet. The default is one second.\n       -W timeout\n              Time to wait for a response, in seconds.\n       -w deadline\n              Specify a timeout, in seconds, before ping exits regardless of how many packets have been sent or received.\n       -s packetsize\n              Number of data bytes to be sent. The default is 56, which translates into 64 ICMP data bytes when combined with the 8 bytes of ICMP header data.\n       -t ttl\n              Set the IP Time to Live.\n       -I interface\n              Interface name or source address to send from.\n       -n     Numeric output only. No attempt will be made to lookup symbolic names for host addresses.\n       -q     Quiet output. Only the summary lines at startup and at the end are displayed.\n       -D     Print timestamp (unix time + microseconds as in gettimeofday) before each line.\n       -O     Report outstanding ICMP ECHO reply before sending next packet.\n       -4, -6 Use IPv4 or IPv6 only.\n\nEXIT STATUS\n       0 when at least one reply was received, 1 when none was, 2 on other errors.\n\nEXAMPLES\n       ping -c 4 web01.halcyon.lab\n              Send four probes to the intranet web server.\n       ping -c 1 -W 2 10.10.10.90\n              One probe, give up after two seconds.',
@@ -781,14 +780,13 @@
     const args = rest.slice(2);
     const known = ['address', 'link', 'route', 'neighbor'];
     if (obj === 'rule') {
-      if (cmd !== 'show') return ipRulePlaceholder(ctx, cmd);
+      if (cmd !== 'show') return ipRuleChange(ctx);
       ctx.println(g.family === 6 ? '0:\tfrom all lookup local\n32766:\tfrom all lookup main' : '0:\tfrom all lookup local\n32766:\tfrom all lookup main\n32767:\tfrom all lookup default');
       return 0;
     }
     if (!known.includes(obj)) return 0;
     if (!cmd) { ctx.eprintln('Command "' + word + '" is unknown, try "ip ' + (obj === 'address' ? 'addr' : obj === 'neighbor' ? 'neigh' : obj) + ' help".'); return 255; }
     if (cmd === 'help') { ctx.err(IP_HELP[obj]); return 255; }
-    const rd = [g, args];
     switch (obj) {
       case 'address':
         if (cmd === 'show') return ipShowAddr(ctx, g, args, false);
@@ -809,11 +807,10 @@
         if (cmd === 'show') return ipNeighShow(ctx, g, args);
         if (['add', 'delete', 'flush', 'change', 'replace'].includes(cmd)) return ipNeighChange(ctx, cmd, args);
     }
-    void rd;
     ctx.eprintln('Command "' + word + '" is unknown, try "ip ' + (obj === 'address' ? 'addr' : obj === 'neighbor' ? 'neigh' : obj) + ' help".');
     return 255;
   }
-  function ipRulePlaceholder(ctx) {
+  function ipRuleChange(ctx) {
     if (!ctx.isRoot) { ctx.eprintln('RTNETLINK answers: Operation not permitted'); return 2; }
     return 0;
   }
@@ -965,7 +962,7 @@
   }
 
   K.cmd.register({
-    name: 'traceroute', aliases: ['traceroute.db'], path: '/usr/bin/traceroute', pkg: 'traceroute', section: 8,
+    name: 'traceroute', path: '/usr/bin/traceroute', pkg: 'traceroute', section: 8,
     summary: 'print the route packets trace to network host',
     synopsis: 'traceroute [-46dFITnreAUDV] [-f first_ttl] [-m max_ttl] [-p port] [-q nqueries] [-w waittime] [-s src_addr] host [packetlen]',
     man: 'DESCRIPTION\n       traceroute tracks the route packets take from this machine to a destination host by sending probes with small time-to-live (TTL) values. Every router that discards a probe because its TTL ran out answers with an ICMP "time exceeded" message, which reveals its address. The TTL starts at 1 and grows until the destination answers or the maximum number of hops is reached.\n\n       Each line shows the hop number, the router and the round-trip time of three probes. A row of asterisks means the router (or a firewall) did not answer.\n\nOPTIONS\n       -n     Do not resolve addresses to names.\n       -m max_ttl\n              Set the maximum number of hops (default 30).\n       -f first_ttl\n              Start from this hop (default 1).\n       -q nqueries\n              Probes per hop (default 3).\n       -w max\n              Seconds to wait for a response (default 5).\n       -I     Use ICMP ECHO probes instead of UDP datagrams.\n       -T     Use TCP SYN probes (default port 80). Needs root.\n       -U     Use UDP to the single port 53.\n       -p port\n              Destination port (UDP and TCP) of the probes.\n\nEXAMPLES\n       traceroute -n 8.8.8.8\n              Trace the path to a public DNS server without name lookups.\n       sudo traceroute -T -p 443 kali.org\n              Probe with TCP SYN to port 443 to get through ICMP and UDP filters.',
@@ -1012,7 +1009,7 @@
   }
 
   K.cmd.register({
-    name: 'tracepath', aliases: ['tracepath6'], path: '/usr/bin/tracepath', pkg: 'iputils-tracepath', section: 8,
+    name: 'tracepath', path: '/usr/bin/tracepath', pkg: 'iputils-tracepath', section: 8,
     summary: 'traces path to a network host discovering MTU along this path',
     synopsis: 'tracepath [-4] [-6] [-n] [-b] [-l pktlen] [-m max_hops] [-p port] destination',
     man: 'DESCRIPTION\n       tracepath traces the network path to destination discovering MTU along this path. It uses UDP port port or some random port. It is similar to traceroute, only it does not require superuser privileges and has no fancy options.\n\nOPTIONS\n       -n     Print primarily IP addresses, no name lookups.\n       -b     Print both host names and IP addresses.\n       -l pktlen\n              Set the initial packet length.\n       -m max_hops\n              Set maximum hops (or maximum TTLs) to max_hops. Default is 30.\n       -p port\n              Sets the initial destination port to use.\n\nEXAMPLES\n       tracepath -n 10.10.10.10\n              Show the path and path MTU to the intranet server.',
