@@ -439,7 +439,7 @@ test('ssh-keygen: key types, sizes, passphrases and options', async () => {
   // a passphrase locks the private key
   r = await sim.run('ssh-keygen -q -f /tmp/locked -N "correct horse"');
   assert.deepEqual([r.code, r.output], [0, '']);
-  assert.match((await sim.run('sed -n 2p /tmp/locked')).out, /^b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0/, 'aes256-ctr with bcrypt');
+  assert.match((await sim.run('head -2 /tmp/locked | tail -1')).out, /^b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0/, 'aes256-ctr with bcrypt');
   r = await withInput(sim, 'ssh-keygen -y -f /tmp/locked', ['wrong']);
   assert.deepEqual([r.code, r.err], [255, 'Load key "/tmp/locked": incorrect passphrase supplied to decrypt private key\n']);
   assert.equal(r.screen, 'Enter passphrase for "/tmp/locked": \n');
@@ -452,7 +452,7 @@ test('ssh-keygen: key types, sizes, passphrases and options', async () => {
   await sim.run('chmod 644 /tmp/r');
   r = await sim.run('ssh-keygen -y -f /tmp/r');
   assert.equal(r.code, 255);
-  assert.match(r.err, /WARNING: UNPROTECTED PRIVATE KEY FILE!.*\nPermissions 0644 for '\/tmp\/r' are too open\.\n[\s\S]*Load key "\/tmp\/r": bad permissions\n$/);
+  assert.match(r.err, /WARNING: UNPROTECTED PRIVATE KEY FILE! +@\n@+\nPermissions 0644 for '\/tmp\/r' are too open\.\n[\s\S]*Load key "\/tmp\/r": bad permissions\n$/);
 
   const fatal = async (line, text, code = 255) => {
     const f = await sim.run(line);
