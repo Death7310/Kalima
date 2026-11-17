@@ -2,7 +2,7 @@
  *
  * Lessons: files-view, files-manage, files-redirect, files-edit. They read the
  * practice data under /usr/share/kalima and write only under ~/practice/files
- * (plus one appended line in ~/engagement/notes.md). Checks test what a line
+ * (plus a few appended lines in ~/engagement/notes.md). Checks test what a line
  * printed or left on disk, so any correct way of doing a step passes, and each
  * lesson can be repeated: its first steps rebuild what the later ones need.
  */
@@ -12,7 +12,6 @@
 
   const T = (...lines) => lines.join('\n');
   const DATA = '/usr/share/kalima';
-  const ACCESS = DATA + '/logs/access.log';
   const AUTH = DATA + '/logs/auth.log';
 
   /* ------------------------------------------------------------ files-view */
@@ -426,7 +425,7 @@
   };
 
   /* -------------------------------------------------------- files-redirect */
-  const LOGS = DATA + '/logs';
+  const STREAMS = WORK + '/streams';        // this lesson's own directory: a wildcard there matches only its two logs
   const NOTES = '/home/kali/engagement/notes.md';
   const has = (path, contains) => ({ file: { path, contains } });
 
@@ -449,19 +448,19 @@
       {
         id: 'setup',
         prompt: T(
-          'Work in the practice directory, so that the files you create have a home:',
+          'Set up a working directory for this lesson: make it, go into it, and copy the two practice logs there.',
           '',
           '```',
-          'mkdir -p ~/practice/files && cd ~/practice/files',
+          'mkdir -p ~/practice/files/streams',
+          'cd ~/practice/files/streams',
+          'cp ' + DATA + '/logs/*.log .',
           '```',
           '',
-          '`&&` joins two commands and runs the second only if the first succeeded. Here the shell enters the directory only once it is sure the directory exists.',
-          '',
-          'The prompt should now show `~/practice/files`. The rest of the lesson assumes you are there.'
+          '`ls` should now show `access.log` and `auth.log`, and the prompt should read `~/practice/files/streams`. The rest of the lesson assumes you are in this directory, working on your own copies.'
         ),
-        hint: 'Type the whole line, including the two ampersands with a space on each side.',
-        solution: 'mkdir -p ~/practice/files && cd ~/practice/files',
-        check: inWork,
+        hint: 'Run the three lines in order. The step completes on the `cp`, which ends with a space and a dot. To do it all in one line, join the commands with `&&`: it runs the next command only if the one before it succeeded.',
+        solution: 'mkdir -p ~/practice/files/streams && cd ~/practice/files/streams && cp ' + DATA + '/logs/*.log .',
+        check: { all: [{ cwd: STREAMS }, { cmd: 'cp' }, exists(STREAMS + '/access.log'), exists(STREAMS + '/auth.log')] },
       },
       {
         id: 'write',
@@ -469,16 +468,16 @@
           'A command writes its results to a stream called **standard output**, which is normally connected to your terminal. `>` connects it to a file instead:',
           '',
           '```',
-          'wc -l ' + ACCESS + ' > counts.txt',
+          'wc -l access.log > counts.txt',
           '```',
           '',
           'Nothing appeared, because the line count went into the file. Read it back with `cat counts.txt`.',
           '',
           'If the file does not exist, `>` creates it. If it does exist, `>` empties it first, without any warning.'
         ),
-        hint: 'After the path of the log come a space, `>`, another space, and the name of the file to write.',
-        solution: 'wc -l ' + ACCESS + ' > counts.txt',
-        check: { cmd: 'wc', line: />/, file: { path: WORK + '/counts.txt', contains: /476\s+\S*access\.log/ }, not: { out: /476/ } },
+        hint: 'After the name of the log come a space, `>`, another space, and the name of the file to write. If `wc` cannot find `access.log`, you are not in `~/practice/files/streams`.',
+        solution: 'wc -l access.log > counts.txt',
+        check: { cmd: 'wc', line: />/, file: { path: STREAMS + '/counts.txt', contains: /476\s+\S*access\.log/ }, not: { out: /476/ } },
       },
       {
         id: 'append',
@@ -486,42 +485,43 @@
           '`>>` adds to the end of a file and leaves what is already there in place. Add the line count of the second log:',
           '',
           '```',
-          'wc -l ' + AUTH + ' >> counts.txt',
+          'wc -l auth.log >> counts.txt',
           '```',
           '',
           'Now `cat counts.txt` shows two lines. With a single `>` the second command would have replaced the first result. When the file is a record you are building up, `>>` is the operator you want.'
         ),
         hint: 'Two `>` characters with no space between them. If `counts.txt` ends up with only one line, run the previous step\'s command again and then this one.',
-        solution: 'wc -l ' + AUTH + ' >> counts.txt',
-        check: { cmd: 'wc', all: [has(WORK + '/counts.txt', /476\s+\S*access\.log/), has(WORK + '/counts.txt', /450\s+\S*auth\.log/)] },
+        solution: 'wc -l auth.log >> counts.txt',
+        check: { cmd: 'wc', all: [has(STREAMS + '/counts.txt', /476\s+\S*access\.log/), has(STREAMS + '/counts.txt', /450\s+\S*auth\.log/)] },
       },
       {
         id: 'stderr',
         prompt: T(
           'Error messages travel on a second stream, **standard error**, so that they do not get mixed into the results. The streams are numbered: standard output is 1 and standard error is 2. `2>` redirects stream 2.',
           '',
-          'Ask `ls` about one directory that exists and one that does not, and send only the errors to a file:',
+          'Ask `ls` about one file that exists and one that does not, and send only the errors to a file:',
           '',
           '```',
-          'ls ' + LOGS + ' /nosuch 2> errors.txt',
+          'ls auth.log lost.log 2> errors.txt',
           '```',
           '',
-          'The listing still appears, because stream 1 was left alone. The complaint about `/nosuch` is in `errors.txt`. Had you used a plain `>`, it would have been the other way round: the listing in the file and the error on your screen.'
+          'The name `auth.log` still appears, because stream 1 was left alone. The complaint about `lost.log` went into the file: read it with `cat errors.txt`. Had you used a plain `>`, it would have been the other way round, with the name in the file and the error on your screen.'
         ),
         hint: 'Write `2>` with no space between the digit and the `>`.',
-        solution: 'ls ' + LOGS + ' /nosuch 2> errors.txt',
-        check: { cmd: 'ls', out: /access\.log/, not: { out: /No such file/ }, file: { path: WORK + '/errors.txt', contains: /No such file or directory/ } },
+        solution: 'ls auth.log lost.log 2> errors.txt',
+        check: { cmd: 'ls', out: /auth\.log/, not: { out: /No such file/ }, file: { path: STREAMS + '/errors.txt', contains: /No such file or directory/ } },
       },
       {
         id: 'null',
         prompt: T(
           'Sometimes you do not want the errors at all. `/dev/null` is a special file that discards everything written to it.',
           '',
-          'Run the same `ls` command on the two directories again, but this time throw the error message away, so that only the listing appears and no file is written.'
+          'Run the same `ls` command on the two names again, but this time throw the error message away, so that only `auth.log` is printed and no file is written.'
         ),
         hint: 'Keep `2>` and change where it points: to `/dev/null` in place of `errors.txt`.',
-        solution: 'ls ' + LOGS + ' /nosuch 2> /dev/null',
-        check: { cmd: 'ls', argsRe: /nosuch/, line: /\/dev\/null/, out: /access\.log/, not: { out: /No such file/ } },
+        solution: 'ls auth.log lost.log 2> /dev/null',
+        // exit status 2: ls was still asked for a name that is not there, and only the message was discarded
+        check: { cmd: 'ls', line: /\/dev\/null/, exit: 2, out: /auth\.log/, not: { out: /No such file/ } },
       },
       {
         id: 'both',
@@ -529,18 +529,18 @@
           'To keep everything a command said, send both streams to one file. `2>&1` means "send stream 2 to wherever stream 1 is going now":',
           '',
           '```',
-          'ls ' + LOGS + ' /nosuch > all.txt 2>&1',
+          'ls auth.log lost.log > all.txt 2>&1',
           '```',
           '',
-          'Nothing reaches the screen this time. `cat all.txt` shows the error and the listing together.',
+          'Nothing reaches the screen this time. `cat all.txt` shows the error message and the name together.',
           '',
           'The order matters. The shell reads redirections from left to right, so `> all.txt` must come first. Only then does "wherever stream 1 is going" mean the file.'
         ),
         hint: 'Type it exactly: `> all.txt` first, then `2>&1` with no spaces inside it.',
-        solution: 'ls ' + LOGS + ' /nosuch > all.txt 2>&1',
+        solution: 'ls auth.log lost.log > all.txt 2>&1',
         check: {
-          cmd: 'ls', not: { out: /No such file|access\.log/ },
-          all: [has(WORK + '/all.txt', /No such file or directory/), has(WORK + '/all.txt', /access\.log/)],
+          cmd: 'ls', not: { out: /No such file|auth\.log/ },
+          all: [has(STREAMS + '/all.txt', /No such file or directory/), has(STREAMS + '/all.txt', /^auth\.log$/m)],
         },
       },
       {
@@ -573,26 +573,26 @@
           '`>` hides the output from you, and a pipe passes it on without keeping it. `tee` does both jobs: it copies what it receives into a file and also prints it, like a T-shaped junction in a water pipe:',
           '',
           '```',
-          'wc -l ' + LOGS + '/*.log | tee counts.txt',
+          'wc -l *.log | tee counts.txt',
           '```',
           '',
           'You see the two counts and their total, and `counts.txt` now holds the same three lines. Like `>`, `tee` replaces the old content of the file. `tee -a` appends instead, like `>>`.'
         ),
-        hint: 'The pattern `*.log` matches both logs. After the pipe comes `tee` and the name of the file to write.',
-        solution: 'wc -l ' + LOGS + '/*.log | tee counts.txt',
-        check: { cmd: 'tee', out: /926\s+total/, file: { path: WORK + '/counts.txt', contains: /926\s+total/ } },
+        hint: 'The pattern `*.log` matches both of your copies. After the pipe comes `tee` and the name of the file to write.',
+        solution: 'wc -l *.log | tee counts.txt',
+        check: { cmd: 'tee', out: /926\s+total/, file: { path: STREAMS + '/counts.txt', contains: /926\s+total/ } },
       },
       {
         id: 'notes',
         prompt: T(
           'Your notes for this engagement are in `~/engagement/notes.md`. Good notes hold the actual output of commands, not a summary from memory.',
           '',
-          'Add the line counts of both practice logs, with their total, to the end of `~/engagement/notes.md`. Everything already in the file must stay. Then read the file with `cat` to confirm that the old headings are still above the new lines.',
+          'Add the line counts of both logs, with their total, to the end of `~/engagement/notes.md`. Everything already in the file must stay. Then read the file with `cat` to confirm that the old headings are still above the new lines.',
           '',
           'Check the operator twice before you press Enter. A single `>` would replace your notes.'
         ),
         hint: 'Run the same `wc -l` command as in the last step. Send its output to the notes file either with `>>`, or through a pipe to `tee -a`.',
-        solution: 'wc -l ' + LOGS + '/*.log >> ~/engagement/notes.md',
+        solution: 'wc -l *.log >> ~/engagement/notes.md',
         check: { all: [{ any: [{ line: />>\s*\S*notes\.md/ }, { cmd: 'tee', args: ['-a'], argsRe: /notes\.md/ }] }, has(NOTES, /926\s+total/)] },
       },
     ],
@@ -672,31 +672,32 @@
       {
         id: 'setup',
         prompt: T(
-          'Go to the practice directory, creating it first if it is not there yet:',
+          'Go to the practice directory, creating it first in case it is not there yet:',
           '',
           '```',
-          'mkdir -p ~/practice/files && cd ~/practice/files',
+          'mkdir -p ~/practice/files',
+          'cd ~/practice/files',
           '```',
           '',
           'The prompt should now show `~/practice/files`. Every editor command in this lesson is run from here.'
         ),
-        hint: 'Type the whole line. `&&` runs the `cd` only if the `mkdir` succeeded.',
+        hint: 'Run the two lines in order. The solution joins them with `&&`, which runs the `cd` only if the `mkdir` succeeded.',
         solution: 'mkdir -p ~/practice/files && cd ~/practice/files',
         check: inWork,
       },
       {
         id: 'copy',
         prompt: T(
-          'Never practice on an original. Take a copy of the checklist you are going to edit:',
+          'Never practice on an original. The directory `' + DATA + '/files` holds one file, `checklist.txt`. Take a copy of it to edit:',
           '',
           '```',
-          'cp ' + SEED + ' .',
+          'cp ' + DATA + '/files/* .',
           '```',
           '',
-          'Read it with `cat checklist.txt`: a title, an empty line and four items, two of them ticked. If you repeat this lesson, this command gives you a fresh copy to start from.'
+          'Read your copy with `cat checklist.txt`: a title, an empty line and four items, two of them ticked. If you repeat this lesson, this command gives you a fresh copy to start from.'
         ),
-        hint: 'The destination is a single dot, which means the directory you are in.',
-        solution: 'cp ' + SEED + ' .',
+        hint: 'The star matches every file in that directory, and the final dot is the destination: the directory you are in.',
+        solution: 'cp ' + DATA + '/files/* .',
         check: { cmd: 'cp', file: { path: LIST, contains: /Pre-engagement checklist/ } },
       },
       {
