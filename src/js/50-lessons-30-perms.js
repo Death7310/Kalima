@@ -483,7 +483,7 @@
         why: 'The system uses the first class that fits and looks no further. The owner could change the mode to get access back, but as it stands the read is refused.',
       },
     ],
-    refs: ['ls(1)', 'stat(1)', 'path_resolution(7)', 'The Linux Command Line (W. Shotts), ch. 9'],
+    refs: ['ls(1)', 'stat(1)', 'path_resolution(7)', 'Kali Linux Revealed, ch. 3', 'The Linux Command Line (W. Shotts), ch. 9'],
   };
 
   /* ---------------------------------------------------------------- change */
@@ -716,7 +716,7 @@
         why: '`u+x` adds exactly the missing permission for exactly one account. `777` would also let every account rewrite the script, and `sudo` does not help because no execute permission is set for anyone.',
       },
     ],
-    refs: ['chmod(1)', 'chown(1)', 'chgrp(1)', 'umask(2)', 'The Linux Command Line (W. Shotts), ch. 9'],
+    refs: ['chmod(1)', 'chown(1)', 'chgrp(1)', 'umask(2)', 'Kali Linux Revealed, ch. 3', 'The Linux Command Line (W. Shotts), ch. 9'],
   };
 
   /* ------------------------------------------------------------------ sudo */
