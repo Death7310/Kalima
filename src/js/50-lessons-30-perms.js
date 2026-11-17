@@ -486,13 +486,243 @@
     refs: ['ls(1)', 'stat(1)', 'path_resolution(7)', 'The Linux Command Line (W. Shotts), ch. 9'],
   };
 
+  /* ---------------------------------------------------------------- change */
+  const KALI_UID = 1000;
+  const modeOf = (name) => { const st = statOf(WORK + '/' + name); return st ? st.mode & 0o7777 : -1; };
+  const ownedBy = (name, uid, gid) => { const st = statOf(WORK + '/' + name); return !!st && st.uid === uid && (gid == null || st.gid === gid); };
+
+  const changeLesson = {
+    id: 'perms-change',
+    title: 'Changing permissions and ownership',
+    minutes: 12,
+    objectives: [
+      'Make a script executable and run it',
+      'Set permissions with `chmod` in both the symbolic and the octal form',
+      'Change the owner and group of a file with `chown` and `chgrp`, and say when that needs root',
+      'Explain how the umask decides the permissions of new files',
+    ],
+    intro: T(
+      'Reading permissions tells you what is allowed. Changing them is how you make a script runnable, keep client notes away from other accounts, and take back files that a tool running as root left behind. All three come up in the first week of real work.',
+      '',
+      'You will practice on copies in `~/practice/perms`. One rule runs through the whole lesson: grant what the task needs, to the accounts that need it, and nothing more.'
+    ),
+    steps: [
+      {
+        id: 'setup',
+        prompt: T(
+          'Set up a working directory with two practice files in it:',
+          '',
+          '```',
+          'mkdir -p ~/practice/perms',
+          'cd ~/practice/perms',
+          'rm -f checklist.sh findings.txt scan.txt',
+          'cp /usr/share/kalima/templates/* .',
+          '```',
+          '',
+          'The `rm -f` clears away leftovers from an earlier run of this lesson and stays silent if there are none. Then `cp` copies a small script and a file of notes. Run `ls -l` and you will see that both copies belong to you and start as `-rw-r--r--`.',
+          '',
+          'Because you own them, you may change their permissions. Only the owner of a file, or root, can do that.'
+        ),
+        hint: 'Run the four commands in order. The step completes when fresh copies of both files are in `~/practice/perms` and you are in that directory.',
+        solution: 'mkdir -p ~/practice/perms && cd ~/practice/perms && rm -f checklist.sh findings.txt scan.txt && cp /usr/share/kalima/templates/* .',
+        check: {
+          cwd: WORK,
+          fn: () => ownedBy('checklist.sh', KALI_UID) && (modeOf('checklist.sh') & 0o111) === 0 &&
+            ownedBy('findings.txt', KALI_UID) && (modeOf('findings.txt') & 0o077) !== 0 && !statOf(WORK + '/scan.txt'),
+        },
+      },
+      {
+        id: 'refused',
+        prompt: T(
+          '`checklist.sh` is a short shell script. To run a program that is not in one of the system\'s program directories, you give its path. `./` means *in the current directory*:',
+          '',
+          '```',
+          './checklist.sh',
+          '```',
+          '',
+          'The shell refuses with `permission denied`. The content of the file is fine. What is missing is the execute permission: `-rw-r--r--` has no `x` in any of its three groups, so nobody may run this file as a program.'
+        ),
+        hint: 'Type `./checklist.sh` exactly, with the dot and the slash. The step completes when you see the refusal.',
+        solution: './checklist.sh',
+        check: { out: /permission denied.*checklist\.sh|checklist\.sh.*permission denied/i, fn: () => (modeOf('checklist.sh') & 0o100) === 0 },
+      },
+      {
+        id: 'exec',
+        prompt: T(
+          '`chmod` changes permissions. Its symbolic form reads like a short sentence with three parts: *who* (`u` for the owner, `g` for the group, `o` for other, `a` for all three), an *operator* (`+` adds, `-` removes, `=` sets exactly), and the *permission* (`r`, `w` or `x`).',
+          '',
+          'Give the owner, and only the owner, the right to execute the script. Then run it again:',
+          '',
+          '```',
+          'chmod u+x checklist.sh',
+          './checklist.sh',
+          '```',
+          '',
+          'This time the script runs and prints three lines. `ls -l checklist.sh` now shows `-rwxr--r--`.'
+        ),
+        hint: '`u+x` means: for the user who owns the file, add execute. Run `chmod` first, then the script.',
+        solution: 'chmod u+x checklist.sh && ./checklist.sh',
+        check: { out: /Operator: kali on /, exit: 0, fn: () => (modeOf('checklist.sh') & 0o100) !== 0 },
+      },
+      {
+        id: 'private',
+        prompt: T(
+          '`findings.txt` holds working notes about a client. With `-rw-r--r--`, every account on this machine can read them. Take the read permission away from the group and from other in one command:',
+          '',
+          '```',
+          'chmod go-r findings.txt',
+          '```',
+          '',
+          'Check with `ls -l findings.txt`: the mode is now `-rw-------`. The symbolic form changed only what you named. The owner\'s `rw-` was left as it was.'
+        ),
+        hint: '`go-r` means: for group and other, remove read.',
+        solution: 'chmod go-r findings.txt',
+        check: { cmd: 'chmod', fn: () => (modeOf('findings.txt') & 0o077) === 0 && (modeOf('findings.txt') & 0o600) === 0o600 },
+      },
+      {
+        id: 'octal',
+        prompt: T(
+          'The octal form states all nine permissions at once, as the three digits you learned to read: 4 for `r`, 2 for `w`, 1 for `x`, added up for owner, group and other.',
+          '',
+          'Suppose your team lead decides that members of your group should be able to read the notes after all. Owner read and write is 6, group read is 4, other nothing is 0:',
+          '',
+          '```',
+          'chmod 640 findings.txt',
+          '```',
+          '',
+          '`ls -l findings.txt` shows `-rw-r-----`. Unlike the symbolic form, the octal form replaces everything, so you never need to know what the mode was before.'
+        ),
+        hint: 'Three digits, then the file name.',
+        solution: 'chmod 640 findings.txt',
+        check: { cmd: 'chmod', fn: () => modeOf('findings.txt') === 0o640 },
+      },
+      {
+        id: 'octal-own',
+        prompt: T(
+          'Now work out a mode yourself. Set `checklist.sh` so that:',
+          '',
+          '- the owner may read, write and run it',
+          '- members of the group may read and run it',
+          '- everyone else may do nothing',
+          '',
+          'Use the octal form, then confirm the result with `ls -l checklist.sh`.'
+        ),
+        hint: 'Add up 4, 2 and 1 for the owner, 4 and 1 for the group, and use 0 for other.',
+        solution: 'chmod 750 checklist.sh',
+        check: { cmd: 'chmod', fn: () => modeOf('checklist.sh') === 0o750 },
+      },
+      {
+        id: 'root-file',
+        prompt: T(
+          'Ownership is the other half of the picture. Many security tools need root and are started with `sudo`, which runs one command as root after asking for *your* password (in this lab it is `kali`). Any file such a command creates belongs to root. See it happen:',
+          '',
+          '```',
+          'sudo touch scan.txt',
+          'ls -l scan.txt',
+          '```',
+          '',
+          'The new file shows `root root`. For you it is read-only: you are neither its owner nor in its group, so `r--` for other applies. This is a common surprise after running a tool with `sudo` in your own directory.'
+        ),
+        hint: 'Run both commands. If `ls -l` shows that `scan.txt` already belongs to `kali`, it is left over from an earlier run: remove it with `rm scan.txt` and start this step again.',
+        solution: 'sudo touch scan.txt && ls -l scan.txt',
+        input: ['kali'],
+        check: { fn: () => ownedBy('scan.txt', 0) },
+      },
+      {
+        id: 'chown',
+        prompt: T(
+          '`chown` changes the owner of a file. Only root may do that, even for a file in your own directory, so it needs `sudo` as well. Take the file back:',
+          '',
+          '```',
+          'sudo chown kali scan.txt',
+          '```',
+          '',
+          'Look at it again with `ls -l scan.txt`. The owner is now `kali`, but the group is still `root`.'
+        ),
+        hint: 'The new owner comes first, then the file. `sudo` goes in front of the whole command.',
+        solution: 'sudo chown kali scan.txt',
+        input: ['kali'],
+        check: { cmd: ['chown', 'chgrp'], fn: () => ownedBy('scan.txt', KALI_UID) },
+      },
+      {
+        id: 'chgrp',
+        prompt: T(
+          '`chgrp` changes the group of a file and is used the same way: the new group, then the file. The owner of a file may hand it to any group they are a member of, so now that the file is yours you do not need `sudo` for this.',
+          '',
+          'Set the group of `scan.txt` to `kali`.',
+          '',
+          'For next time: `sudo chown kali:kali scan.txt` would have set the owner and the group in one command.'
+        ),
+        hint: '`chgrp`, the group name, the file name.',
+        solution: 'chgrp kali scan.txt',
+        check: { cmd: ['chgrp', 'chown'], fn: () => ownedBy('scan.txt', KALI_UID, KALI_UID) },
+      },
+      {
+        id: 'umask',
+        prompt: T(
+          'One question is left: why did all your new files start as `-rw-r--r--`? A new file starts from `666` and a new directory from `777`, and the shell\'s *umask* names the permissions to leave out. Print it:',
+          '',
+          '```',
+          'umask',
+          '```',
+          '',
+          'The value is `022`, which some shells print with an extra zero in front as `0022`. The digits line up with owner, group and other: leave out nothing for the owner, and `w` (2) for group and for other. That turns `666` into `644` for files and `777` into `755` for directories.'
+        ),
+        hint: 'Type `umask` with no arguments.',
+        solution: 'umask',
+        check: { cmd: 'umask', out: /^0?[0-7]{3}\s*$/m },
+      },
+    ],
+    quiz: [
+      {
+        q: 'A file in your directory `~/practice/perms` (`drwxr-xr-x kali kali`) belongs to root and has mode `644`. Can `kali` delete it without `sudo`?',
+        choices: [
+          'No, only the owner of a file may delete it',
+          'No, deleting needs write permission on the file',
+          'Yes, deleting changes the directory, and `kali` has write permission on the directory',
+          'Yes, but only after `chmod 777` on the file',
+        ],
+        answer: 2,
+        why: 'A directory is a list of names, and removing a name needs `w` and `x` on the directory, not on the file. `rm` asks for confirmation first, because the file is write-protected.',
+      },
+      {
+        q: 'Which command has the same effect as `chmod 644 notes.txt`?',
+        choices: [
+          '`chmod u+rw notes.txt`',
+          '`chmod u=rw,go=r notes.txt`',
+          '`chmod a+r notes.txt`',
+          '`chmod go-w notes.txt`',
+        ],
+        answer: 1,
+        why: 'The octal form sets all nine permissions, and `=` does the same for the classes it names. The other three only add or remove something and leave the rest as it was.',
+      },
+      {
+        q: 'With a umask of `077`, which mode does a newly created file get?',
+        choices: ['`600`', '`644`', '`700`', '`077`'],
+        answer: 0,
+        why: 'A new file starts from `666`, and the umask removes every permission for group and other, which leaves `600`. A umask like this suits accounts that handle confidential material.',
+      },
+      {
+        q: 'Your script answers `permission denied` when you run `./tidy.sh`, and `ls -l` shows `-rw-r--r-- kali kali`. Which fix grants the least?',
+        choices: [
+          '`chmod 777 tidy.sh`',
+          '`sudo ./tidy.sh`',
+          '`chmod u+x tidy.sh`',
+          '`sudo chown root tidy.sh`',
+        ],
+        answer: 2,
+        why: '`u+x` adds exactly the missing permission for exactly one account. `777` would also let every account rewrite the script, and `sudo` does not help because no execute permission is set for anyone.',
+      },
+    ],
+    refs: ['chmod(1)', 'chown(1)', 'chgrp(1)', 'umask(2)', 'The Linux Command Line (W. Shotts), ch. 9'],
+  };
+
   K.lessons.register({
     id: 'perms',
     title: 'Users, permissions and privilege',
     order: 30,
     summary: 'Know who you are on the system, read and set file permissions with confidence, and use root privilege only for the commands that need it.',
-    lessons: [usersLesson, readLesson],
+    lessons: [usersLesson, readLesson, changeLesson],
   });
 
-  void WORK; void statOf;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
