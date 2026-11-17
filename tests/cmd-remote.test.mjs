@@ -377,3 +377,118 @@ test('telnet: connection lines and a line session', async () => {
   assert.match((await sim.run('telnet --help')).out, /^Usage: telnet \[OPTION\.\.\.\] \[HOST \[PORT\]\]\nLogin to remote system HOST/);
   assert.match((await sim.run('telnet --version')).out, /^telnet \(GNU inetutils\) 2\.\d+\n/);
 });
+
+test('ssh-keygen: interactive generation writes both halves in the OpenSSH layouts', async () => {
+  const sim = await boot();
+  await sim.run('rm -rf ~/.ssh');
+  let r = await withInput(sim, 'ssh-keygen', ['', 'first try', 'second try', '', '']);
+  assert.equal(r.code, 0);
+  assert.equal(r.screen, 'Enter file in which to save the key (/home/kali/.ssh/id_ed25519): \n' +
+    'Enter passphrase for "/home/kali/.ssh/id_ed25519" (empty for no passphrase): \nEnter same passphrase again: \n'.repeat(2));
+  assert.equal(r.err, "Created directory '/home/kali/.ssh'.\n");
+  const lines = r.out.split('\n');
+  assert.deepEqual(lines.slice(0, 5), ['Generating public/private ed25519 key pair.', 'Passphrases do not match.  Try again.',
+    'Your identification has been saved in /home/kali/.ssh/id_ed25519', 'Your public key has been saved in /home/kali/.ssh/id_ed25519.pub', 'The key fingerprint is:']);
+  assert.match(lines[5], /^SHA256:[A-Za-z0-9+/]{43} kali@kali$/);
+  assert.equal(lines[6], "The key's randomart image is:");
+  assert.equal(lines[7], '+--[ED25519 256]--+');
+  for (const row of lines.slice(8, 17)) assert.match(row, /^\|[ .o+=*BOX@%&#/^SE]{17}\|$/);
+  assert.equal(lines[17], '+----[SHA256]-----+');
+  assert.equal(lines.slice(8, 17).join('').replace(/[^SE]/g, '').length, 2, 'start and end of the walk are marked');
+
+  assert.equal((await sim.run('stat -c "%a %n" ~/.ssh ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub')).out,
+    '700 /home/kali/.ssh\n600 /home/kali/.ssh/id_ed25519\n644 /home/kali/.ssh/id_ed25519.pub\n');
+  const pub = (await sim.run('cat ~/.ssh/id_ed25519.pub')).out;
+  assert.match(pub, /^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43} kali@kali\n$/);
+  assert.match(pub, /KALIMA\+SIMULATED\+KEY/, 'the key says what it is');
+  const prv = (await sim.run('cat ~/.ssh/id_ed25519')).out.split('\n');
+  assert.equal(prv[0], '-----BEGIN OPENSSH PRIVATE KEY-----');
+  assert.match(prv[1], /^b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB[A-Za-z0-9+/]{18}$/, 'openssh-key-v1, no cipher, 70 columns');
+  assert.equal(prv[prv.length - 2], '-----END OPENSSH PRIVATE KEY-----');
+
+  // the same key again: -y and -l read it back
+  assert.equal((await sim.run('ssh-keygen -y -f ~/.ssh/id_ed25519')).out, pub);
+  r = await sim.run('ssh-keygen -l -f ~/.ssh/id_ed25519');
+  assert.equal(r.out, '256 ' + lines[5] + ' (ED25519)\n');
+  r = await sim.run('ssh-keygen -lv -f ~/.ssh/id_ed25519.pub');
+  assert.equal(r.out, '256 ' + lines[5] + ' (ED25519)\n' + lines.slice(7, 18).join('\n') + '\n');
+
+  // an existing key is only replaced after a yes
+  r = await withInput(sim, 'ssh-keygen', ['', 'n']);
+  assert.equal(r.code, 1);
+  assert.match(r.screen, /Overwrite \(y\/n\)\? n\n$/);
+  assert.equal(r.out, 'Generating public/private ed25519 key pair.\n/home/kali/.ssh/id_ed25519 already exists.\n');
+  assert.equal((await sim.run('cat ~/.ssh/id_ed25519.pub')).out, pub);
+  r = await sim.run("printf '\\ny\\n' | ssh-keygen -N ''");
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^Generating public\/private ed25519 key pair\.\nEnter file in which to save the key \(\/home\/kali\/\.ssh\/id_ed25519\): \/home\/kali\/\.ssh\/id_ed25519 already exists\.\nOverwrite \(y\/n\)\? Your identification has been saved in /);
+  assert.notEqual((await sim.run('cat ~/.ssh/id_ed25519.pub')).out, pub, 'a new key each time');
+});
+
+test('ssh-keygen: key types, sizes, passphrases and options', async () => {
+  const sim = await boot();
+  let r = await sim.run("ssh-keygen -t rsa -b 4096 -f /tmp/lab_rsa -N '' -C 'kali@lab'");
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^Generating public\/private rsa key pair\.\nYour identification has been saved in \/tmp\/lab_rsa\nYour public key has been saved in \/tmp\/lab_rsa\.pub\nThe key fingerprint is:\nSHA256:\S{43} kali@lab\nThe key's randomart image is:\n\+---\[RSA 4096\]----\+\n/);
+  assert.match((await sim.run('cat /tmp/lab_rsa.pub')).out, /^ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQ[A-Za-z0-9+/]+=* kali@lab\n$/);
+  assert.match((await sim.run('ssh-keygen -l -f /tmp/lab_rsa.pub')).out, /^4096 SHA256:\S{43} kali@lab \(RSA\)\n$/);
+  assert.match((await sim.run("ssh-keygen -t rsa -f /tmp/r -N '' -q; ssh-keygen -l -f /tmp/r")).out, /^3072 SHA256:\S+ kali@kali \(RSA\)\n$/);
+  r = await sim.run("ssh-keygen -t ecdsa -b 384 -f /tmp/ec -N '' | tail -11 | head -1; cat /tmp/ec.pub");
+  assert.match(r.out, /^\+---\[ECDSA 384\]---\+\necdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABh\S+ kali@kali\n$/);
+
+  // a passphrase locks the private key
+  r = await sim.run('ssh-keygen -q -f /tmp/locked -N "correct horse"');
+  assert.deepEqual([r.code, r.output], [0, '']);
+  assert.match((await sim.run('sed -n 2p /tmp/locked')).out, /^b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0/, 'aes256-ctr with bcrypt');
+  r = await withInput(sim, 'ssh-keygen -y -f /tmp/locked', ['wrong']);
+  assert.deepEqual([r.code, r.err], [255, 'Load key "/tmp/locked": incorrect passphrase supplied to decrypt private key\n']);
+  assert.equal(r.screen, 'Enter passphrase for "/tmp/locked": \n');
+  r = await withInput(sim, 'ssh-keygen -y -f /tmp/locked', ['correct horse']);
+  assert.equal(r.out, (await sim.run('cat /tmp/locked.pub')).out);
+  assert.match((await sim.run('ssh-keygen -l -f /tmp/locked')).out, / kali@kali \(ED25519\)\n$/, 'the fingerprint needs no passphrase');
+  assert.match((await sim.run('ssh-keygen -l -E md5 -f /tmp/locked.pub')).out, /^256 MD5:([0-9a-f]{2}:){15}[0-9a-f]{2} kali@kali \(ED25519\)\n$/);
+
+  // a private key readable by others is refused
+  await sim.run('chmod 644 /tmp/r');
+  r = await sim.run('ssh-keygen -y -f /tmp/r');
+  assert.equal(r.code, 255);
+  assert.match(r.err, /WARNING: UNPROTECTED PRIVATE KEY FILE!.*\nPermissions 0644 for '\/tmp\/r' are too open\.\n[\s\S]*Load key "\/tmp\/r": bad permissions\n$/);
+
+  const fatal = async (line, text, code = 255) => {
+    const f = await sim.run(line);
+    assert.equal(f.code, code, line);
+    assert.equal(f.err.split('\n').slice(0, text.split('\n').length).join('\n'), text, line);
+  };
+  await fatal('ssh-keygen -t dsa', 'unknown key type dsa');
+  await fatal('ssh-keygen -t rsa -b 512', 'Invalid RSA key length: minimum is 1024 bits');
+  await fatal('ssh-keygen -t ecdsa -b 300', 'Invalid ECDSA key length: valid lengths are 256, 384 or 521 bits');
+  await fatal('ssh-keygen -b many', 'Bits has bad value many (invalid)');
+  await fatal('ssh-keygen -l -E crc32 -f /tmp/r.pub', 'Invalid hash algorithm "crc32"');
+  await fatal('ssh-keygen -l -f /nofile', 'ssh-keygen: /nofile: No such file or directory');
+  await fatal('ssh-keygen -l -f /etc/hostname', '/etc/hostname is not a public key file.');
+  await fatal('ssh-keygen -y -f /nofile', '/nofile: No such file or directory');
+  await fatal("ssh-keygen -f /nodir/key -N ''", 'Saving key "/nodir/key" failed: No such file or directory');
+  await fatal('ssh-keygen -Z', 'unknown option -- Z\nusage: ssh-keygen [-q] [-a rounds] [-b bits] [-C comment] [-f output_keyfile]', 1);
+  await fatal('ssh-keygen extra', 'Too many arguments.\nusage: ssh-keygen [-q] [-a rounds] [-b bits] [-C comment] [-f output_keyfile]', 1);
+  assert.match(sim.K.cmd.get('ssh-keygen').man, /^DESCRIPTION\n[\s\S]*\nOPTIONS\n[\s\S]*\nEXAMPLES\n/);
+});
+
+test('ssh-keygen: known_hosts fingerprints and -R', async () => {
+  const sim = await boot();
+  await sim.run('mkdir -p ~/.ssh; echo "Host *\n  HashKnownHosts no" > ~/.ssh/config');
+  await withInput(sim, `ssh ${WEB01} true`, ['yes', 'student']);
+  await withInput(sim, 'ssh student@db01.halcyon.lab true', ['yes', 'student']);
+  let r = await sim.run('ssh-keygen -l -f ~/.ssh/known_hosts');
+  assert.match(r.out, /^256 SHA256:\S{43} web01\.halcyon\.lab \(ED25519\)\n256 SHA256:\S{43} db01\.halcyon\.lab \(ED25519\)\n$/);
+  r = await sim.run('ssh-keygen -R web01.halcyon.lab');
+  assert.equal(r.code, 0);
+  assert.equal(r.out, '# Host web01.halcyon.lab found: line 1\n/home/kali/.ssh/known_hosts updated.\nOriginal contents retained as /home/kali/.ssh/known_hosts.old\n');
+  assert.match((await sim.run('cat ~/.ssh/known_hosts')).out, /^db01\.halcyon\.lab ssh-ed25519 \S+\n$/);
+  assert.equal((await sim.run('wc -l < ~/.ssh/known_hosts.old')).out, '2\n');
+  r = await sim.run('ssh-keygen -R web01.halcyon.lab');
+  assert.deepEqual([r.code, r.output], [0, 'Host web01.halcyon.lab not found in /home/kali/.ssh/known_hosts\n']);
+  r = await withInput(sim, `ssh ${WEB01} true`, ['no']);
+  assert.match(r.err, /^The authenticity of host 'web01\.halcyon\.lab/, 'the host is unknown again');
+  r = await sim.run('ssh-keygen -R web01 -f /tmp/none');
+  assert.deepEqual([r.code, r.err], [255, 'Cannot stat /tmp/none: No such file or directory\n']);
+});

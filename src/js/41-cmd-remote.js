@@ -185,12 +185,19 @@
   function keyInfo(key) {
     if (key.type === 'ssh-ed25519') return { label: KEY_LABEL.ed25519, bits: 256 };
     if (key.type === 'ssh-rsa') return { label: KEY_LABEL.rsa, bits: (b64dec(key.blob).length - 23) * 8 };
-    return { label: KEY_LABEL.ecdsa, bits: parseInt(key.type.replace(/^\D+/, ''), 10) };
+    return { label: KEY_LABEL.ecdsa, bits: +/\d+$/.exec(key.type)[0] };
   }
 
-  /** 32 digest-like bytes for a key blob. Stable, but not a real SHA-256. */
-  const digestBytes = (blob) => noiseBytes(U.prng('fingerprint:' + blob), 32);
-  const fingerprint = (blob) => 'SHA256:' + b64enc(digestBytes(blob)).replace(/=+$/, '');
+  const DIGEST_SIZE = { md5: 16, sha1: 20, sha256: 32, sha384: 48, sha512: 64 };
+  /** Digest-like bytes for a key blob, as many as the named hash would give. Stable, but not a real hash. */
+  const digestBytes = (blob, alg) => noiseBytes(U.prng('fingerprint:' + (alg === 'sha256' ? '' : alg + ':') + blob), DIGEST_SIZE[alg]);
+  /** A fingerprint in ssh-keygen's notation: "SHA256:" and unpadded base64, or "MD5:" and colon-separated hex. */
+  function fingerprint(blob, alg) {
+    alg = alg || 'sha256';
+    const bytes = digestBytes(blob, alg);
+    if (alg === 'md5') return 'MD5:' + bytes.map((b) => b.toString(16).padStart(2, '0')).join(':');
+    return alg.toUpperCase() + ':' + b64enc(bytes).replace(/=+$/, '');
+  }
 
   const PEM_HEAD = '-----BEGIN OPENSSH PRIVATE KEY-----';
   const PEM_TAIL = '-----END OPENSSH PRIVATE KEY-----';
@@ -725,6 +732,234 @@
   K.net.services.register('ssh', {
     greet(s) { return (s.svc.banner || 'SSH-2.0-' + SSH_VERSION) + '\r\n'; },
     data(s) { s.open = false; return 'Invalid SSH identification string.\r\n'; },
+  });
+
+  /* ============================================================= ssh-keygen */
+
+  const KEYGEN_USAGE = [
+    'usage: ssh-keygen [-q] [-a rounds] [-b bits] [-C comment] [-f output_keyfile]',
+    '                  [-m format] [-N new_passphrase] [-O option]',
+    '                  [-t ecdsa | ecdsa-sk | ed25519 | ed25519-sk | rsa]',
+    '                  [-w provider] [-Z cipher]',
+    '       ssh-keygen -p [-a rounds] [-f keyfile] [-m format] [-N new_passphrase]',
+    '                   [-P old_passphrase] [-Z cipher]',
+    '       ssh-keygen -i [-f input_keyfile] [-m key_format]',
+    '       ssh-keygen -e [-f input_keyfile] [-m key_format]',
+    '       ssh-keygen -y [-f input_keyfile]',
+    '       ssh-keygen -c [-a rounds] [-C comment] [-f keyfile] [-P passphrase]',
+    '       ssh-keygen -l [-v] [-E fingerprint_hash] [-f input_keyfile]',
+    '       ssh-keygen -B [-f input_keyfile]',
+    '       ssh-keygen -D pkcs11',
+    '       ssh-keygen -F hostname [-lv] [-f known_hosts_file]',
+    '       ssh-keygen -H [-f known_hosts_file]',
+    '       ssh-keygen -K [-a rounds] [-w provider]',
+    '       ssh-keygen -R hostname [-f known_hosts_file]',
+    '       ssh-keygen -r hostname [-g] [-f input_keyfile]',
+    '       ssh-keygen -M generate [-O option] output_file',
+    '       ssh-keygen -M screen [-f input_file] [-O option] output_file',
+    '       ssh-keygen -I certificate_identity -s ca_key [-hU] [-D pkcs11_provider]',
+    '                  [-n principals] [-O option] [-V validity_interval]',
+    '                  [-z serial_number] file ...',
+    '       ssh-keygen -L [-f input_keyfile]',
+    '       ssh-keygen -A [-a rounds] [-f prefix_path]',
+    '       ssh-keygen -k -f krl_file [-u] [-s ca_public] [-z version_number]',
+    '                  file ...',
+    '       ssh-keygen -Q [-l] -f krl_file [file ...]',
+    '       ssh-keygen -Y find-principals -s signature_file -f allowed_signers_file',
+    '       ssh-keygen -Y match-principals -I signer_identity -f allowed_signers_file',
+    '       ssh-keygen -Y check-novalidate -n namespace -s signature_file',
+    '       ssh-keygen -Y sign -f key_file -n namespace file [-O option] ...',
+    '       ssh-keygen -Y verify -f allowed_signers_file -I signer_identity',
+    '                  -n namespace -s signature_file [-r krl_file] [-O option]', '',
+  ].join('\n');
+  const RSA_BITS = { min: 1024, standard: 3072, max: 16384 };
+  const ECDSA_BITS = [256, 384, 521];
+
+  /** OpenSSH's fatal(): the message alone on stderr, exit status 255. */
+  function fatal(ctx, msg) { ctx.err(msg + '\n'); return 255; }
+
+  /** Prompt on stdout and read the answer from stdin, as programs built on printf and fgets do. */
+  async function ask(ctx, prompt) {
+    if (ctx.stdin == null) return ctx.readLine(prompt);
+    ctx.out(prompt);
+    return ctx.readLine('');
+  }
+
+  /** The "drunken bishop" picture OpenSSH draws from the bytes of a fingerprint. */
+  function randomart(key, alg) {
+    const W = 17; const H = 9; const symbols = ' .o+=*BOX@%&#/^SE'; const top = symbols.length - 1;
+    const field = Array.from({ length: H }, () => new Array(W).fill(0));
+    let x = W >> 1; let y = H >> 1;
+    for (let byte of digestBytes(key.blob, alg)) {
+      for (let step = 0; step < 4; step++, byte >>= 2) {
+        x = Math.min(W - 1, Math.max(0, x + (byte & 1 ? 1 : -1)));
+        y = Math.min(H - 1, Math.max(0, y + (byte & 2 ? 1 : -1)));
+        if (field[y][x] < top - 2) field[y][x]++;
+      }
+    }
+    field[H >> 1][W >> 1] = top - 1;
+    field[y][x] = top;
+    const border = (label) => { const left = (W - label.length) >> 1; return '+' + '-'.repeat(left) + label + '-'.repeat(W - left - label.length) + '+\n'; };
+    const info = keyInfo(key);
+    return border('[' + info.label + ' ' + info.bits + ']') + field.map((row) => '|' + row.map((v) => symbols[v]).join('') + '|\n').join('') + border('[' + alg.toUpperCase() + ']');
+  }
+
+  /** The size a new key gets: { bits } or { err } with ssh-keygen's complaint about -b. */
+  function keygenBits(kind, text) {
+    if (text != null && !/^\d+$/.test(text)) return { err: 'Bits has bad value ' + text + ' (invalid)' };
+    if (text != null && +text === 0) return { err: 'Bits has bad value ' + text + ' (too small)' };
+    if (kind === 'ed25519') return { bits: 256 };
+    if (kind === 'ecdsa') {
+      const bits = text == null ? ECDSA_BITS[0] : +text;
+      return ECDSA_BITS.includes(bits) ? { bits } : { err: 'Invalid ECDSA key length: valid lengths are 256, 384 or 521 bits' };
+    }
+    const bits = text == null ? RSA_BITS.standard : +text;
+    if (bits < RSA_BITS.min) return { err: 'Invalid RSA key length: minimum is ' + RSA_BITS.min + ' bits' };
+    return bits > RSA_BITS.max ? { err: 'Invalid RSA key length: maximum is ' + RSA_BITS.max + ' bits' } : { bits };
+  }
+
+  /** A new passphrase, typed twice until both entries agree. */
+  async function newPassphrase(ctx, file) {
+    for (;;) {
+      const first = await ctx.term.readLine({ prompt: 'Enter passphrase for "' + file + '" (empty for no passphrase): ', hidden: true });
+      const second = await ctx.term.readLine({ prompt: 'Enter same passphrase again: ', hidden: true });
+      if ((first || '') === (second || '')) return first || '';
+      ctx.out('Passphrases do not match.  Try again.\n');
+    }
+  }
+
+  /** ssh-keygen with no mode option: make a key pair and save both halves. */
+  async function keygenGenerate(ctx, o, alg) {
+    const say = (s) => { if (!o.q) ctx.out(s + '\n'); };
+    const kind = String(o.t || 'ed25519').toLowerCase();
+    if (!KEY_LABEL[kind]) return fatal(ctx, 'unknown key type ' + o.t);
+    const size = keygenBits(kind, o.b);
+    if (size.err) return fatal(ctx, size.err);
+    say('Generating public/private ' + kind + ' key pair.');
+    if (kind === 'rsa') await ctx.sleep(K.net.jitter(size.bits * size.bits / 9000, size.bits / 8));
+
+    const sshDir = ctx.user.home + '/.ssh';
+    let file = o.f;
+    if (file == null) {
+      const standard = sshDir + '/id_' + kind;
+      const typed = await ask(ctx, 'Enter file in which to save the key (' + standard + '): ');
+      if (typed == null) return 1;
+      file = typed.trim() || standard;
+    }
+    if (K.VFS.dirname(ctx.path(file)) === sshDir && !ctx.fs.exists(sshDir)) {
+      try { ctx.fs.mkdir(sshDir, { mode: 0o700 }); ctx.err("Created directory '" + sshDir + "'.\n"); }
+      catch (e) { ctx.err("Could not create directory '" + sshDir + "' (" + e.message + ').\n'); }
+    }
+    if (ctx.fs.exists(file)) {
+      ctx.out(file + ' already exists.\n');
+      const answer = await ask(ctx, 'Overwrite (y/n)? ');
+      if (!/^y/i.test(answer || '')) return 1;
+    }
+    const passphrase = o.N != null ? o.N : await newPassphrase(ctx, file);
+    const seed = K.clock.now() + ':' + K.net.rand();
+    const key = { type: keyTypeName(kind, size.bits), blob: makeBlob(kind, size.bits, seed), comment: o.C != null ? o.C : ctx.user.name + '@' + ctx.machine.hostname };
+    try {
+      if (ctx.fs.exists(file)) ctx.fs.unlink(file);
+      ctx.fs.write(file, makePrivateFile(key, passphrase, seed), { mode: 0o600 });
+    } catch (e) { return fatal(ctx, 'Saving key "' + file + '" failed: ' + e.message); }
+    say('Your identification has been saved in ' + file);
+    try { ctx.fs.write(file + '.pub', key.type + ' ' + key.blob + ' ' + key.comment + '\n', { mode: 0o644 }); }
+    catch (e) { return fatal(ctx, 'Unable to save public key to ' + file + '.pub: ' + e.message); }
+    say('Your public key has been saved in ' + file + '.pub');
+    say('The key fingerprint is:\n' + fingerprint(key.blob, alg) + ' ' + key.comment);
+    say("The key's randomart image is:\n" + randomart(key, alg).trimEnd());
+    return 0;
+  }
+
+  /** The file a mode option works on: -f, or the answer to ssh-keygen's question. null at end of input. */
+  async function keygenInput(ctx, o) {
+    if (o.f != null) return o.f;
+    const standard = ctx.user.home + '/.ssh/id_ed25519';
+    const typed = await ask(ctx, 'Enter file in which the key is (' + standard + '): ');
+    return typed == null ? null : typed.trim() || standard;
+  }
+
+  /** ssh-keygen -l: fingerprints of a private key, a public key, or every key in an authorized_keys or known_hosts file. */
+  function keygenFingerprints(ctx, o, alg, path) {
+    let text;
+    try { text = ctx.fs.read(path); } catch (e) { return fatal(ctx, 'ssh-keygen: ' + path + ': ' + e.message); }
+    const show = (key, comment) => {
+      const info = keyInfo(key);
+      ctx.out(info.bits + ' ' + fingerprint(key.blob, alg) + ' ' + (comment || 'no comment') + ' (' + info.label + ')\n');
+      if (o.v) ctx.out(randomart(key, alg));
+    };
+    if (/PRIVATE KEY/.test(text.split('\n')[0])) {
+      // The public half next to a private key carries the comment even when the private key is locked.
+      let beside = null;
+      try { beside = parsePublicLine(ctx.fs.read(path + '.pub')); } catch (e) { /* no public half */ }
+      const inside = parsePrivateFile(text);
+      if (!beside && !inside) return fatal(ctx, path + ' is not a key file.');
+      show(beside || inside, (beside && beside.comment) || (inside && inside.comment));
+      return 0;
+    }
+    let found = false;
+    for (const line of text.split('\n')) {
+      const key = /^\s*(#|$)/.test(line) ? null : parsePublicLine(line);
+      if (!key) continue;
+      const lead = line.trim().split(/\s+/)[0]; // a host name or key options in front of the key
+      show(key, key.comment || (lead === key.type ? '' : lead));
+      found = true;
+    }
+    return found ? 0 : fatal(ctx, path + ' is not a public key file.');
+  }
+
+  /** ssh-keygen -y: the public half of a private key file. */
+  async function keygenPublic(ctx, path) {
+    if (!ctx.fs.exists(path)) return fatal(ctx, path + ': No such file or directory');
+    const key = loadIdentity(ctx, path);
+    if (!key) return 255;
+    if (key.locked) {
+      const typed = await ctx.term.readLine({ prompt: 'Enter passphrase for "' + path + '": ', hidden: true });
+      if (passphraseCheck(key.salt, typed || '') !== key.check) return fatal(ctx, 'Load key "' + path + '": incorrect passphrase supplied to decrypt private key');
+    }
+    ctx.out(key.type + ' ' + key.blob + (key.comment ? ' ' + key.comment : '') + '\n');
+    return 0;
+  }
+
+  /** ssh-keygen -R: drop every known_hosts line for a host, keeping the old file beside the new one. */
+  function keygenRemoveHost(ctx, o, name) {
+    const file = o.f != null ? o.f : ctx.user.home + '/.ssh/known_hosts';
+    let text;
+    try { text = ctx.fs.read(file); } catch (e) { return fatal(ctx, 'Cannot stat ' + file + ': ' + e.message); }
+    const gone = readKnownHosts(ctx.fs, file).filter((entry) => knownAs(entry, name)).map((entry) => entry.n);
+    if (!gone.length) { ctx.err('Host ' + name + ' not found in ' + file + '\n'); return 0; }
+    if (!o.q) for (const n of gone) ctx.out('# Host ' + name + ' found: line ' + n + '\n');
+    try {
+      ctx.fs.write(file + '.old', text, { mode: 0o600 });
+      ctx.fs.write(file, text.split('\n').filter((line, i) => !gone.includes(i + 1)).join('\n'), { mode: 0o600 });
+    } catch (e) { return fatal(ctx, file + ': ' + e.message); }
+    if (!o.q) ctx.out(file + ' updated.\nOriginal contents retained as ' + file + '.old\n');
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'ssh-keygen', pkg: 'openssh-client', section: 1,
+    summary: 'OpenSSH authentication key utility',
+    synopsis: 'ssh-keygen [-q] [-b bits] [-C comment] [-f output_keyfile] [-N new_passphrase] [-t ecdsa | ed25519 | rsa]\n       ssh-keygen -y [-f input_keyfile]\n       ssh-keygen -l [-v] [-E fingerprint_hash] [-f input_keyfile]\n       ssh-keygen -R hostname [-f known_hosts_file]',
+    man: 'DESCRIPTION\n       ssh-keygen generates, manages and converts authentication keys for ssh(1). With no mode option it creates a key pair: the private key stays in the file you name (by default ~/.ssh/id_ed25519) and the public key is written next to it with the extension .pub. The public key is the half you hand out, for example with ssh-copy-id(1).\n\n' +
+      '       A passphrase protects the private key file; an empty passphrase leaves it unprotected. In this simulator the key files use the real OpenSSH layouts, but the key material is placeholder data marked KALIMA+SIMULATED+KEY and the fingerprints are stand-ins, so nothing here works against a real server.\n\n' +
+      'OPTIONS\n       -b bits\n              Number of bits in the key. RSA keys are 3072 bits by default (minimum 1024). ECDSA accepts 256, 384 or 521. Ed25519 keys have a fixed length and ignore -b.\n       -C comment\n              Provides a new comment. The default is user@host.\n' +
+      '       -E fingerprint_hash\n              Hash algorithm used when displaying key fingerprints: md5 or sha256 (the default).\n       -f filename\n              Filename of the key file.\n       -l     Show the fingerprint of a public or private key file. Every key in an authorized_keys or known_hosts file is listed. With -v the randomart image is shown as well.\n' +
+      '       -N new_passphrase\n              Provides the new passphrase, so nothing is asked.\n       -q     Silence ssh-keygen.\n       -R hostname\n              Removes all keys belonging to hostname from a known_hosts file.\n' +
+      '       -t ecdsa | ed25519 | rsa\n              Type of key to create. The default is ed25519.\n       -y     Read a private key file and print the public key to stdout.\n\n' +
+      "EXAMPLES\n       ssh-keygen\n              Create an Ed25519 key pair, answering the questions about the file and the passphrase.\n       ssh-keygen -t rsa -b 4096 -f ~/.ssh/lab_rsa -N '' -C 'kali@lab'\n              Create an RSA key without any questions.\n       ssh-keygen -lv -f ~/.ssh/id_ed25519.pub\n              Show a key's fingerprint and randomart image.\n       ssh-keygen -R web01.halcyon.lab\n              Forget the stored host key of web01.",
+    async run(ctx) {
+      const g = bsdGetopt(ctx.args, 'lqvyb:C:E:f:N:R:t:');
+      if (g.err || g.rest.length) { ctx.err((g.err || 'Too many arguments.') + '\n' + KEYGEN_USAGE); return 1; }
+      const o = g.opts;
+      const alg = String(o.E || 'sha256').toLowerCase();
+      if (!DIGEST_SIZE[alg]) return fatal(ctx, 'Invalid hash algorithm "' + o.E + '"');
+      if (o.R != null) return keygenRemoveHost(ctx, o, o.R);
+      if (!o.l && !o.y) return keygenGenerate(ctx, o, alg);
+      const path = await keygenInput(ctx, o);
+      if (path == null) return 1;
+      return o.l ? keygenFingerprints(ctx, o, alg, path) : keygenPublic(ctx, path);
+    },
   });
 
   /* ================================================================= netcat */
