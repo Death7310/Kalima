@@ -507,3 +507,87 @@ test('arp: table, -a, -n, set and delete', async () => {
   await sim.run('ping -c 1 10.10.10.10');
   assert.match(await sim.out('arp -an'), /^\? \(10\.10\.10\.10\) at <incomplete> on eth0\n$/);
 });
+
+/* ------------------------------------------------------ nmcli, iwconfig, ethtool */
+
+test('nmcli: general, device and connection tables', async () => {
+  const sim = await net();
+  assert.equal(await sim.out('nmcli general status'), 'STATE      CONNECTIVITY  WIFI-HW  WIFI     WWAN-HW  WWAN     \nconnected  full          enabled  enabled  enabled  enabled  \n');
+  assert.equal(await sim.out('nmcli device status'), 'DEVICE  TYPE      STATE                   CONNECTION          \neth0    ethernet  connected               Wired connection 1  \nlo      loopback  connected (externally)  lo                  \n');
+  const con = (await sim.out('nmcli connection show')).split('\n');
+  assert.equal(con[0], 'NAME                UUID                                  TYPE      DEVICE  ');
+  assert.match(con[1], /^Wired connection 1  [0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}  ethernet  eth0    $/);
+  assert.equal(await sim.out('nmcli d'), await sim.out('nmcli device status'));
+  assert.equal(await sim.out('nmcli -t -f DEVICE,STATE device'), 'eth0:connected\nlo:connected (externally)\n');
+});
+
+test('nmcli device show: key column and addresses', async () => {
+  const sim = await net();
+  const out = await sim.out('nmcli device show eth0');
+  assert.match(out, /^GENERAL\.DEVICE: {25}eth0\nGENERAL\.TYPE: {27}ethernet\nGENERAL\.HWADDR: {25}08:00:27:[0-9A-F:]{8}\n/);
+  assert.match(out, /\nIP4\.ADDRESS\[1\]: {25}10\.10\.10\.5\/24\nIP4\.GATEWAY: {28}10\.10\.10\.1\nIP4\.ROUTE\[1\]: {27}dst = 10\.10\.10\.0\/24, nh = 0\.0\.0\.0, mt = 100\n/);
+  assert.match(out, /IP4\.DNS\[1\]: +10\.10\.10\.53\nIP4\.DOMAIN\[1\]: +halcyon\.lab\n/);
+  const r = await sim.run('nmcli device show eth9');
+  assert.equal(r.err, "Error: Device 'eth9' not found.\n");
+  assert.equal(r.code, 10);
+  assert.match(await sim.out('nmcli device show'), /\n\nGENERAL\.DEVICE: +lo\n/);
+});
+
+test('nmcli: overview, actions, errors', async () => {
+  const sim = await net();
+  assert.match(await sim.out('nmcli'), /^eth0: connected to Wired connection 1\n        "Intel 82540EM"\n        ethernet \(e1000\), 08:00:27:/);
+  assert.match(await sim.out('nmcli'), /DNS configuration:\n        servers: 10\.10\.10\.53/);
+  const r = await sim.run('nmcli device disconnect eth0');
+  assert.equal(r.out, "Device 'eth0' successfully disconnected.\n");
+  assert.match(await sim.out('nmcli device status'), /eth0 +ethernet +disconnected +--/);
+  assert.equal(await sim.out('nmcli -t -f STATE general'), 'disconnected\n');
+  assert.equal((await sim.run('ping -c 1 10.10.10.10')).err, 'ping: connect: Network is unreachable\n');
+  assert.match((await sim.run('nmcli device connect eth0')).out, /^Device 'eth0' successfully activated with '[0-9a-f-]{36}'\.\n$/);
+  assert.equal((await sim.run('ping -c 1 10.10.10.10')).code, 0);
+  assert.match((await sim.run('nmcli connection down "Wired connection 1"')).out, /^Connection 'Wired connection 1' successfully deactivated/);
+  assert.match((await sim.run('nmcli connection up "Wired connection 1"')).out, /^Connection successfully activated/);
+  const bad = await sim.run('nmcli foo');
+  assert.equal(bad.err, "Error: argument 'foo' not understood. Try passing --help instead.\n");
+  assert.equal(bad.code, 2);
+  assert.equal((await sim.run('nmcli connection show nosuch')).err, 'Error: nosuch - no such connection profile.\n');
+  assert.equal((await sim.run('nmcli -v')).out, 'nmcli tool, version 1.52.1\n');
+});
+
+test('iwconfig: no wireless extensions', async () => {
+  const sim = await net();
+  assert.equal(await sim.out('iwconfig'), 'lo        no wireless extensions.\n\neth0      no wireless extensions.\n\n');
+  assert.equal(await sim.out('iwconfig eth0'), 'eth0      no wireless extensions.\n\n');
+  const r = await sim.run('iwconfig wlan0');
+  assert.equal(r.err, 'wlan0     No such device\n');
+  assert.equal(r.code, 1);
+});
+
+test('ethtool: settings, driver, errors and privileges', async () => {
+  const sim = await net();
+  const user = await sim.out('ethtool eth0');
+  assert.match(user, /^Settings for eth0:\n\tSupported ports: \[ TP \]\n\tSupported link modes:   10baseT\/Half 10baseT\/Full\n/);
+  assert.match(user, /\tSpeed: 1000Mb\/s\n\tDuplex: Full\n/);
+  assert.match(user, /\nCannot get wake-on-lan settings: Operation not permitted\n\tCurrent message level: 0x00000007 \(7\)\n\t\t\t       drv probe link\n\tLink detected: yes\n$/);
+  const root = await sim.out('sudo ethtool eth0');
+  assert.match(root, /\tSupports Wake-on: umbg\n\tWake-on: d\n/);
+  assert.match(await sim.out('ethtool -i eth0'), /^driver: e1000\nversion: .+\nfirmware-version: \n/);
+  assert.equal(await sim.out('ethtool lo'), 'Settings for lo:\n\tLink detected: yes\n');
+  const r = await sim.run('ethtool eth9');
+  assert.equal(r.code, 75);
+  assert.match(r.err, /^Cannot get device settings: No such device\n/);
+  assert.equal((await sim.run('ethtool')).code, 1);
+  await sim.run('sudo ip link set eth0 down');
+  assert.match(await sim.out('ethtool eth0'), /Link detected: no\n$/);
+});
+
+test('completion: hosts for ping, interfaces and keywords for ip', async () => {
+  const sim = await net();
+  const def = sim.K.cmd.get('ping');
+  const names = def.complete({ words: ['ping', ''], index: 1, cur: '', ctx: {} });
+  assert.ok(names.includes('web01.halcyon.lab') && names.includes('dc01') && names.includes('kali.org'));
+  assert.ok(sim.K.cmd.get('traceroute').complete({ words: ['traceroute', ''], index: 1, cur: '' }).includes('files01'));
+  const ip = sim.K.cmd.get('ip');
+  assert.ok(ip.complete({ words: ['ip', ''], index: 1, cur: '' }).includes('route'));
+  assert.deepEqual(ip.complete({ words: ['ip', 'link', 'set', 'dev', ''], index: 4, cur: '', ctx: { machine: sim.machine } }), ['lo', 'eth0']);
+  assert.ok(ip.complete({ words: ['ip', 'addr', ''], index: 2, cur: '' }).includes('add'));
+});

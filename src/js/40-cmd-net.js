@@ -1497,5 +1497,290 @@
   });
 
 
+  /* ====================================== nmcli, iwconfig, ethtool */
+  const NM_VERSION = '1.52.1';
+  const NM_USAGE = 'Usage: nmcli [OPTIONS] OBJECT { COMMAND | help }\n\nOPTIONS\n  -a, --ask                                  ask for missing parameters\n  -c, --colors auto|yes|no                   whether to use colors in output\n  -e, --escape yes|no                        escape columns separators in values\n  -f, --fields <field,...>|all|common        specify fields to output\n  -g, --get-values <field,...>|all|common    shortcut for -m tabular -t -f\n  -h, --help                                 print this help\n  -m, --mode tabular|multiline               output mode\n  -p, --pretty                               pretty output\n  -s, --show-secrets                         allow displaying passwords\n  -t, --terse                                terse output\n  -v, --version                              show program version\n  -w, --wait <seconds>                       set timeout waiting for finishing operations\n\nOBJECT\n  g[eneral]       NetworkManager\'s general status and operations\n  n[etworking]    overall networking control\n  r[adio]         NetworkManager radio switches\n  c[onnection]    NetworkManager\'s connections\n  d[evice]        devices managed by NetworkManager\n  a[gent]         NetworkManager secret agent or polkit agent\n  m[onitor]       monitor NetworkManager changes\n\n';
+  const nmUuid = (seed) => {
+    const h = (n) => ('00000000' + U.hash32(seed + ':' + n).toString(16)).slice(-8);
+    const a = h(1) + h(2) + h(3) + h(4);
+    return [a.slice(0, 8), a.slice(8, 12), '4' + a.slice(13, 16), '8' + a.slice(17, 20), a.slice(20, 32)].join('-');
+  };
+  const upMac = (mac) => mac.toUpperCase();
+  const nmType = (i) => (i.kind === 'loopback' ? 'loopback' : 'ethernet');
+  const profileOf = (m, i) => (i.kind === 'loopback' ? 'lo' : 'Wired connection ' + (m.ifaces.filter((x) => x.kind !== 'loopback').indexOf(i) + 1));
+  /** NetworkManager's view of each interface: real devices first, loopback last. */
+  function nmDevices(m) {
+    return netToolsOrder(m).map((i) => {
+      const up = isUp(i);
+      return { i, name: i.name, type: nmType(i), up, state: !up ? 'disconnected' : i.kind === 'loopback' ? 'connected (externally)' : 'connected', stateNum: up ? 100 : 30, conn: up ? profileOf(m, i) : '--', profile: profileOf(m, i), uuid: nmUuid(m.hostname + profileOf(m, i)) };
+    });
+  }
+  const nmEscape = (s) => String(s).replace(/([:\\])/g, '\\$1');
+
+  function nmPrint(ctx, o, headers, rows) {
+    let cols = headers.map((h, n) => n);
+    if (o.f && o.f !== 'all' && o.f !== 'common') {
+      cols = String(o.f).split(',').map((f) => headers.findIndex((h) => h.toLowerCase() === f.trim().toLowerCase()));
+      const bad = String(o.f).split(',')[cols.indexOf(-1)];
+      if (cols.includes(-1)) { ctx.eprintln("Error: Field '" + bad + "' in '-f' option is not valid."); return 2; }
+    }
+    const H = cols.map((c) => headers[c]); const R = rows.map((r) => cols.map((c) => r[c]));
+    if (o.t) { ctx.println(R.map((r) => r.map(nmEscape).join(':')).join('\n')); return 0; }
+    if (o.m && 'multiline'.startsWith(o.m)) {
+      const w = 40;
+      ctx.println(R.map((r) => r.map((v, n) => pad(H[n] + ':', w) + v).join('\n')).join('\n'));
+      return 0;
+    }
+    const color = ctx.isTTY && o.c !== 'no';
+    const widths = H.map((h, n) => Math.max(h.length, ...R.map((r) => String(r[n]).length)));
+    const paint = (s, code) => (color ? '\x1b[' + code + 'm' + s + '\x1b[0m' : s);
+    const fit = (v, n, code) => (color && code ? pad(paint(String(v), code), widths[n]) : pad(String(v), widths[n]));
+    ctx.println([H.map((h, n) => fit(h, n, '1')).join('  ') + '  '].concat(R.map((r) => r.map((v, n) => fit(v, n, /^connected/.test(v) ? '32' : null)).join('  ') + '  ')).join('\n'));
+    return 0;
+  }
+
+  function nmDeviceShow(ctx, d) {
+    const m = ctx.machine; const i = d.i; const out = [];
+    const kv = (k, v) => out.push(pad(k + ':', 40) + v);
+    kv('GENERAL.DEVICE', d.name); kv('GENERAL.TYPE', d.type); kv('GENERAL.HWADDR', upMac(i.mac || '00:00:00:00:00:00')); kv('GENERAL.MTU', i.mtu || 1500);
+    kv('GENERAL.STATE', d.stateNum + ' (' + d.state + ')'); kv('GENERAL.CONNECTION', d.conn);
+    kv('GENERAL.CON-PATH', d.up ? '/org/freedesktop/NetworkManager/ActiveConnection/' + m.ifaces.indexOf(i) : '--');
+    if (i.kind !== 'loopback') kv('WIRED-PROPERTIES.CARRIER', d.up ? 'on' : 'off');
+    const addrs = d.up ? addrList(i) : [];
+    addrs.forEach((a, n) => kv('IP4.ADDRESS[' + (n + 1) + ']', a.ip + '/' + a.bits));
+    const routes = d.up ? m.routes.filter((r) => r.dev === i.name && !r.type) : [];
+    const gw = routes.find((r) => r.dst === 'default');
+    kv('IP4.GATEWAY', gw ? gw.via : '--');
+    routes.slice().sort((a, b) => (a.via ? 1 : 0) - (b.via ? 1 : 0)).forEach((r, n) => kv('IP4.ROUTE[' + (n + 1) + ']', 'dst = ' + (r.dst === 'default' ? '0.0.0.0/0' : r.dst) + ', nh = ' + (r.via || '0.0.0.0') + ', mt = ' + (r.metric || 0)));
+    if (d.up && i.kind !== 'loopback') { m.dns.forEach((s, n) => kv('IP4.DNS[' + (n + 1) + ']', s)); m.search.forEach((s, n) => kv('IP4.DOMAIN[' + (n + 1) + ']', s)); }
+    if (d.up) {
+      kv('IP6.ADDRESS[1]', i.kind === 'loopback' ? '::1/128' : linkLocal6(i.mac));
+      kv('IP6.GATEWAY', '--');
+      if (i.kind !== 'loopback') kv('IP6.ROUTE[1]', 'dst = fe80::/64, nh = ::, mt = 1024');
+    }
+    return out.join('\n');
+  }
+  function nmOverview(ctx) {
+    const m = ctx.machine; const out = [];
+    for (const d of nmDevices(m)) {
+      const i = d.i;
+      out.push(d.name + ': ' + d.state + (d.up ? ' to ' + d.conn : ''));
+      out.push('        "' + (i.kind === 'loopback' ? 'lo' : 'Intel 82540EM') + '"');
+      out.push('        ' + (i.kind === 'loopback' ? 'loopback (unknown)' : 'ethernet (e1000)') + ', ' + upMac(i.mac || '00:00:00:00:00:00') + ', ' + (i.kind === 'loopback' ? 'sw' : 'hw') + ', mtu ' + (i.mtu || 1500));
+      if (d.up) {
+        if (m.routes.some((r) => r.dev === i.name && r.dst === 'default')) out.push('        ip4 default');
+        for (const a of addrList(i)) out.push('        inet4 ' + a.ip + '/' + a.bits);
+        for (const r of m.routes.filter((x) => x.dev === i.name && !x.type).sort(displayOrder).reverse()) out.push('        route4 ' + (r.dst === 'default' ? 'default via ' + r.via : r.dst) + ' metric ' + (r.metric || 0));
+        out.push('        inet6 ' + (i.kind === 'loopback' ? '::1/128' : linkLocal6(i.mac)));
+        out.push('        route6 ' + (i.kind === 'loopback' ? '::1/128' : 'fe80::/64') + ' metric ' + (i.kind === 'loopback' ? 256 : 1024));
+      }
+      out.push('');
+    }
+    if (m.dns.length) out.push('DNS configuration:', '        servers: ' + m.dns.join(' '), '        domains: ' + m.search.join(' '), '        interface: ' + (m.primaryIface() || { name: 'eth0' }).name, '');
+    ctx.println(out.join('\n').replace(/\n$/, ''));
+    return 0;
+  }
+  function nmProfileShow(ctx, d) {
+    const out = []; const m = ctx.machine;
+    const kv = (k, v) => out.push(pad(k + ':', 40) + v);
+    const eth = d.type === 'ethernet';
+    kv('connection.id', d.profile); kv('connection.uuid', d.uuid); kv('connection.stable-id', '--'); kv('connection.type', eth ? '802-3-ethernet' : 'loopback'); kv('connection.interface-name', eth ? d.name : 'lo');
+    kv('connection.autoconnect', 'yes'); kv('connection.autoconnect-priority', 0); kv('connection.timestamp', Math.floor(K.clock.now() / 1000) - 3600);
+    if (eth) { kv('802-3-ethernet.mac-address', '--'); kv('802-3-ethernet.mtu', 'auto'); }
+    kv('ipv4.method', eth ? 'auto' : 'disabled'); kv('ipv4.dns', '--'); kv('ipv4.addresses', '--'); kv('ipv4.gateway', '--'); kv('ipv4.never-default', 'no');
+    kv('ipv6.method', eth ? 'auto' : 'disabled');
+    if (d.up) {
+      kv('GENERAL.NAME', d.profile); kv('GENERAL.UUID', d.uuid); kv('GENERAL.DEVICES', d.name); kv('GENERAL.STATE', 'activated');
+      addrList(d.i).forEach((a, n) => kv('IP4.ADDRESS[' + (n + 1) + ']', a.ip + '/' + a.bits));
+      const gw = m.routes.find((r) => r.dev === d.name && r.dst === 'default');
+      if (gw) kv('IP4.GATEWAY', gw.via);
+      if (eth) m.dns.forEach((s, n) => kv('IP4.DNS[' + (n + 1) + ']', s));
+    }
+    return out.join('\n');
+  }
+
+  async function nmcliRun(ctx) {
+    const o = {}; const rest = []; const a = ctx.args;
+    for (let n = 0; n < a.length; n++) {
+      const x = a[n];
+      if (x === '-t' || x === '--terse') o.t = true;
+      else if (x === '-p' || x === '--pretty') o.p = true;
+      else if (x === '-f' || x === '--fields') o.f = a[++n];
+      else if (x === '-g' || x === '--get-values') { o.f = a[++n]; o.t = true; }
+      else if (x === '-m' || x === '--mode') o.m = a[++n];
+      else if (x === '-c' || x === '--colors') o.c = a[++n];
+      else if (x === '-w' || x === '--wait' || x === '-e' || x === '--escape') n++;
+      else if (['-a', '--ask', '-s', '--show-secrets'].includes(x)) continue;
+      else if (x === '-v' || x === '--version') { ctx.println('nmcli tool, version ' + NM_VERSION); return 0; }
+      else if (x === '-h' || x === '--help') { ctx.out(NM_USAGE); return 0; }
+      else if (x[0] === '-' && rest.length === 0) { ctx.eprintln("Error: Option '" + x + "' is unknown, try 'nmcli -h' or 'nmcli --help'."); return 2; }
+      else rest.push(x);
+    }
+    const m = ctx.machine;
+    if (o.m && !['tabular', 'multiline'].some((x) => x.startsWith(o.m))) { ctx.eprintln("Error: '--mode' argument '" + o.m + "' is not valid."); return 2; }
+    if (!rest.length) return nmOverview(ctx);
+    const OBJ = ['general', 'networking', 'radio', 'connection', 'device', 'agent', 'monitor'];
+    const obj = OBJ.find((x) => abbr(rest[0], x));
+    if (!obj) { ctx.eprintln("Error: argument '" + rest[0] + "' not understood. Try passing --help instead."); return 2; }
+    const cmdWord = rest[1]; const args = rest.slice(2);
+    const devs = nmDevices(m);
+    const bad = (w) => { ctx.eprintln("Error: argument '" + w + "' not understood. Try passing --help instead."); return 2; };
+    if (obj === 'general') {
+      if (!cmdWord || abbr(cmdWord, 'status')) {
+        const connected = devs.some((d) => d.up && d.type !== 'loopback');
+        return nmPrint(ctx, o, ['STATE', 'CONNECTIVITY', 'WIFI-HW', 'WIFI', 'WWAN-HW', 'WWAN'], [[connected ? 'connected' : 'disconnected', connected ? 'full' : 'none', 'enabled', 'enabled', 'enabled', 'enabled']]);
+      }
+      if (abbr(cmdWord, 'hostname')) { ctx.println(m.hostname); return 0; }
+      return bad(cmdWord);
+    }
+    if (obj === 'networking') { if (!cmdWord || abbr(cmdWord, 'connectivity')) ctx.println(cmdWord ? 'full' : 'enabled'); else return bad(cmdWord); return 0; }
+    if (obj === 'radio') {
+      if (!cmdWord || abbr(cmdWord, 'all')) return nmPrint(ctx, o, ['WIFI-HW', 'WIFI', 'WWAN-HW', 'WWAN'], [['enabled', 'enabled', 'enabled', 'enabled']]);
+      return bad(cmdWord);
+    }
+    if (obj === 'device') {
+      if (!cmdWord || abbr(cmdWord, 'status')) return nmPrint(ctx, o, ['DEVICE', 'TYPE', 'STATE', 'CONNECTION'], devs.map((d) => [d.name, d.type, d.state, d.conn]));
+      if (abbr(cmdWord, 'show')) {
+        const list = args[0] ? devs.filter((d) => d.name === args[0]) : devs;
+        if (!list.length) { ctx.eprintln("Error: Device '" + args[0] + "' not found."); return 10; }
+        ctx.println(list.map((d) => nmDeviceShow(ctx, d)).join('\n\n'));
+        return 0;
+      }
+      if (abbr(cmdWord, 'connect') || abbr(cmdWord, 'disconnect')) {
+        const d = devs.find((x) => x.name === args[0]);
+        if (!args[0]) { ctx.eprintln('Error: device argument is missing.'); return 2; }
+        if (!d) { ctx.eprintln("Error: Device '" + args[0] + "' not found."); return 10; }
+        const connect = abbr(cmdWord, 'connect');
+        setLinkState(m, d.i, connect);
+        ctx.println(connect ? "Device '" + d.name + "' successfully activated with '" + d.uuid + "'." : "Device '" + d.name + "' successfully disconnected.");
+        return 0;
+      }
+      if (abbr(cmdWord, 'wifi')) { ctx.eprintln('Error: No Wi-Fi device found.'); return 10; }
+      return bad(cmdWord);
+    }
+    if (obj === 'connection') {
+      if (!cmdWord || abbr(cmdWord, 'show')) {
+        if (args[0]) {
+          const d = devs.find((x) => x.profile === args[0] || x.uuid === args[0]);
+          if (!d) { ctx.eprintln('Error: ' + args[0] + ' - no such connection profile.'); return 10; }
+          ctx.println(nmProfileShow(ctx, d));
+          return 0;
+        }
+        return nmPrint(ctx, o, ['NAME', 'UUID', 'TYPE', 'DEVICE'], devs.map((d) => [d.profile, d.uuid, d.type, d.up ? d.name : '--']));
+      }
+      if (abbr(cmdWord, 'up') || abbr(cmdWord, 'down')) {
+        if (!args[0]) { ctx.eprintln('Error: connection ID, UUID, or path is missing.'); return 2; }
+        const d = devs.find((x) => x.profile === args[0] || x.uuid === args[0]);
+        if (!d) { ctx.eprintln('Error: unknown connection \'' + args[0] + "'."); return 10; }
+        const up = abbr(cmdWord, 'up');
+        if (!up && !d.up) { ctx.eprintln("Error: '" + args[0] + "' is not an active connection.\nError: not all active connections found."); return 2; }
+        setLinkState(m, d.i, up);
+        ctx.println(up ? 'Connection successfully activated (D-Bus active path: /org/freedesktop/NetworkManager/ActiveConnection/' + (m.ifaces.indexOf(d.i) + 1) + ')' : "Connection '" + d.profile + "' successfully deactivated (D-Bus active path: /org/freedesktop/NetworkManager/ActiveConnection/" + (m.ifaces.indexOf(d.i)) + ')');
+        return 0;
+      }
+      return bad(cmdWord);
+    }
+    ctx.eprintln('Error: ' + obj + ' is not supported in the simulator.');
+    return 1;
+  }
+  K.cmd.register({
+    name: 'nmcli', path: '/usr/bin/nmcli', pkg: 'network-manager', section: 1, only: 'kali',
+    summary: 'command-line tool for controlling NetworkManager',
+    synopsis: 'nmcli [OPTIONS] OBJECT { COMMAND | help }',
+    man: 'DESCRIPTION\n       nmcli is a command-line tool for controlling NetworkManager and reporting network status. Run without arguments it prints an overview of every device.\n\nOBJECTS\n       general        status and hostname of NetworkManager (nmcli general status)\n       device         network interfaces: nmcli device status, nmcli device show [IFNAME], nmcli device connect|disconnect IFNAME\n       connection     connection profiles: nmcli connection show [ID], nmcli connection up|down ID\n       networking, radio\n              Global switches.\n       Object and command names can be abbreviated (nmcli d s, nmcli c show).\n\nOPTIONS\n       -t, --terse    Output is terse, fields separated by colons.\n       -f, --fields   Select the columns to print.\n       -m, --mode tabular|multiline\n              Switch between table and one-value-per-line output.\n       -v, --version  Show the version.\n\nEXAMPLES\n       nmcli device status\n              One line per interface with its state and profile.\n       nmcli -t -f DEVICE,STATE device\n              Machine-readable list for scripts.',
+    run: nmcliRun,
+    complete(info) {
+      const w = info.words;
+      if (info.index === 1) return ['general', 'networking', 'radio', 'connection', 'device', 'agent', 'monitor', '-t', '-f', '-m', '-p'];
+      const obj = ['general', 'networking', 'radio', 'connection', 'device'].find((x) => abbr(w[1], x));
+      if (info.index === 2) return { device: ['status', 'show', 'connect', 'disconnect', 'wifi'], connection: ['show', 'up', 'down'], general: ['status', 'hostname'] }[obj] || [];
+      return obj === 'device' ? ifaceNames(K.kali) : obj === 'connection' ? nmDevices(K.kali).map((d) => d.profile) : [];
+    },
+  });
+
+  /* --------------------------------------------------------------- iwconfig */
+  async function iwconfigRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'hV', long: ['help', 'version'], alias: { help: 'h', version: 'V' } });
+    const m = ctx.machine;
+    if (g.err) { ctx.eprintln('iwconfig: ' + g.err); return 1; }
+    if (g.opts.V) { ctx.println('iwconfig  Wireless-Tools version 30\n          Compiled with WEXT v22 and kernel WEXT v22'); return 0; }
+    if (g.opts.h) { ctx.err('Usage: iwconfig [interface]\n                interface essid {NNN|any|on|off}\n                interface mode {managed|ad-hoc|master|...}\n                interface freq {NNN[k|M|G]|channel}\n                interface txpower {NNN[mW|dBm]|on|off}\n                interface retry {limit NNN|lifetime NNN}\n                interface power {period N|timeout N}\n                interface nwid {NN|on|off}\n                interface enc {NNNN-NNNN|off}\n                interface key {NNNN-NNNN|off}\n                interface commit\n       Check man pages for more details.\n'); return 1; }
+    if (g.rest.length) {
+      const i = ifaceByName(m, g.rest[0]);
+      if (!i) { ctx.eprintln(pad(g.rest[0], 10) + 'No such device'); return 1; }
+      if (g.rest.length > 1) { ctx.eprintln('Error for wireless request "Set ' + g.rest[1] + '" (8B..):\n    SET failed on device ' + i.name + ' ; Operation not supported.'); return 1; }
+      ctx.println(pad(i.name, 10) + 'no wireless extensions.\n');
+      return 0;
+    }
+    ctx.println(m.ifaces.map((i) => pad(i.name, 10) + 'no wireless extensions.\n').join('\n'));
+    return 0;
+  }
+  K.cmd.register({
+    name: 'iwconfig', path: '/usr/sbin/iwconfig', pkg: 'wireless-tools', section: 8, only: 'kali',
+    summary: 'configure a wireless network interface',
+    synopsis: 'iwconfig [interface]\n       iwconfig interface [essid X] [nwid N] [mode M] [freq F] [channel C] [sens S] [ap A] [nick NN] [rate R] [rts RT] [frag FT] [txpower T] [enc E] [key K] [power P] [retry R] [commit]',
+    man: 'DESCRIPTION\n       Iwconfig is similar to ifconfig(8), but is dedicated to the wireless interfaces. It is used to set the parameters of the network interface which are specific to the wireless operation (for example: the frequency). Iwconfig may also be used to display those parameters, and the wireless statistics.\n\n       The lab machine has only wired interfaces, so every interface answers "no wireless extensions."\n\nEXAMPLES\n       iwconfig\n              Show the wireless parameters of every interface.\n       iwconfig eth0\n              Check one interface.',
+    run: iwconfigRun,
+    complete: (info) => ifaceNames(K.kali),
+  });
+
+  /* ---------------------------------------------------------------- ethtool */
+  const ETHTOOL_USAGE = 'ethtool: bad command line argument(s)\nFor more information run ethtool -h\n';
+  const LINK_MODES = ['10baseT/Half 10baseT/Full', '100baseT/Half 100baseT/Full', '1000baseT/Full'];
+  function ethtoolSettings(ctx, i) {
+    const up = isUp(i); const out = ['Settings for ' + i.name + ':'];
+    const modes = (label) => out.push('\t' + pad(label + ':', 24) + LINK_MODES[0], '\t                        ' + LINK_MODES[1], '\t                        ' + LINK_MODES[2]);
+    out.push('\tSupported ports: [ TP ]');
+    modes('Supported link modes');
+    out.push('\tSupported pause frame use: No', '\tSupports auto-negotiation: Yes', '\tSupported FEC modes: Not reported');
+    modes('Advertised link modes');
+    out.push('\tAdvertised pause frame use: No', '\tAdvertised auto-negotiation: Yes', '\tAdvertised FEC modes: Not reported');
+    out.push('\tSpeed: ' + (up ? '1000Mb/s' : 'Unknown!'), '\tDuplex: ' + (up ? 'Full' : 'Unknown! (255)'), '\tAuto-negotiation: on', '\tPort: Twisted Pair', '\tPHYAD: 0', '\tTransceiver: internal', '\tMDI-X: off (auto)');
+    if (ctx.isRoot) out.push('\tSupports Wake-on: umbg', '\tWake-on: d');
+    else out.push('Cannot get wake-on-lan settings: Operation not permitted');
+    out.push('\tCurrent message level: 0x00000007 (7)', '\t\t\t       drv probe link', '\tLink detected: ' + (up ? 'yes' : 'no'));
+    return out.join('\n');
+  }
+  async function ethtoolRun(ctx) {
+    const a = ctx.args.slice();
+    if (a[0] === '--version' || a[0] === '-V') { ctx.println('ethtool version 6.15'); return 0; }
+    if (a[0] === '-h' || a[0] === '--help') { ctx.out('ethtool version 6.15\nUsage:\n        ethtool [ FLAGS ] DEVNAME\tDisplay standard information about device\n        ethtool [ FLAGS ] -i|--driver DEVNAME\tShow driver information\n        ethtool [ FLAGS ] -S|--statistics DEVNAME\tShow adapter statistics\n        ethtool [ FLAGS ] -P|--show-permaddr DEVNAME\tShow permanent hardware address\n'); return 0; }
+    let mode = 'settings';
+    if (['-i', '--driver'].includes(a[0])) { mode = 'driver'; a.shift(); } else if (['-S', '--statistics'].includes(a[0])) { mode = 'stats'; a.shift(); } else if (['-P', '--show-permaddr'].includes(a[0])) { mode = 'perm'; a.shift(); }
+    else if (a[0] && a[0][0] === '-') { ctx.err(ETHTOOL_USAGE); ctx.eprintln('ethtool: option \'' + a[0] + "' not recognized"); return 1; }
+    if (!a.length) { ctx.err(ETHTOOL_USAGE); return 1; }
+    const i = ifaceByName(ctx.machine, a[0]);
+    if (!i) {
+      const lines = { settings: ['Cannot get device settings: No such device', 'Cannot get wake-on-lan settings: No such device', 'Cannot get message level: No such device', 'Cannot get link status: No such device', 'No data available'], driver: ['Cannot get driver information: No such device'], stats: ['no stats available: No such device'], perm: ['Cannot read permanent address: No such device'] }[mode];
+      ctx.eprintln(lines.join('\n'));
+      return mode === 'settings' ? 75 : 71;
+    }
+    if (mode === 'driver') {
+      const lo = i.kind === 'loopback';
+      ctx.println(['driver: ' + (lo ? 'unknown' : 'e1000'), 'version: ' + (lo ? '' : ctx.machine.os.kernel), 'firmware-version: ', 'expansion-rom-version: ', 'bus-info: ' + (lo ? '' : '0000:00:03.0'), 'supports-statistics: ' + (lo ? 'no' : 'yes'), 'supports-test: ' + (lo ? 'no' : 'yes'), 'supports-eeprom-access: ' + (lo ? 'no' : 'yes'), 'supports-register-dump: ' + (lo ? 'no' : 'yes'), 'supports-priv-flags: no'].join('\n'));
+      return 0;
+    }
+    if (mode === 'perm') { ctx.println('Permanent address: ' + (i.mac || '00:00:00:00:00:00')); return 0; }
+    if (mode === 'stats') {
+      if (i.kind === 'loopback') { ctx.eprintln('no stats available: Operation not supported'); return 94; }
+      const s = nlStats(ctx.machine, i);
+      const rows = [['rx_packets', s.rxp], ['tx_packets', s.txp], ['rx_bytes', s.rx], ['tx_bytes', s.tx], ['rx_broadcast', 12], ['tx_broadcast', 3], ['rx_multicast', 21], ['tx_multicast', 0], ['rx_errors', 0], ['tx_errors', 0], ['tx_dropped', 0], ['collisions', 0], ['rx_length_errors', 0], ['rx_crc_errors', 0]];
+      ctx.println(['NIC statistics:'].concat(rows.map((r) => '     ' + r[0] + ': ' + r[1])).join('\n'));
+      return 0;
+    }
+    if (i.kind === 'loopback') { ctx.println('Settings for lo:\n\tLink detected: yes'); return 0; }
+    ctx.println(ethtoolSettings(ctx, i));
+    return 0;
+  }
+  K.cmd.register({
+    name: 'ethtool', path: '/usr/sbin/ethtool', pkg: 'ethtool', section: 8, only: 'kali',
+    summary: 'query or control network driver and hardware settings',
+    synopsis: 'ethtool [-i|-S|-P] devname',
+    man: 'DESCRIPTION\n       ethtool is used for querying settings of an ethernet device and changing them.\n\n       ethtool devname displays the link speed, duplex, auto-negotiation and link state of the device. Wake-on-LAN settings are only readable by root.\n\nOPTIONS\n       -i, --driver\n              Show driver information.\n       -S, --statistics\n              Show adapter statistics.\n       -P, --show-permaddr\n              Show the permanent hardware address.\n\nEXAMPLES\n       ethtool eth0\n              Speed, duplex and link state of the first interface.\n       ethtool -i eth0\n              Which driver runs the card?',
+    run: ethtoolRun,
+    complete: (info) => ifaceNames(K.kali),
+  });
+
+
 /*@@END@@*/
 })(typeof globalThis !== 'undefined' ? globalThis : this);
