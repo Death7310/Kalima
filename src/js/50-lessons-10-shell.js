@@ -408,11 +408,306 @@
     refs: ['zshbuiltins(1), for `cd`', 'ls(1)', 'hier(7)', 'Filesystem Hierarchy Standard 3.0', 'Kali Linux Revealed, ch. 3 (The File System)'],
   };
 
+  /* ------------------------------------------------------- shell-efficient */
+  const SAMPLES = DATA + '/shell';
+
+  /** Does the shell that ran this line now have an alias `lh` that is a long, human-readable ls? */
+  const hasLhAlias = (ev) => {
+    const aliases = ev.shell && ev.shell.aliases;
+    const value = aliases && aliases.get ? aliases.get('lh') : null;
+    if (!value || !/^\s*ls(\s|$)/.test(value)) return false;
+    const long = /\s-[a-zA-Z]*l/.test(value);
+    const human = /\s-[a-zA-Z]*h/.test(value) || /--human-readable/.test(value);
+    return long && human;
+  };
+
+  const efficientLesson = {
+    id: 'shell-efficient',
+    title: 'Typing less: completion, history, wildcards and quotes',
+    minutes: 12,
+    objectives: [
+      'Complete commands and paths with Tab, and reuse earlier commands with the history and `!!`',
+      'Find out what a name really runs with `type`, and define an alias of your own',
+      'Select groups of files with the wildcards `*`, `?` and `[ ]`',
+      'Quote names that contain spaces, and choose between single and double quotes',
+    ],
+    intro: T(
+      'Long paths and long commands invite typing mistakes, and in security work a mistyped path or address can aim a command at the wrong thing. The shell has features that let you type less and be right more often: it finishes names for you, remembers what you ran, lets you give short names to the commands you use most, and turns patterns into lists of files.',
+      '',
+      'This lesson practices each of them on a few sample files from an imaginary engagement, stored in `' + SAMPLES + '`. They are read-only, so you can experiment freely.'
+    ),
+    steps: [
+      {
+        id: 'tab',
+        prompt: T(
+          'The Tab key asks the shell to finish a name for you. Go to the sample files, letting Tab do most of the typing:',
+          '',
+          '- Type `cd /usr/sh` and press Tab. Only one name in `/usr` starts with `sh`, so the shell completes it: `/usr/share/`.',
+          '- Type `ka` and press Tab. The line grows to `/usr/share/kalima/`.',
+          '- Type `sh` and press Tab, which adds `shell/`. Now press Enter.',
+          '',
+          'You typed about half of the path, and none of it can be misspelled, because Tab only writes names that exist.',
+          '',
+          'When Tab adds nothing, either no name matches what you typed, or several do. If several match, the shell lists them under the prompt. Type one more letter and press Tab again, or keep pressing Tab to step through the list.'
+        ),
+        hint: 'The goal is to arrive in `' + SAMPLES + '`. Typing the whole path by hand also works, but try the Tab key.',
+        solution: 'cd ' + SAMPLES,
+        check: { cwd: SAMPLES },
+      },
+      {
+        id: 'history',
+        prompt: T(
+          'The shell remembers what you type. Press the **Up** arrow and your last command returns to the prompt, ready to run again or to edit. Press **Down** to go forward again, back to an empty line.',
+          '',
+          'As you type, Kali may also show the rest of an earlier command in gray. The Right arrow accepts that suggestion.',
+          '',
+          'To see the whole record, run:',
+          '',
+          '```',
+          'history',
+          '```',
+          '',
+          'Each line is a number and a command, oldest first. The record is kept in the file `~/.zsh_history`, so it is still there after you close the terminal. That makes it a useful reminder of what you did during an engagement. It is also the reason never to type a password as part of a command line.'
+        ),
+        hint: 'One word: `history`.',
+        solution: 'history',
+        check: { cmd: 'history', exit: 0 },
+      },
+      {
+        id: 'denied',
+        prompt: T(
+          'History is most useful just after something goes wrong. Ask for a listing of the administrator\'s home directory, hidden files included:',
+          '',
+          '```',
+          'ls -a /root',
+          '```',
+          '',
+          'It fails with `Permission denied`, because `/root` is closed to ordinary users. Nothing was wrong with the command itself. It needed more privilege than you have.'
+        ),
+        hint: 'Type it exactly. This step wants the error message.',
+        solution: 'ls -a /root',
+        check: { cmd: 'ls', argsRe: /\/root/, out: /Permission denied/ },
+      },
+      {
+        id: 'bang',
+        prompt: T(
+          '`sudo` runs a single command as root, and `!!` stands for the whole of your previous command line. Together they repeat a command with the privilege it was missing:',
+          '',
+          '```',
+          'sudo !!',
+          '```',
+          '',
+          'The shell first prints the line it built, `sudo ls -a /root`, so you can see exactly what ran. Then `sudo` asks for your password. Type `kali` and press Enter. Nothing appears while you type a password; that is normal.',
+          '',
+          'On an installed Kali system zsh is more careful still: it puts the expanded line back on the prompt and waits for a second Enter, so that you can check it before it runs.'
+        ),
+        hint: 'Type `sudo`, a space and two exclamation marks. The password is `kali`. If you ran another command since `ls -a /root`, run that one again first.',
+        input: ['kali'],
+        solution: 'sudo !!',
+        // the replay types `true` before each step, so it has to restore the previous command itself
+        testSolution: ['ls -a /root', 'sudo !!'],
+        check: { cmd: 'ls', user: 'root', argsRe: /\/root/, exit: 0 },
+      },
+      {
+        id: 'type',
+        prompt: T(
+          'The name you type is not always the name of the program that runs. The shell first looks through its **aliases**: short names that it replaces with longer commands. `type` reports what a name really stands for:',
+          '',
+          '```',
+          'type ls',
+          '```',
+          '',
+          'The answer, `ls is an alias for ls --color=auto`, explains why your listings are colored: on Kali, typing `ls` runs `ls --color=auto`.',
+          '',
+          'Try `type cd` and `type nano` afterwards to see the two other kinds of answer: a command built into the shell, and a program stored on disk. `alias` on its own lists every alias that is defined.'
+        ),
+        hint: 'Type `type`, a space and the name you are asking about, `ls`.',
+        solution: 'type ls',
+        check: { cmd: ['type', 'which', 'whence'], argsRe: /(^| )ls( |$)/ },
+      },
+      {
+        id: 'alias',
+        prompt: T(
+          'You can define aliases of your own. `ls -lh` is a long listing with sizes in readable units such as `K` and `M` (the `h` is for *human-readable*). Give it a short name:',
+          '',
+          '```',
+          'alias lh=\'ls -lh\'',
+          '```',
+          '',
+          'There are no spaces around the `=`, and the quotes keep the two words together as one value. Then try your new command on the practice logs: `lh ' + DATA + '/logs`.',
+          '',
+          'An alias made this way lasts until you close this shell. Kali\'s own aliases come back every time because they are written in `~/.zshrc`, which the shell reads when it starts.'
+        ),
+        hint: 'The shape is `alias name=\'command\'`. The name must be `lh` and the command `ls -lh`.',
+        solution: 'alias lh=\'ls -lh\'',
+        check: { cmd: 'alias', fn: hasLhAlias },
+      },
+      {
+        id: 'star',
+        prompt: T(
+          'A **wildcard** is a pattern that the shell replaces with the file names that match it, before the command runs. `*` matches any run of characters, including none. You are still in `' + SAMPLES + '`:',
+          '',
+          '```',
+          'ls *.md',
+          '```',
+          '',
+          'The shell found two names ending in `.md` and ran `ls report-draft.md report-final.md`. `ls` never saw the star.',
+          '',
+          'That is why wildcards work with every command. It is also why a pattern deserves a second look before you give it to a command that deletes or overwrites files. Handing the pattern to `ls` or `echo` first shows what it matches and changes nothing.'
+        ),
+        hint: 'The prompt should show `' + SAMPLES + '`. The pattern is a star followed by `.md`.',
+        solution: 'ls *.md',
+        check: { cmd: 'ls', line: /\*/, out: /report-draft\.md/, not: { out: /scan-|meeting/ } },
+      },
+      {
+        id: 'pattern',
+        prompt: T(
+          'Two more wildcards are more exact:',
+          '',
+          '- `?` matches exactly one character. `scan-d?01.txt` matches `scan-db01.txt` but not `scan-dev01.txt`.',
+          '- `[ ]` matches one character out of those listed between the brackets. `[dw]` means a `d` or a `w`.',
+          '',
+          'Run `ls` to see the four scan files. Then, with a single pattern, list the scans of the hosts whose names begin with `d` or `w`. That is three files; `scan-files01.txt` must not be among them.'
+        ),
+        hint: 'All four names start with `scan-`. Follow that with brackets holding the two letters you want, then a `*` for the rest of the name.',
+        solution: 'ls scan-[dw]*',
+        check: {
+          cmd: 'ls', line: /[*?[]/,
+          all: [{ out: /scan-db01\.txt/ }, { out: /scan-dev01\.txt/ }, { out: /scan-web01\.txt/ }],
+          not: { out: /scan-files01|report-|meeting/ },
+        },
+      },
+      {
+        id: 'spaces',
+        prompt: T(
+          'One file here has a space in its name, and `ls` prints it inside quotes as a warning: `\'meeting notes.txt\'`. The shell splits a command line at spaces, so `cat meeting notes.txt` would ask `cat` for two files, `meeting` and `notes.txt`. Neither exists.',
+          '',
+          'Quotes switch the splitting off. Read the file:',
+          '',
+          '```',
+          'cat "meeting notes.txt"',
+          '```',
+          '',
+          'Tab completion handles this for you as well. Type `cat mee` and press Tab: the shell writes the name with a backslash in front of the space, which protects that one character in the same way.'
+        ),
+        hint: 'Put the whole file name, space included, between a pair of double quotes.',
+        solution: 'cat "meeting notes.txt"',
+        check: { cmd: 'cat', exit: 0, out: /Kickoff call/ },
+      },
+      {
+        id: 'quotes',
+        prompt: T(
+          'Single and double quotes differ in one important way. Inside **double** quotes the shell still replaces `$NAME` with the value of the variable called `NAME`. Inside **single** quotes every character stays exactly as you typed it.',
+          '',
+          '`USER` is a variable that holds your user name. Run both of these and compare the results:',
+          '',
+          '```',
+          'echo "I am $USER"',
+          'echo \'I am $USER\'',
+          '```',
+          '',
+          'The first prints `I am kali`. The second prints the text untouched. When a string must reach a command exactly as written, a search pattern full of symbols for example, put it in single quotes.'
+        ),
+        hint: 'Run the two lines one after the other. The step completes on the one with single quotes.',
+        solution: 'echo \'I am $USER\'',
+        check: { cmd: 'echo', out: /I am \$USER/ },
+      },
+    ],
+    quiz: [
+      {
+        q: 'You type `cat ' + DATA + '/logs/a` and press Tab. Two files there start with `a`: `access.log` and `auth.log`. What does the shell do?',
+        choices: [
+          'It completes `access.log`, the first in alphabetical order',
+          'It reports an error because the name is ambiguous',
+          'It shows both names and leaves the line for you to continue',
+          'It runs `cat` on both files',
+        ],
+        answer: 2,
+        why: 'Tab completes only as far as the candidates agree. When they differ at the next character the shell lists them, and you choose by typing one more letter or by pressing Tab again to step through them.',
+      },
+      {
+        q: 'Your last command was `nano /etc/hosts`, and it could not save because the file belongs to root. What does `sudo !!` run?',
+        choices: ['`sudo nano /etc/hosts`', '`sudo nano`', '`sudo` followed by every command in the history', '`sudo /etc/hosts`'],
+        answer: 0,
+        why: '`!!` is replaced by the whole previous command line, so the same command runs again with `sudo` in front of it.',
+      },
+      {
+        q: 'A directory holds `a.txt`, `b.txt` and `notes.md`. You run `rm *.txt`. What does the `rm` program receive as its arguments?',
+        choices: [
+          'The single argument `*.txt`, which `rm` then matches against the directory',
+          'The two arguments `a.txt` and `b.txt`',
+          'All three file names',
+          'Nothing, because `rm` does not accept patterns',
+        ],
+        answer: 1,
+        why: 'The shell expands the pattern before the command starts, so `rm` is handed the matching names and never sees the star. This is why it pays to preview a pattern with `ls` before using it with `rm`.',
+      },
+      {
+        q: 'What does `echo \'Home: $HOME\'` print?',
+        choices: ['`Home: /home/kali`', '`Home:` and nothing more', '`Home: $HOME`', 'An error, because `$HOME` is not allowed inside quotes'],
+        answer: 2,
+        why: 'Single quotes keep every character literal, so the dollar sign is not treated as the start of a variable. With double quotes the shell would have substituted `/home/kali`.',
+      },
+    ],
+    refs: ['zshexpn(1), for history expansion and wildcards', 'zshbuiltins(1), for `alias`, `type` and `history`', 'glob(7)', 'sudo(8)', 'Kali Linux Revealed, ch. 3 (The Command Line)'],
+  };
+
   K.lessons.register({
     id: 'shell',
     title: 'The shell and the filesystem',
     order: 10,
     summary: 'Read the Kali prompt, run commands, find your way around the filesystem, and work faster with completion, history, aliases, wildcards and quoting.',
-    lessons: [firstLesson, navigateLesson],
+    lessons: [firstLesson, navigateLesson, efficientLesson],
+  });
+
+  /* ------------------------------------------------------------- practice files
+   * Sample files for shell-efficient: names chosen so that *, ? and [ ] each
+   * select a different subset, plus one name with a space in it.
+   */
+  K.fsSeeds.push((machine) => {
+    if (machine.profile !== 'kali') return;
+    const mtime = Date.UTC(2026, 10, 9, 16, 40, 0);
+    const put = (name, lines) => machine.vfs.seed(SAMPLES + '/' + name, lines.join('\n') + '\n', { mtime });
+    const scan = (host, ip) => put('scan-' + host + '.txt', [
+      'Host:   ' + host + '.halcyon.lab (' + ip + ')',
+      'Saved:  2026-11-09',
+      '',
+      'Placeholder. During the engagement the port scan of this host is saved here.',
+    ]);
+    put('report-draft.md', [
+      '# Halcyon Freight lab assessment (draft)',
+      '',
+      'Engagement: HF-LAB-2026-11',
+      'Status: draft, not for release',
+      '',
+      '## Summary',
+      '',
+      'To be written when testing is complete.',
+    ]);
+    put('report-final.md', [
+      '# Halcyon Freight lab assessment',
+      '',
+      'Engagement: HF-LAB-2026-11',
+      'Status: outline only',
+      '',
+      '## Summary',
+      '',
+      '## Findings',
+      '',
+      '## Recommendations',
+    ]);
+    scan('db01', '10.10.10.30');
+    scan('dev01', '10.10.10.70');
+    scan('files01', '10.10.10.20');
+    scan('web01', '10.10.10.10');
+    put('meeting notes.txt', [
+      'Kickoff call with Halcyon Freight, 9 November 2026',
+      '',
+      '- Testing window: any time (this is a lab)',
+      '- Contact: IT Operations, it-ops@halcyon.lab',
+      '- In scope: 10.10.10.0/24 and *.halcyon.lab',
+      '- Out of scope: the public website, halcyonfreight.example',
+      '- Notes and evidence stay inside ~/engagement',
+    ]);
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
