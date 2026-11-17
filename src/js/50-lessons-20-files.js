@@ -417,11 +417,231 @@
     refs: ['mkdir(1)', 'touch(1)', 'cp(1)', 'mv(1)', 'rm(1)', 'ln(1)', 'symlink(7)'],
   };
 
+  /* -------------------------------------------------------- files-redirect */
+  const LOGS = DATA + '/logs';
+  const NOTES = '/home/kali/engagement/notes.md';
+  const has = (path, contains) => ({ file: { path, contains } });
+
+  const redirectLesson = {
+    id: 'files-redirect',
+    title: 'Redirecting output and joining commands',
+    minutes: 12,
+    objectives: [
+      'Send the output of a command to a file with `>` and add to a file with `>>`',
+      'Tell standard output from standard error, and redirect errors with `2>`, `2>&1` and `/dev/null`',
+      'Connect commands with a pipe, and save while you watch with `tee`',
+      'Append command output to your engagement notes without overwriting them',
+    ],
+    intro: T(
+      'What you cannot show, you cannot report. Careful testers keep the exact output of the commands they ran, with nothing retyped from memory, so that every finding can be checked and repeated.',
+      '',
+      'The shell makes this easy. Each command writes its results to one stream and its error messages to another, and you decide where each stream goes: to the screen, into a file, into the next command, or nowhere. In this lesson you steer those streams, and you finish by adding real command output to the notes file in `~/engagement`.'
+    ),
+    steps: [
+      {
+        id: 'setup',
+        prompt: T(
+          'Work in the practice directory, so that the files you create have a home:',
+          '',
+          '```',
+          'mkdir -p ~/practice/files && cd ~/practice/files',
+          '```',
+          '',
+          '`&&` joins two commands and runs the second only if the first succeeded. Here the shell enters the directory only once it is sure the directory exists.',
+          '',
+          'The prompt should now show `~/practice/files`. The rest of the lesson assumes you are there.'
+        ),
+        hint: 'Type the whole line, including the two ampersands with a space on each side.',
+        solution: 'mkdir -p ~/practice/files && cd ~/practice/files',
+        check: { cwd: WORK },
+      },
+      {
+        id: 'write',
+        prompt: T(
+          'A command writes its results to a stream called **standard output**, which is normally connected to your terminal. `>` connects it to a file instead:',
+          '',
+          '```',
+          'wc -l ' + ACCESS + ' > counts.txt',
+          '```',
+          '',
+          'Nothing appeared, because the line count went into the file. Read it back with `cat counts.txt`.',
+          '',
+          'If the file does not exist, `>` creates it. If it does exist, `>` empties it first, without any warning.'
+        ),
+        hint: 'After the path of the log come a space, `>`, another space, and the name of the file to write.',
+        solution: 'wc -l ' + ACCESS + ' > counts.txt',
+        check: { cmd: 'wc', line: />/, file: { path: WORK + '/counts.txt', contains: /476\s+\S*access\.log/ }, not: { out: /476/ } },
+      },
+      {
+        id: 'append',
+        prompt: T(
+          '`>>` adds to the end of a file and leaves what is already there in place. Add the line count of the second log:',
+          '',
+          '```',
+          'wc -l ' + AUTH + ' >> counts.txt',
+          '```',
+          '',
+          'Now `cat counts.txt` shows two lines. With a single `>` the second command would have replaced the first result. When the file is a record you are building up, `>>` is the operator you want.'
+        ),
+        hint: 'Two `>` characters with no space between them. If `counts.txt` ends up with only one line, run the previous step\'s command again and then this one.',
+        solution: 'wc -l ' + AUTH + ' >> counts.txt',
+        check: { cmd: 'wc', all: [has(WORK + '/counts.txt', /476\s+\S*access\.log/), has(WORK + '/counts.txt', /450\s+\S*auth\.log/)] },
+      },
+      {
+        id: 'stderr',
+        prompt: T(
+          'Error messages travel on a second stream, **standard error**, so that they do not get mixed into the results. The streams are numbered: standard output is 1 and standard error is 2. `2>` redirects stream 2.',
+          '',
+          'Ask `ls` about one directory that exists and one that does not, and send only the errors to a file:',
+          '',
+          '```',
+          'ls ' + LOGS + ' /nosuch 2> errors.txt',
+          '```',
+          '',
+          'The listing still appears, because stream 1 was left alone. The complaint about `/nosuch` is in `errors.txt`. Had you used a plain `>`, it would have been the other way round: the listing in the file and the error on your screen.'
+        ),
+        hint: 'Write `2>` with no space between the digit and the `>`.',
+        solution: 'ls ' + LOGS + ' /nosuch 2> errors.txt',
+        check: { cmd: 'ls', out: /access\.log/, not: { out: /No such file/ }, file: { path: WORK + '/errors.txt', contains: /No such file or directory/ } },
+      },
+      {
+        id: 'null',
+        prompt: T(
+          'Sometimes you do not want the errors at all. `/dev/null` is a special file that discards everything written to it.',
+          '',
+          'Run the same `ls` command on the two directories again, but this time throw the error message away, so that only the listing appears and no file is written.'
+        ),
+        hint: 'Keep `2>` and change where it points: to `/dev/null` in place of `errors.txt`.',
+        solution: 'ls ' + LOGS + ' /nosuch 2> /dev/null',
+        check: { cmd: 'ls', argsRe: /nosuch/, line: /\/dev\/null/, out: /access\.log/, not: { out: /No such file/ } },
+      },
+      {
+        id: 'both',
+        prompt: T(
+          'To keep everything a command said, send both streams to one file. `2>&1` means "send stream 2 to wherever stream 1 is going now":',
+          '',
+          '```',
+          'ls ' + LOGS + ' /nosuch > all.txt 2>&1',
+          '```',
+          '',
+          'Nothing reaches the screen this time. `cat all.txt` shows the error and the listing together.',
+          '',
+          'The order matters. The shell reads redirections from left to right, so `> all.txt` must come first. Only then does "wherever stream 1 is going" mean the file.'
+        ),
+        hint: 'Type it exactly: `> all.txt` first, then `2>&1` with no spaces inside it.',
+        solution: 'ls ' + LOGS + ' /nosuch > all.txt 2>&1',
+        check: {
+          cmd: 'ls', not: { out: /No such file|access\.log/ },
+          all: [has(WORK + '/all.txt', /No such file or directory/), has(WORK + '/all.txt', /access\.log/)],
+        },
+      },
+      {
+        id: 'pipe',
+        prompt: T(
+          'A **pipe**, written `|`, connects the standard output of one command straight to the input of the next, with no file in between:',
+          '',
+          '```',
+          'ls /usr/bin | wc -l',
+          '```',
+          '',
+          '`ls` writes the names of the programs in `/usr/bin`, one per line, into the pipe. `wc -l` counts the lines it receives. The only thing printed is the count: the number of commands installed there.',
+          '',
+          'Each command does one small job, and the pipe combines them. Most of the text processing you will do on a security workstation is built this way.'
+        ),
+        hint: 'The pipe character is a vertical bar. On most keyboards it is typed with Shift and the backslash key.',
+        solution: 'ls /usr/bin | wc -l',
+        check: { cmd: 'wc', line: /\|/, argsRe: /-l/, out: /^\s*\d+\s*$/ },
+      },
+      {
+        id: 'count',
+        prompt: 'Build a pipeline of your own. Use it to count the names in the directory `' + DATA + '/shell`. How many are there?',
+        hint: 'Use the same two commands as in the last step. Only the directory given to `ls` changes.',
+        solution: '7',
+        answer: /^(7|seven)(\s+(names|files|entries))?\.?$/i,
+      },
+      {
+        id: 'tee',
+        prompt: T(
+          '`>` hides the output from you, and a pipe passes it on without keeping it. `tee` does both jobs: it copies what it receives into a file and also prints it, like a T-shaped junction in a water pipe:',
+          '',
+          '```',
+          'wc -l ' + LOGS + '/*.log | tee counts.txt',
+          '```',
+          '',
+          'You see the two counts and their total, and `counts.txt` now holds the same three lines. Like `>`, `tee` replaces the old content of the file. `tee -a` appends instead, like `>>`.'
+        ),
+        hint: 'The pattern `*.log` matches both logs. After the pipe comes `tee` and the name of the file to write.',
+        solution: 'wc -l ' + LOGS + '/*.log | tee counts.txt',
+        check: { cmd: 'tee', out: /926\s+total/, file: { path: WORK + '/counts.txt', contains: /926\s+total/ } },
+      },
+      {
+        id: 'notes',
+        prompt: T(
+          'Your notes for this engagement are in `~/engagement/notes.md`. Good notes hold the actual output of commands, not a summary from memory.',
+          '',
+          'Add the line counts of both practice logs, with their total, to the end of `~/engagement/notes.md`. Everything already in the file must stay. Then read the file with `cat` to confirm that the old headings are still above the new lines.',
+          '',
+          'Check the operator twice before you press Enter. A single `>` would replace your notes.'
+        ),
+        hint: 'Run the same `wc -l` command as in the last step. Send its output to the notes file either with `>>`, or through a pipe to `tee -a`.',
+        solution: 'wc -l ' + LOGS + '/*.log >> ~/engagement/notes.md',
+        check: { any: [{ line: />>/ }, { cmd: 'tee', args: ['-a'] }], file: { path: NOTES, contains: /926\s+total/ } },
+      },
+    ],
+    quiz: [
+      {
+        q: '`results.txt` holds an hour of saved tool output. You run `date > results.txt`. What is in the file afterwards?',
+        choices: [
+          'The old output, with the date added at the end',
+          'The date, with the old output after it',
+          'Nothing changes, because the shell refuses to overwrite a file',
+          'Only the date: the old output is gone',
+        ],
+        answer: 3,
+        why: '`>` empties an existing file before the command writes to it, and gives no warning. To add to a file, use `>>`.',
+      },
+      {
+        q: 'You run `ls /etc /nosuch > out.txt`. Where does the message about `/nosuch` go?',
+        choices: [
+          'Into `out.txt`, after the listing',
+          'To the terminal, because `>` redirects only standard output',
+          'Nowhere: errors are dropped when output is redirected',
+          'Into a second file named `out.txt.err`',
+        ],
+        answer: 1,
+        why: 'Error messages travel on standard error, stream 2, and a plain `>` moves only stream 1. The file gets the listing and the error still reaches your screen.',
+      },
+      {
+        q: 'What ends up in `all.txt` after `ls /etc /nosuch 2>&1 > all.txt`?',
+        choices: [
+          'Only the listing: the error message still goes to the terminal',
+          'The listing and the error message',
+          'Only the error message',
+          'Nothing, because the command is not valid',
+        ],
+        answer: 0,
+        why: 'Redirections are applied from left to right. When `2>&1` is read, stream 1 still points at the terminal, so that is where errors are sent. Only afterwards is stream 1 moved to the file. To capture both, write `> all.txt 2>&1`.',
+      },
+      {
+        q: 'When would you choose `command | tee file` over `command > file`?',
+        choices: [
+          'When the file must be appended to instead of replaced',
+          'When the command needs root privileges',
+          'When you want to watch the output on screen and keep a copy at the same time',
+          'When the output is too long to fit in one file',
+        ],
+        answer: 2,
+        why: '`tee` writes what it receives to the file and passes it on to the terminal as well. With `>` the output goes only into the file.',
+      },
+    ],
+    refs: ['zshmisc(1), section REDIRECTION', 'tee(1)', 'null(4)', 'pipe(7)', 'NIST SP 800-115, section 7.4 (Data Handling)'],
+  };
+
   K.lessons.register({
     id: 'files',
     title: 'Working with files',
     order: 20,
     summary: 'Look inside files, organize them into a tidy working directory, capture the output of commands, and edit text in nano and vim.',
-    lessons: [viewLesson, manageLesson],
+    lessons: [viewLesson, manageLesson, redirectLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
