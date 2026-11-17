@@ -318,3 +318,91 @@ test('nslookup interactive mode', async () => {
     '> Default server: 10.10.10.53\nAddress: 10.10.10.53#53\n\nSet options:\n  novc\t\t\tnodebug\t\tnod2\n  search\t\trecurse\n' +
     '  timeout = 0\t\tretry = 3\tport = 53\tndots = 1\n  querytype = NS      \tclass = IN\n  srchlist = halcyon.lab\n> \n');
 });
+
+test('whois: domain records from the registry', async () => {
+  const sim = await dnsSim();
+  const client = await sim.run('whois halcyonfreight.example');
+  assert.equal(client.code, 0);
+  const lines = client.out.split('\n');
+  assert.deepEqual(lines.slice(0, 10), ['Domain Name: HALCYONFREIGHT.EXAMPLE', 'Registry Domain ID: ' + lines[1].split(': ')[1],
+    'Registrar WHOIS Server: whois.simulated-registrar.example', 'Registrar URL: http://www.simulated-registrar.example',
+    'Updated Date: 2026-02-11T08:15:02Z', 'Creation Date: 2009-03-14T10:22:31Z', 'Registry Expiry Date: 2027-03-14T10:22:31Z',
+    'Registrar: Simulated Registrar, Inc.', 'Registrar IANA ID: 9999', 'Registrar Abuse Contact Email: abuse@simulated-registrar.example']);
+  for (const want of ['Registrant Organization: Halcyon Freight Ltd.', 'Registrant State/Province: Greater Manchester', 'Registrant Country: GB',
+    'Registrant Name: REDACTED FOR PRIVACY', 'Registrant Email: REDACTED FOR PRIVACY', 'Name Server: NS1.HALCYONFREIGHT.EXAMPLE', 'Name Server: NS2.HALCYONFREIGHT.EXAMPLE',
+    'DNSSEC: unsigned', '>>> Last update of WHOIS database: 2026-11-13T14:29:19Z <<<']) assert.ok(lines.includes(want), want);
+  assert.match(client.out, /\nTERMS OF USE: /);
+  assert.equal((await sim.run('whois halcyonfreight.example | grep -c x 2>/dev/null; whois HalcyonFreight.Example. | t-count')).out.trim().split('\n').pop(), String(lines.filter(Boolean).length));
+
+  const generic = (await sim.run('whois -H kali.org')).out;
+  assert.match(generic, /^Domain Name: KALI\.ORG\n/);
+  assert.match(generic, /\nRegistrar: Simulated Registrar, Inc\.\n/);
+  assert.match(generic, /\nRegistrant Organization: REDACTED FOR PRIVACY\n/);
+  assert.match(generic, /\nCreation Date: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\nRegistry Expiry Date: 202[67]-/);
+  assert.match(generic, /\nNOTICE: This record is simulated by Kalima for training\./);
+  assert.doesNotMatch(generic, /TERMS OF USE/, '-H hides the legal text');
+  assert.equal((await sim.run('whois -H kali.org')).out, generic, 'invented registrations are stable');
+
+  assert.equal((await sim.run('whois example.com')).out, '% IANA WHOIS server\n% for more information on IANA, visit http://www.iana.org\n% This query returned 1 object\n\n' +
+    'domain:       EXAMPLE.COM\n\norganisation: Internet Assigned Numbers Authority\n\ncreated:      1992-01-01\nsource:       IANA\n\n');
+  assert.match((await sim.run('whois www.kali.org')).out, /^No match for domain "WWW\.KALI\.ORG"\.\n>>> Last update of WHOIS database: /, 'registries know domains, not hosts');
+  assert.match((await sim.run('whois nonexistent-shop.com')).out, /^No match for domain "NONEXISTENT-SHOP\.COM"\.\n/);
+  assert.match((await sim.run('whois -H bbc.co.uk')).out, /^Domain Name: BBC\.CO\.UK\n[^]*Registrant Country: GB\n/);
+  for (const name of ['halcyon.lab', 'web01.halcyon.lab', 'printer.local']) {
+    assert.deepEqual(await sim.run('whois ' + name).then((r) => [r.code, r.out]), [0, 'No whois server is known for this kind of object.\n'], name);
+  }
+});
+
+test('whois: address registries', async () => {
+  const sim = await dnsSim();
+  const lab = (await sim.run('whois 10.10.10.10')).out;
+  assert.match(lab, /^\n#\n# ARIN WHOIS data and services are subject to the Terms of Use\n/);
+  assert.match(lab, /\n\n\nNetRange: {7}10\.0\.0\.0 - 10\.255\.255\.255\nCIDR: {11}10\.0\.0\.0\/8\nNetName: {8}PRIVATE-ADDRESS-ABLK-RFC1918-IANA-RESERVED\nNetHandle: {6}NET-10-0-0-0-1\nParent: {10}\(\)\nNetType: {8}IANA Special Use\n/);
+  assert.match(lab, /\nComment: {8}These addresses were assigned by the IETF[^\n]*RFC 1918 which can be found at:\nComment: {8}http:\/\/datatracker\.ietf\.org\/doc\/rfc1918\n/);
+  assert.match(lab, /\nOrgName: {8}Internet Assigned Numbers Authority\nOrgId: {10}IANA\n/);
+  assert.match((await sim.run('whois -H 192.168.1.1')).out, /^NetRange: {7}192\.168\.0\.0 - 192\.168\.255\.255\nCIDR: {11}192\.168\.0\.0\/16\n/);
+  assert.match((await sim.run('whois -H 172.20.1.1')).out, /NetName: {8}PRIVATE-ADDRESS-BBLK-RFC1918-IANA-RESERVED\n/);
+  assert.match((await sim.run('whois -H 192.0.2.7')).out, /NetName: {8}TEST-NET-1\n[^]*reserved for use in documentation and sample configurations/);
+
+  const doc = (await sim.run('whois 203.0.113.10')).out;
+  assert.match(doc, /^% \[whois\.apnic\.net\]\n/);
+  assert.match(doc, /\ninetnum: {8}203\.0\.113\.0 - 203\.0\.113\.255\nnetname: {8}TEST-NET-3\ndescr: {10}IANA\ndescr: {10}RFC5737 Documentation Address Block\n/);
+  const arin = (await sim.run('whois -H 104.18.4.159')).out;
+  assert.match(arin, /^NetRange: {7}104\.18\.0\.0 - 104\.18\.255\.255\nCIDR: {11}104\.18\.0\.0\/16\nNetName: {8}SIMNET-104-18\n/);
+  assert.match(arin, /\nOriginAS: {7}AS64[45]\d\d\nOrganization: {3}Simulated Network Operator 104-18 \(SIMNET-104-18\)\n/);
+  assert.match(arin, /\nComment: {8}This record is simulated by Kalima for training\. It does not describe a real network\.\n/);
+  assert.match(arin, /\nOrgAbuseEmail: {2}abuse@simnet-104-18\.example\n/);
+  const ripe = (await sim.run('whois 185.49.219.7')).out;
+  assert.match(ripe, /^% This is the RIPE Database query service\.\n% The objects are in RPSL format\.\n/);
+  assert.match(ripe, /\ninetnum: {8}185\.49\.219\.0 - 185\.49\.219\.255\nnetname: {8}SIMNET-185-49-219\n/);
+  assert.match(ripe, /\nroute: {10}185\.49\.219\.0\/24\norigin: {9}AS64[45]\d\d\n/);
+  assert.match((await sim.run('whois -H halcyon')).out, /^No match found for halcyon\.\n/);
+});
+
+test('whois: options, verbose mode and unreachable servers', async () => {
+  const sim = await dnsSim();
+  assert.match((await sim.run('whois --verbose -H kali.org')).out, /^Using server whois\.publicinterestregistry\.org\.\nQuery string: "kali\.org"\n\nDomain Name: KALI\.ORG\n/);
+  assert.match((await sim.run('whois --verbose -H nonexistent-shop.com')).out, /^Using server whois\.verisign-grs\.com\.\nQuery string: "domain nonexistent-shop\.com"\n\nNo match/);
+  assert.match((await sim.run('whois --verbose -H 8.8.8.8')).out, /^Using server whois\.arin\.net\.\nQuery string: "n \+ 8\.8\.8\.8"\n\nNetRange/);
+  assert.equal((await sim.run('whois --version')).out, 'Version 5.6.4.\n\nReport bugs to <md+whois@linux.it>.\n');
+  const help = await sim.run('whois --help');
+  assert.deepEqual([help.code, help.err], [0, '']);
+  assert.match(help.out, /^Usage: whois \[OPTION\]\.\.\. OBJECT\.\.\.\n\n-h HOST, --host HOST {3}connect to server HOST\n/);
+  const none = await sim.run('whois');
+  assert.deepEqual([none.code, none.out, none.err], [1, '', help.out]);
+  const bad = await sim.run('whois -z kali.org');
+  assert.equal(bad.code, 1);
+  assert.equal(bad.err, "whois: invalid option -- 'z'\n" + help.out);
+  assert.match((await sim.run('whois --frob kali.org')).err, /^whois: unrecognized option '--frob'\n/);
+
+  const refused = await sim.run('whois -h 10.10.10.10 kali.org');
+  assert.deepEqual([refused.code, refused.out, refused.err], [2, '', 'connect: Connection refused\n']);
+  const unknown = await sim.run('whois -h whois.nonexistent.example kali.org');
+  assert.deepEqual([unknown.code, unknown.err], [2, 'getaddrinfo(whois.nonexistent.example): Name or service not known\n']);
+  sim.K.net.state.wan = false;
+  const before = sim.K.clock.now();
+  const cut = await sim.run('whois kali.org');
+  assert.deepEqual([cut.code, cut.out, cut.err], [2, '', 'Timeout.\n']);
+  assert.equal(sim.K.clock.now() - before, 60000);
+  assert.equal((await sim.run('whois web01.halcyon.lab')).out, 'No whois server is known for this kind of object.\n', 'no connection is needed to know that');
+});

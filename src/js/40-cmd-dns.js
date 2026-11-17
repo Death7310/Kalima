@@ -843,4 +843,251 @@
     man: 'DESCRIPTION\n       nslookup is a program to query Internet domain name servers. It has two modes: interactive and non-interactive. Interactive mode is entered when no arguments are given, or when the first argument is a hyphen (-) and the second argument is the name or address of a name server. Non-interactive mode prints just the name and requested information for a host or domain.\n\n       An answer that does not come from a server that is authoritative for the name is introduced by "Non-authoritative answer:".\n\nOPTIONS\n       -type=TYPE, -query=TYPE, -q=TYPE\n              Change the type of the information query: A, AAAA, CNAME, MX, NS, PTR, SOA, SRV, TXT, ANY.\n       -port=N, -timeout=N, -retry=N\n              Server port (53), seconds to wait for a reply (5) and number of tries (3).\n       -norecurse, -vc, -nosearch\n              Do not ask for recursion, use TCP, do not use the search list.\n       -version\n              Print the version and exit.\n\nINTERACTIVE COMMANDS\n       host   Look up information for host using the current default server.\n       server domain\n              Change the default server to domain.\n       set keyword[=value]\n              Change state information; "set all" prints the current values, "set type=mx" changes the query type.\n       exit   Exit the program.\n\nEXAMPLES\n       nslookup web01.halcyon.lab\n              Look up a lab host with the default server.\n       nslookup -type=mx halcyon.lab 10.10.10.53\n              Ask the lab name server for the mail exchangers of the domain.',
     run: nslookupRun,
   });
+  /* -------------------------------------------------------------- whois */
+  const WHOIS_USAGE = 'Usage: whois [OPTION]... OBJECT...\n\n' +
+    '-h HOST, --host HOST   connect to server HOST\n' +
+    '-p PORT, --port PORT   connect to PORT\n' +
+    '-I                     query whois.iana.org and follow its referral\n' +
+    '-H                     hide legal disclaimers\n' +
+    '      --verbose        explain what is being done\n' +
+    '      --no-recursion   disable recursion from registry to registrar servers\n' +
+    '      --help           display this help and exit\n' +
+    '      --version        output version information and exit\n' +
+    '\n' +
+    'These flags are supported by whois.ripe.net and some RIPE-like servers:\n' +
+    '-l                     find the one level less specific match\n' +
+    '-L                     find all levels less specific matches\n' +
+    '-m                     find all one level more specific matches\n' +
+    '-M                     find all levels of more specific matches\n' +
+    '-c                     find the smallest match containing a mnt-irt attribute\n' +
+    '-x                     exact match\n' +
+    '-b                     return brief IP address ranges with abuse contact\n' +
+    '-B                     turn off object filtering (show email addresses)\n' +
+    '-G                     turn off grouping of associated objects\n' +
+    '-d                     return DNS reverse delegation objects too\n' +
+    '-i ATTR[,ATTR]...      do an inverse look-up for specified ATTRibutes\n' +
+    '-T TYPE[,TYPE]...      only look for objects of TYPE\n' +
+    '-K                     only primary keys are returned\n' +
+    '-r                     turn off recursive look-ups for contact information\n' +
+    '-R                     force to show local copy of the domain object even\n' +
+    '                       if it contains referral\n' +
+    '-a                     also search all the mirrored databases\n' +
+    '-s SOURCE[,SOURCE]...  search the database mirrored from SOURCE\n' +
+    '-g SOURCE:FIRST-LAST   find updates from SOURCE from serial FIRST to LAST\n' +
+    '-t TYPE                request template for object of TYPE\n' +
+    '-v TYPE                request verbose template for object of TYPE\n' +
+    '-q [version|sources|types]  query specified server info\n';
+
+  const REDACTED = 'REDACTED FOR PRIVACY';
+  const SIMULATED = 'This record is simulated by Kalima for training. It does not describe a real registration.';
+  const WHOIS_HOSTS = { com: 'whois.verisign-grs.com', net: 'whois.verisign-grs.com', org: 'whois.publicinterestregistry.org', edu: 'whois.educause.edu', de: 'whois.denic.de' };
+  const IANA_RESERVED = ['example.com', 'example.net', 'example.org'];
+  const SECOND_LEVEL = ['co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.jp', 'ne.jp', 'or.jp'];
+  const COUNTRY = { uk: 'GB', de: 'DE', fr: 'FR', nl: 'NL', ca: 'CA', au: 'AU', jp: 'JP' };
+  const stamp = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
+  const day = (ms) => stamp(ms).slice(0, 10);
+
+  /** The part of a host name a registry sells: two labels, or three under a second-level suffix. */
+  function registrable(name) {
+    const labels = name.split('.');
+    return labels.slice(SECOND_LEVEL.indexOf(labels.slice(-2).join('.')) >= 0 ? -3 : -2).join('.');
+  }
+
+  /** A stable invented registration for a public domain that has no curated record. */
+  function inventedRegistration(domain, now) {
+    const h = U.hash32('whois:' + domain);
+    const born = new Date(Date.UTC(1996 + h % 26, (h >>> 5) % 12, 1 + (h >>> 9) % 28, (h >>> 14) % 24, (h >>> 19) % 60, (h >>> 25) % 60));
+    const renewal = (year) => new Date(born).setUTCFullYear(year);
+    const thisYear = new Date(now).getUTCFullYear();
+    return {
+      registrar: 'Simulated Registrar, Inc.', abuse: 'abuse@simulated-registrar.example', org: REDACTED, state: REDACTED,
+      country: COUNTRY[domain.split('.').pop()] || 'US', ns: ['NS1.' + domain.toUpperCase(), 'NS2.' + domain.toUpperCase()],
+      created: stamp(born.getTime()), updated: stamp(now - (20 + h % 300) * 86400000 - h % 86400000),
+      expires: stamp(renewal(thisYear) > now ? renewal(thisYear) : renewal(thisYear + 1)),
+    };
+  }
+
+  const domainFooter = (now, hide) => '>>> Last update of WHOIS database: ' + stamp(now - 41000) + ' <<<\n\n' +
+    'For more information on Whois status codes, please visit https://icann.org/epp\n\nNOTICE: ' + SIMULATED + '\n' +
+    (hide ? '' : '\nTERMS OF USE: You are not authorized to access or query our Whois database through the use\n' +
+      'of electronic processes that are high-volume and automated. Whois data is provided for\ninformation purposes only, to assist persons in obtaining information about or related\n' +
+      'to a domain name registration record. The registry does not guarantee its accuracy.\n');
+
+  function domainRecord(domain, info, now, hide) {
+    const name = domain.toUpperCase();
+    const registrarHost = info.abuse.split('@')[1];
+    const contact = (role) => ['Registry ' + role + ' ID', role + ' Name', role + ' Organization', role + ' Street', role + ' City', role + ' State/Province',
+      role + ' Postal Code', role + ' Country', role + ' Phone', role + ' Email'].map((label) => [label, REDACTED]);
+    const registrant = contact('Registrant');
+    registrant[2][1] = info.org; registrant[5][1] = info.state; registrant[7][1] = info.country;
+    const fields = [
+      ['Domain Name', name], ['Registry Domain ID', U.hash32('roid:' + domain) + '_DOMAIN_' + name.split('.').pop() + '-SIM'],
+      ['Registrar WHOIS Server', 'whois.' + registrarHost], ['Registrar URL', 'http://www.' + registrarHost],
+      ['Updated Date', info.updated], ['Creation Date', info.created], ['Registry Expiry Date', info.expires],
+      ['Registrar', info.registrar], ['Registrar IANA ID', '9999'], ['Registrar Abuse Contact Email', info.abuse], ['Registrar Abuse Contact Phone', REDACTED],
+      ['Domain Status', 'clientTransferProhibited https://icann.org/epp#clientTransferProhibited'],
+    ].concat(registrant, contact('Admin'), contact('Tech'), info.ns.map((ns) => ['Name Server', ns]),
+      [['DNSSEC', 'unsigned'], ['URL of the ICANN Whois Inaccuracy Complaint Form', 'https://www.icann.org/wicf/']]);
+    return fields.map((f) => f[0] + ': ' + f[1] + '\n').join('') + domainFooter(now, hide);
+  }
+
+  const ianaRecord = (domain) => '% IANA WHOIS server\n% for more information on IANA, visit http://www.iana.org\n% This query returned 1 object\n\n' +
+    'domain:       ' + domain.toUpperCase() + '\n\norganisation: Internet Assigned Numbers Authority\n\ncreated:      1992-01-01\nsource:       IANA\n\n';
+
+  /* --- address registries */
+  const PRIVATE_USE = ['These addresses are in use by many millions of independently operated networks, which might be as small as a single computer connected to a home gateway, ' +
+    'and are automatically configured in hundreds of millions of devices.  They are only intended for use within a private context  and traffic that needs to cross the Internet ' +
+    'will need to use a different, unique address.', '',
+  'These addresses can be used by anyone without any need to coordinate with IANA or an Internet registry.  The traffic from these addresses does not come from ICANN or IANA.  ' +
+    'We are not the source of activity you may see on logs or in e-mail records.  Please refer to http://www.iana.org/abuse/answers', '',
+  'These addresses were assigned by the IETF, the organization that develops Internet protocols, in the Best Current Practice document, RFC 1918 which can be found at:',
+  'http://datatracker.ietf.org/doc/rfc1918'];
+  const DOCUMENTATION = ['Addresses starting with "192.0.2.", "198.51.100.", or "203.0.113." are reserved for use in documentation and sample configurations.  ' +
+    'They should never be used in a live network configuration.  No one has permission to use these addresses on the Internet.', '',
+  'These addresses were assigned by the IETF, the organization that develops Internet protocols, in the Informational document RFC 5737, which can be found at:',
+  'http://datatracker.ietf.org/doc/rfc5737'];
+  const IANA_BLOCKS = [
+    { cidr: '10.0.0.0/8', name: 'PRIVATE-ADDRESS-ABLK-RFC1918-IANA-RESERVED', comments: PRIVATE_USE },
+    { cidr: '172.16.0.0/12', name: 'PRIVATE-ADDRESS-BBLK-RFC1918-IANA-RESERVED', comments: PRIVATE_USE },
+    { cidr: '192.168.0.0/16', name: 'PRIVATE-ADDRESS-CBLK-RFC1918-IANA-RESERVED', comments: PRIVATE_USE },
+    { cidr: '127.0.0.0/8', name: 'SPECIAL-IPV4-LOOPBACK-IANA-RESERVED', comments: ['Addresses starting with "127." are used when one program needs to talk to another program running on the same machine ' +
+      'using the Internet Protocol.  127.0.0.1 is the most commonly used address and is called the "loopback" address.', '',
+    'These addresses were assigned by the IETF, the organization that develops Internet protocols, in the Standard document, RFC 1122, which can be found at:', 'http://datatracker.ietf.org/doc/rfc1122'] },
+    { cidr: '169.254.0.0/16', name: 'LINKLOCAL-RFC3927-IANA-RESERVED', comments: ['Addresses starting with "169.254." are used when a computer cannot obtain an address in any other way: ' +
+      'it configures one for itself, valid only on the local link.', '',
+    'These addresses were assigned by the IETF, the organization that develops Internet protocols, in the Standards Track document, RFC 3927, which can be found at:', 'http://datatracker.ietf.org/doc/rfc3927'] },
+    { cidr: '100.64.0.0/10', name: 'SHARED-ADDRESS-SPACE-RFC6598-IANA-RESERVED', comments: ['This block is used as Shared Address Space by service providers that run carrier-grade NAT.  ' +
+      'Traffic from these addresses does not come from IANA.', '',
+    'These addresses were assigned by the IETF, the organization that develops Internet protocols, in the Best Current Practice document, RFC 6598, which can be found at:', 'http://datatracker.ietf.org/doc/rfc6598'] },
+    { cidr: '192.0.2.0/24', name: 'TEST-NET-1', comments: DOCUMENTATION },
+    { cidr: '198.51.100.0/24', name: 'TEST-NET-2', comments: DOCUMENTATION },
+  ];
+  const RIPE_OCTETS = [31, 37, 46, 62, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 109, 141, 145, 151, 176, 178, 185, 188, 193, 194, 195, 212, 213, 217];
+
+  const arinTerms = (now) => '\n#\n# ARIN WHOIS data and services are subject to the Terms of Use\n# available at: https://www.arin.net/resources/registry/whois/tou/\n#\n' +
+    '# If you see inaccuracies in the results, please report at\n# https://www.arin.net/resources/registry/whois/inaccuracy_reporting/\n#\n' +
+    '# Copyright 1997-' + new Date(now).getUTCFullYear() + ', American Registry for Internet Numbers, Ltd.\n#\n\n';
+  const arinPage = (body, now, hide) => (hide ? body : arinTerms(now) + '\n' + body + '\n' + arinTerms(now));
+  const labelled = (fields, width) => fields.filter((f) => f[1] !== undefined).map((f) => (f[0] + ':').padEnd(width) + f[1] + '\n').join('');
+  const dashed = (ip) => ip.replace(/\./g, '-');
+
+  function arinNetwork(net, org) {
+    const c = U.parseCidr(net.cidr); const first = U.intToIp(c.network);
+    return labelled([['NetRange', first + ' - ' + U.intToIp(c.broadcast)], ['CIDR', net.cidr], ['NetName', net.name], ['NetHandle', 'NET-' + dashed(first) + '-1'],
+      ['Parent', net.parent], ['NetType', net.type], ['OriginAS', net.origin], ['Organization', org.name + ' (' + org.id + ')'], ['RegDate', net.registered], ['Updated', net.updated]]
+      .concat(net.comments.map((text) => ['Comment', text])), 16) + '\n\n' +
+      labelled([['OrgName', org.name], ['OrgId', org.id], ['Address', org.address], ['City', org.city], ['StateProv', org.state], ['PostalCode', org.postal], ['Country', 'US'],
+        ['RegDate', org.registered], ['Updated', org.updated]], 16) + '\n';
+  }
+
+  const ianaBlock = (block) => arinNetwork(
+    { cidr: block.cidr, name: block.name, parent: ' ()', type: 'IANA Special Use', origin: '', registered: '', updated: '2024-05-24', comments: block.comments },
+    { name: 'Internet Assigned Numbers Authority', id: 'IANA', registered: '', updated: '2024-05-24' });
+
+  /* Every other address belongs to an invented operator; its allocation is the surrounding /16 (ARIN) or /24 (RIPE). */
+  function inventedNetwork(ip, now) {
+    const o = ip.split('.'); const h = U.hash32('net:' + o[0] + '.' + o[1]);
+    return { o, tag: 'SIMNET-' + o[0] + '-' + o[1], asn: 'AS' + (64496 + h % 16), since: day(now - (1500 + h % 4000) * 86400000), changed: day(now - (30 + h % 700) * 86400000) };
+  }
+  function arinAllocation(ip, now) {
+    const n = inventedNetwork(ip, now);
+    return arinNetwork(
+      { cidr: n.o[0] + '.' + n.o[1] + '.0.0/16', name: n.tag, parent: 'NET' + n.o[0] + ' (NET-' + n.o[0] + '-0-0-0-0)', type: 'Direct Allocation', origin: n.asn, registered: n.since, updated: n.changed,
+        comments: [SIMULATED.replace('registration', 'network')] },
+      { name: 'Simulated Network Operator ' + n.o[0] + '-' + n.o[1], id: n.tag, address: REDACTED, city: REDACTED, state: '', postal: '', registered: n.since, updated: n.changed }) +
+      '\n' + labelled([['OrgAbuseHandle', 'ABUSE-' + n.tag], ['OrgAbuseName', 'Abuse Desk'], ['OrgAbusePhone', REDACTED], ['OrgAbuseEmail', 'abuse@' + n.tag.toLowerCase() + '.example']], 16) + '\n';
+  }
+
+  function ripeAllocation(ip, now, hide) {
+    const n = inventedNetwork(ip, now);
+    const base = n.o.slice(0, 3).join('.'); const range = base + '.0 - ' + base + '.255';
+    const abuse = 'abuse@' + n.tag.toLowerCase() + '.example';
+    const made = n.since + 'T09:41:27Z'; const touched = n.changed + 'T13:05:44Z';
+    return '% This is the RIPE Database query service.\n% The objects are in RPSL format.\n%\n' +
+      (hide ? '' : '% The RIPE Database is subject to Terms and Conditions.\n% See https://docs.db.ripe.net/terms-conditions.html\n') + '\n' +
+      '% Note: this output has been filtered.\n%       To receive output for a database update, use the "-B" flag.\n\n' +
+      "% Information related to '" + range + "'\n\n% Abuse contact for '" + range + "' is '" + abuse + "'\n\n" +
+      labelled([['inetnum', range], ['netname', n.tag + '-' + n.o[2]], ['descr', 'Simulated network (Kalima training record, not a real assignment)'], ['country', 'NL'],
+        ['admin-c', 'SIM' + n.o[0] + '-RIPE'], ['tech-c', 'SIM' + n.o[0] + '-RIPE'], ['status', 'ASSIGNED PA'], ['mnt-by', n.tag + '-MNT'], ['created', made], ['last-modified', touched], ['source', 'RIPE']], 16) + '\n' +
+      labelled([['role', 'Simulated Network Operator ' + n.o[0] + '-' + n.o[1]], ['address', REDACTED], ['abuse-mailbox', abuse], ['nic-hdl', 'SIM' + n.o[0] + '-RIPE'], ['mnt-by', n.tag + '-MNT'],
+        ['created', made], ['last-modified', touched], ['source', 'RIPE # Filtered']], 16) + '\n' +
+      "% Information related to '" + base + '.0/24' + n.asn + "'\n\n" +
+      labelled([['route', base + '.0/24'], ['origin', n.asn], ['mnt-by', n.tag + '-MNT'], ['created', made], ['last-modified', made], ['source', 'RIPE']], 16) + '\n' +
+      '% This query was served by the RIPE Database Query Service version 1.114 (KALIMA-SIM)\n\n\n';
+  }
+
+  const APNIC_TEST_NET = '% [whois.apnic.net]\n% Whois data copyright terms    http://www.apnic.net/db/dbcopyright.html\n\n' +
+    "% Information related to '203.0.113.0 - 203.0.113.255'\n\n" +
+    labelled([['inetnum', '203.0.113.0 - 203.0.113.255'], ['netname', 'TEST-NET-3'], ['descr', 'IANA'], ['descr', 'RFC5737 Documentation Address Block'], ['country', 'AU'],
+      ['status', 'ASSIGNED PORTABLE'], ['remarks', 'This block is reserved for use in documentation and'], ['remarks', 'should not be used in any real networks.'],
+      ['remarks', 'Please see more details at'], ['remarks', 'http://www.iana.org/go/rfc5737'], ['source', 'APNIC']], 16) +
+    '\n% This query was served by the APNIC Whois Service version 1.88 (KALIMA-SIM)\n\n\n';
+
+  /**
+   * Which registry answers for `object`, and with what: { server, query, body(hideLegal) }.
+   * No server means the real client would not know where to ask either.
+   */
+  function whoisPlan(ctx, object) {
+    const net = ctx.net; const now = K.clock.now();
+    const text = object.toLowerCase().replace(/\.$/, '');
+    const arin = (body) => ({ server: 'whois.arin.net', query: 'n + ' + object, body: (hide) => arinPage(body, now, hide) });
+    if (U.parseCidr(text)) {
+      const ip = text.split('/')[0];
+      const special = IANA_BLOCKS.find((b) => U.inCidr(ip, b.cidr));
+      if (special) return arin(ianaBlock(special));
+      if (U.inCidr(ip, '203.0.113.0/24')) return { server: 'whois.apnic.net', query: object, body: () => APNIC_TEST_NET };
+      if (RIPE_OCTETS.indexOf(+ip.split('.')[0]) >= 0) return { server: 'whois.ripe.net', query: '-V Md5.5.23 ' + object, body: (hide) => ripeAllocation(ip, now, hide) };
+      return arin(arinAllocation(ip, now));
+    }
+    if (!/^[a-z0-9_-]+(\.[a-z0-9_-]+)+$/.test(text)) return arin('No match found for ' + object + '.\n\n');
+    const tld = text.split('.').pop();
+    if (!net._publicName('nic.' + tld)) return {};
+    const server = WHOIS_HOSTS[tld] || 'whois.nic.' + tld;
+    const query = (server === 'whois.verisign-grs.com' ? 'domain ' : '') + text;
+    const curated = net.world.internet.whois[text];
+    if (curated) return { server, query, body: (hide) => domainRecord(text, curated, now, hide) };
+    if (IANA_RESERVED.indexOf(text) >= 0) return { server: 'whois.iana.org', query: text, body: () => ianaRecord(text) };
+    if (registrable(text) !== text || !net._publicName(text)) return { server, query, body: (hide) => 'No match for domain "' + text.toUpperCase() + '".\n' + domainFooter(now, hide) };
+    return { server, query, body: (hide) => domainRecord(text, inventedRegistration(text, now), now, hide) };
+  }
+
+  /** Open the connection to a whois server, or say why not. True when the query can be sent. */
+  async function whoisConnect(ctx, host, port) {
+    const net = ctx.net;
+    const addr = net.resolve(ctx.machine, host);
+    if (!addr) { ctx.eprintln('getaddrinfo(' + host + '): Name or service not known'); return false; }
+    const rt = net.route(ctx.machine, addr.ip);
+    if (!rt.ok) { ctx.eprintln('connect: ' + (rt.err === 'ENETUNREACH' ? 'Network is unreachable' : 'No route to host')); return false; }
+    if (rt.inet) { await ctx.sleep(Math.round(net.jitter(180 + rt.rtt * 4, 120))); return true; }
+    if (net.tcp(ctx.machine, addr.ip, port).state === 'closed') { ctx.eprintln('connect: Connection refused'); return false; }
+    await ctx.sleep(60000);
+    ctx.eprintln('Timeout.');
+    return false;
+  }
+
+  async function whoisRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'h:p:IHlLmMcxbBGdi:T:KrRas:g:t:v:q:', long: ['host=', 'port=', 'verbose', 'no-recursion', 'help', 'version'], alias: { host: 'h', port: 'p' } });
+    if (g.err) { ctx.eprintln('whois: ' + g.err); ctx.err(WHOIS_USAGE); return 1; }
+    if (g.opts.version) { ctx.out('Version 5.6.4.\n\nReport bugs to <md+whois@linux.it>.\n'); return 0; }
+    if (g.opts.help) { ctx.out(WHOIS_USAGE); return 0; }
+    if (!g.rest.length) { ctx.err(WHOIS_USAGE); return 1; }
+    const port = g.opts.p === undefined ? 43 : +g.opts.p;
+    if (!(port > 0 && port < 65536)) { ctx.eprintln('getaddrinfo(' + (g.opts.h || 'whois') + '): Servname not supported for ai_socktype'); return 2; }
+    const object = g.rest.join(' ');
+    const plan = whoisPlan(ctx, object);
+    const server = g.opts.h || (g.opts.I ? 'whois.iana.org' : plan.server);
+    if (!server) { ctx.println('No whois server is known for this kind of object.'); return 0; }
+    if (g.opts.verbose) ctx.out('Using server ' + server + '.\nQuery string: "' + (plan.query || object) + '"\n\n');
+    if (!await whoisConnect(ctx, server, port)) return 2;
+    ctx.out(plan.body ? plan.body(!!g.opts.H) : '');
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'whois', pkg: 'whois', section: 1, only: 'kali',
+    summary: 'client for the whois directory service',
+    synopsis: 'whois [-h HOST] [-p PORT] [-H] [--verbose] OBJECT...',
+    man: 'DESCRIPTION\n       whois searches for an object in a RFC 3912 database. This version of the whois client tries to guess the right server to ask for the specified object: the registry of the top-level domain for a domain name, a regional Internet registry (ARIN, RIPE, APNIC) for an IP address. If no guess can be made it prints "No whois server is known for this kind of object."\n\n       Registries only know registered domains (halcyonfreight.example), not host names below them, and nothing about private names such as the lab domain. The records in this lab are simulated: registrars are named as simulated and contact details are redacted.\n\nOPTIONS\n       -h HOST, --host HOST\n              Connect to HOST.\n       -p PORT, --port PORT\n              Connect to PORT.\n       -H     Do not display the legal disclaimers some registries like to show you.\n       -I     First query whois.iana.org and then follow its referral to the whois server authoritative for that request.\n       --verbose\n              Be verbose.\n       --help, --version\n              Display the usage or the version and exit.\n\n       Other options are passed to RIPE-like servers.\n\nEXIT STATUS\n       0 after a reply, 1 for a usage error, 2 when the server could not be reached.\n\nEXAMPLES\n       whois halcyonfreight.example\n              Registration record of the client\'s public domain: registrar, dates, name servers.\n       whois 203.0.113.10\n              Who is responsible for the network an address belongs to.',
+    run: whoisRun,
+  });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
