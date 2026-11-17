@@ -12,6 +12,9 @@
   const T = (...lines) => lines.join('\n');
   const GREP = ['grep', 'egrep', 'fgrep'];
   const WORK = '/home/kali/practice/text';
+  /** What a line printed, as trimmed non-empty lines. */
+  const linesOf = (ev) => K.util.stripAnsi(ev.output || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 
   /* ------------------------------------------------------------------ grep */
   const grepLesson = {
@@ -214,12 +217,221 @@
     refs: ['grep(1)', 'regex(7)', 'Kali Linux Revealed, ch. 3'],
   };
 
+  /* -------------------------------------------------------------- pipeline */
+  const pipelineLesson = {
+    id: 'text-pipeline',
+    title: 'Building a pipeline',
+    minutes: 12,
+    objectives: [
+      'Join commands with `|` and build a pipeline one stage at a time, reading the output after each stage',
+      'Take one field from every line with `cut`, and count repeated values with `sort` and `uniq -c`',
+      'Rank counts with `sort -n -r`, keep the top of a list with `head`, and reduce a list to a number with `wc -l`',
+      'Combine grep with these stages to answer a question about a log',
+    ],
+    intro: T(
+      'No single command can tell you which address sent the most requests to a web server. A pipeline can: a row of small commands joined by `|`, each one reading what the one before it printed. Analysts read logs this way every day.',
+      '',
+      'The method matters more than any one command. Add a stage, look at what comes out, then add the next. You will practice it on one day of requests to a fictional web shop: 476 lines in the *combined* format that nginx and Apache write.'
+    ),
+    steps: [
+      {
+        id: 'look',
+        prompt: T(
+          'Start by looking at the raw material. Move to the directory that holds the log and print its first three lines:',
+          '',
+          '```',
+          'cd /usr/share/kalima/logs',
+          'head -n 3 access.log',
+          '```',
+          '',
+          'Each line records one request. Read one from left to right: the client address, two dashes for fields that are empty here, the time in square brackets, the request in quotes, the status code the server answered with, the size of the answer in bytes, the referring page, and the name of the client software.',
+          '',
+          'Split a line at its spaces and count from 1. The address is field 1, the requested path is field 7 and the status code is field 9. The time contains a space, so it takes up fields 4 and 5.',
+          '',
+          'The commands in this lesson assume you stay in this directory. If one answers `No such file or directory`, run the `cd` again.'
+        ),
+        hint: 'Run the two commands in order. `head -n 3` prints the first three lines of a file.',
+        solution: 'cd /usr/share/kalima/logs; head -n 3 access.log',
+        check: { out: /12\/Nov\/2026:00:00:02 \+0000\] "GET \/status/, not: { out: /12\/Nov\/2026:23:45:02/ } },
+      },
+      {
+        id: 'cut',
+        prompt: T(
+          'The question for this lesson is: **which client made the most requests?** You will build the answer in stages. First, keep only the client address from every line. `cut` selects fields: `-d \' \'` says that fields are separated by a space, and `-f 1` asks for the first field.',
+          '',
+          '```',
+          'cut -d \' \' -f 1 access.log',
+          '```',
+          '',
+          '476 addresses scroll past, one for each request. That is too much to read, and it is meant to be: the next stages will boil it down. For now, check that each line is an address and nothing else.'
+        ),
+        hint: 'There is a space between the two quotes after `-d`. The file name comes last.',
+        solution: 'cut -d \' \' -f 1 access.log',
+        check: { fn: (ev) => { const l = linesOf(ev); return l.length > 0 && l[0] === '192.0.2.44' && l.every((x) => IPV4.test(x)); } },
+      },
+      {
+        id: 'sort',
+        prompt: T(
+          'The character `|`, called a *pipe*, connects two commands: what the first one prints becomes the input of the second instead of going to the screen. Press the Up arrow to bring back your last command, then add a second stage that sorts the addresses:',
+          '',
+          '```',
+          'cut -d \' \' -f 1 access.log | sort',
+          '```',
+          '',
+          'There are still 476 lines, but identical addresses now sit next to each other. Scroll back and you will see long runs of the same address. The next stage depends on that.'
+        ),
+        hint: 'Add ` | sort` to the end of the previous command. `sort` needs no file name here, because its input comes from the pipe.',
+        solution: 'cut -d \' \' -f 1 access.log | sort',
+        check: { cmd: 'sort', fn: (ev) => { const l = linesOf(ev); return l.length === 476 && l[0] === '192.0.2.10' && l[475] === '203.0.113.99'; } },
+      },
+      {
+        id: 'count',
+        prompt: T(
+          '`uniq` merges identical lines that follow one another into a single line. With `-c` it also writes, in front of each, how many lines it merged. Add it as a third stage:',
+          '',
+          '```',
+          'cut -d \' \' -f 1 access.log | sort | uniq -c',
+          '```',
+          '',
+          'The 476 lines have become eight, each a count followed by an address: the log holds requests from eight clients. This only works because of the `sort` stage. `uniq` compares each line with the one before it and nothing else, so equal lines that are apart would be counted separately.'
+        ),
+        hint: 'Add ` | uniq -c` after `sort`.',
+        solution: 'cut -d \' \' -f 1 access.log | sort | uniq -c',
+        check: { fn: (ev) => { const l = linesOf(ev); return l.length === 8 && l.indexOf('110 203.0.113.99') >= 0 && l.indexOf('40 192.0.2.10') >= 0; } },
+      },
+      {
+        id: 'rank',
+        prompt: T(
+          'The counts are there, but the list is in address order. Sort it again, this time by the number at the start of each line. `-n` compares numbers by their value instead of character by character, and `-r` reverses the order so that the largest comes first.',
+          '',
+          '```',
+          'cut -d \' \' -f 1 access.log | sort | uniq -c | sort -n -r',
+          '```',
+          '',
+          'Read the top line: the busiest client and the number of requests it made. Notice that `sort` appears twice in this pipeline, doing two different jobs.'
+        ),
+        hint: 'Add ` | sort -n -r` to the end. `-nr` and `-rn` mean the same.',
+        solution: 'cut -d \' \' -f 1 access.log | sort | uniq -c | sort -n -r',
+        check: { cmd: 'sort', fn: (ev) => { const l = linesOf(ev); return l.length === 8 && l[0] === '110 203.0.113.99' && l[7] === '5 203.0.113.7'; } },
+      },
+      {
+        id: 'top',
+        prompt: T(
+          'In a real log this list could run to thousands of addresses, and you would only want the start of it. Add one more stage so that only the three busiest clients are printed.',
+          '',
+          'You already used the command you need, in the first step of this lesson.'
+        ),
+        hint: '`head -n 3` reads from a pipe just as it reads from a file.',
+        solution: 'cut -d \' \' -f 1 access.log | sort | uniq -c | sort -n -r | head -n 3',
+        check: { fn: (ev) => { const l = linesOf(ev); return l.length === 3 && ['110 203.0.113.99', '96 192.0.2.44', '86 198.51.100.23'].every((x) => l.indexOf(x) >= 0); } },
+      },
+      {
+        id: 'status',
+        prompt: T(
+          'Now a second question, with a pipeline of your own: **how many requests were answered with status 404 (not found)?**',
+          '',
+          'The status code is field 9. Count how often each status code appears, the same way you counted the addresses, and read the answer from the output.',
+          '',
+          'How many requests returned 404?'
+        ),
+        hint: 'Take the pipeline that ended in `uniq -c` and change the field number: `cut -d \' \' -f 9 access.log | sort | uniq -c`. Each output line is a count followed by a status code.',
+        solution: '108',
+        answer: /^108(\s+(requests?|lines?))?\.?$/i,
+      },
+      {
+        id: 'methods',
+        prompt: T(
+          'Fields do not always come out clean. Field 6 is the request method, but the request is quoted in the log, so the method arrives with a quotation mark stuck to it: `"GET`. `tr` changes or deletes single characters in whatever passes through it, and `tr -d` deletes. Put it between `cut` and `sort` to strip the quotation marks:',
+          '',
+          '```',
+          'cut -d \' \' -f 6 access.log | tr -d \'"\' | sort | uniq -c',
+          '```',
+          '',
+          'Three methods, with `GET` far ahead of the others. Unlike the other commands here, `tr` never takes a file name. It only reads what is piped or redirected into it.'
+        ),
+        hint: 'The argument of `tr -d` is one double quotation mark inside single quotes.',
+        solution: 'cut -d \' \' -f 6 access.log | tr -d \'"\' | sort | uniq -c',
+        check: { out: /^\s*447 GET\s*$/m, all: [{ out: /^\s*24 POST\s*$/m }] },
+      },
+      {
+        id: 'distinct',
+        prompt: T(
+          '`wc -l` counts lines, which makes it the usual last stage when the answer you want is a single number. To count how many *different* clients appear in the log, use `uniq` without `-c`, so that each address is printed once, and then count the lines:',
+          '',
+          '```',
+          'cut -d \' \' -f 1 access.log | sort | uniq | wc -l',
+          '```',
+          '',
+          'The result agrees with the number of lines in the table of counts you made earlier. Checking one result against another like this is a cheap way to catch a mistake in a pipeline.'
+        ),
+        hint: 'Four stages: `cut`, `sort`, `uniq`, `wc -l`.',
+        solution: 'cut -d \' \' -f 1 access.log | sort | uniq | wc -l',
+        check: { cmd: 'wc', out: /^\s*8\s*$/m, exit: 0 },
+      },
+      {
+        id: 'who',
+        prompt: T(
+          'Combine all this with grep. The 404 answers deserve a closer look: **which clients received them, and how many each?**',
+          '',
+          'Start the pipeline with a grep that keeps only the lines with status 404. Search for ` 404 ` with a space on each side, in quotes, so that the number cannot match inside a longer one. Then count those lines for each client address, as you did before.',
+          '',
+          'When it works, read the result with care. The number of lines in it tells you as much as the counts do.'
+        ),
+        hint: 'The first stage is `grep \' 404 \' access.log`. Follow it with the `cut`, `sort` and `uniq -c` stages you used for the addresses.',
+        solution: 'grep \' 404 \' access.log | cut -d \' \' -f 1 | sort | uniq -c',
+        check: { out: /^\s*108 203\.0\.113\.99\b/m, exit: 0 },
+      },
+    ],
+    quiz: [
+      {
+        q: 'What would `cut -d \' \' -f 1 access.log | uniq -c` print, with the `sort` stage left out?',
+        choices: [
+          'The same eight lines, in a different order',
+          'Many more than eight lines, because `uniq` only merges identical lines that follow one another',
+          'An error message, because `uniq` refuses input that is not sorted',
+          'Eight lines, each with a count of 1',
+        ],
+        answer: 1,
+        why: '`uniq` compares each line only with the line before it. In the unsorted log the same address returns many times with other addresses in between, and every run is counted on its own line.',
+      },
+      {
+        q: 'A file holds the numbers 5, 24 and 110, one per line. In what order does plain `sort`, without `-n`, print them?',
+        choices: ['5, 24, 110', '110, 24, 5', '24, 5, 110', 'In the order they are in the file'],
+        answer: 1,
+        why: 'Without `-n`, sort compares text one character at a time, and `1` comes before `2`, which comes before `5`. `-n` makes it compare the values of the numbers.',
+      },
+      {
+        q: 'All 108 answers with status 404 went to one address, within 45 seconds, for paths such as `/admin`, `/backup` and `/config`. What is the most reasonable reading?',
+        choices: [
+          'The site is broken and every visitor is getting errors',
+          'One client asked for a list of likely paths to find out which exist',
+          'Files were stolen from the server',
+          'The log file is damaged',
+        ],
+        answer: 1,
+        why: 'A 404 says only that a path does not exist. Many of them from one client in a short time, for names that no page links to, is the trace of an automated search for hidden content. It shows probing, not success.',
+      },
+      {
+        q: 'Why build a pipeline one stage at a time, looking at the output after each stage?',
+        choices: [
+          'Because the shell cannot start more than two commands at once',
+          'Because a mistake in an early stage, such as the wrong field number, is easy to see before counting and sorting hide it',
+          'Because `sort` is unable to read from a file',
+          'Because long pipelines lose lines',
+        ],
+        answer: 1,
+        why: 'Each stage sees only what the previous one printed. If the first stage selects the wrong field, the later stages will still produce a tidy table, and it will be wrong. Checking as you go keeps every stage honest.',
+      },
+    ],
+    refs: ['cut(1)', 'sort(1)', 'uniq(1)', 'tr(1)', 'wc(1)', 'head(1)', 'The Linux Command Line (W. Shotts), ch. 6 and ch. 20'],
+  };
+
   K.lessons.register({
     id: 'text',
     title: 'Searching and shaping text',
     order: 25,
     summary: 'Find the lines that matter with grep, build pipelines one stage at a time, and answer questions about logs and tables without opening an editor.',
-    lessons: [grepLesson],
+    lessons: [grepLesson, pipelineLesson],
   });
 
   void WORK;
