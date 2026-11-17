@@ -26,6 +26,8 @@
     return Array.from(new Set(out.filter(Boolean))).sort();
   }
   const ifaceNames = (m) => m.ifaces.map((i) => i.name);
+  /** net-tools list real interfaces first and the loopback last. */
+  const netToolsOrder = (m) => m.ifaces.filter((i) => i.kind !== 'loopback').concat(m.ifaces.filter((i) => i.kind === 'loopback'));
   const ifaceByName = (m, n) => m.ifaces.find((i) => i.name === n) || null;
 
   /** Resolve a host argument the way libc does; distinguishes "no such name" from "resolver unreachable". */
@@ -519,30 +521,40 @@
     return r;
   }
   const sameRoute = (a, b) => a.dst === b.dst && (a.metric || 0) === (b.metric || 0);
-  function ipRouteChange(ctx, cmd, args) {
+  /**
+   * Apply a route change to the machine. Returns null on success or an error code
+   * ('perm', 'nodev', 'badgw', 'exists', 'nosuch') for the calling tool to word.
+   */
+  function applyRoute(ctx, cmd, r) {
     const m = ctx.machine;
+    if (!ctx.isRoot) return 'perm';
+    if (cmd === 'delete') {
+      const i = m.routes.findIndex((x) => x.dst === r.dst && (r.metric == null || (x.metric || 0) === r.metric) && (!r.via || x.via === r.via) && (!r.dev || x.dev === r.dev));
+      if (i < 0) return 'nosuch';
+      m.routes.splice(i, 1);
+      return null;
+    }
+    if (r.via) {
+      const dev = m.ifaces.find((i) => i.kind !== 'loopback' && isUp(i) && (!r.dev || i.name === r.dev) && addrList(i).some((a) => U.inCidr(r.via, a.ip + '/' + a.bits)));
+      if (!dev) return 'badgw';
+      r.dev = dev.name;
+    } else if (!r.dev && !r.type) return 'nodev';
+    const existing = m.routes.findIndex((x) => sameRoute(x, r));
+    if (cmd === 'add' && existing >= 0) return 'exists';
+    if (cmd === 'change' && existing < 0) return 'nosuch';
+    if (existing >= 0) m.routes.splice(existing, 1);
+    m.routes.push(r); sortRoutes(m);
+    return null;
+  }
+  const IP_ROUTE_ERR = { perm: 'RTNETLINK answers: Operation not permitted', nodev: 'RTNETLINK answers: No such device', badgw: 'Error: Nexthop has invalid gateway.', exists: 'RTNETLINK answers: File exists', nosuch: 'RTNETLINK answers: No such process' };
+  function ipRouteChange(ctx, cmd, args) {
     const r = parseRoute(ctx, args);
     if (!r) return 1;
     if (r.fatal) return r.fatal;
-    if (cmd === 'delete') {
-      if (!ctx.isRoot) { ctx.eprintln('RTNETLINK answers: Operation not permitted'); return 2; }
-      const i = m.routes.findIndex((x) => x.dst === r.dst && (r.metric == null || (x.metric || 0) === r.metric) && (!r.via || x.via === r.via) && (!r.dev || x.dev === r.dev));
-      if (i < 0) { ctx.eprintln('RTNETLINK answers: No such process'); return 2; }
-      m.routes.splice(i, 1);
-      return 0;
-    }
-    if (!ctx.isRoot) { ctx.eprintln('RTNETLINK answers: Operation not permitted'); return 2; }
-    if (r.via) {
-      const dev = m.ifaces.find((i) => i.kind !== 'loopback' && isUp(i) && (!r.dev || i.name === r.dev) && addrList(i).some((a) => U.inCidr(r.via, a.ip + '/' + a.bits)));
-      if (!dev) { ctx.eprintln('Error: Nexthop has invalid gateway.'); return 2; }
-      r.dev = dev.name;
-    } else if (!r.dev && !r.type) { ctx.eprintln('RTNETLINK answers: No such device'); return 2; }
-    const existing = m.routes.findIndex((x) => sameRoute(x, r));
-    if (cmd === 'add' && existing >= 0) { ctx.eprintln('RTNETLINK answers: File exists'); return 2; }
-    if (cmd === 'change' && existing < 0) { ctx.eprintln('RTNETLINK answers: No such file or directory'); return 2; }
-    if (existing >= 0) m.routes.splice(existing, 1);
-    m.routes.push(r); sortRoutes(m);
-    return 0;
+    const err = applyRoute(ctx, cmd, r);
+    if (!err) return 0;
+    ctx.eprintln(cmd === 'change' && err === 'nosuch' ? 'RTNETLINK answers: No such file or directory' : IP_ROUTE_ERR[err]);
+    return 2;
   }
   function ipRouteFlush(ctx, args) {
     const m = ctx.machine;
@@ -1092,6 +1104,396 @@
     man: 'DESCRIPTION\n       mtr combines the functionality of the traceroute and ping programs in a single network diagnostic tool. As mtr starts, it investigates the network connection between the host mtr runs on and HOSTNAME by sending packets with purposely low TTLs, then keeps measuring every hop it found: loss, latency and jitter.\n\n       Without --report mtr runs on the terminal and redraws the table every second; press q or Ctrl-C to leave.\n\nOPTIONS\n       -r, --report\n              Run non-interactively for --report-cycles cycles and print one table.\n       -c COUNT, --report-cycles COUNT\n              Number of pings sent per hop in report mode (default 10).\n       -n, --no-dns\n              Do not resolve host names.\n       -b, --show-ips\n              Show both host names and IP addresses.\n       -w, --report-wide\n              Report mode with the full host names.\n       -i SECONDS, --interval SECONDS\n              Time between pings (default 1).\n       -m NUM, --max-ttl NUM\n              Largest TTL to probe (default 30).\n       -T, --tcp; -u, --udp\n              Probe with TCP SYN or UDP instead of ICMP.\n       -4     Use IPv4 only.\n\nEXAMPLES\n       mtr -rn -c 5 10.10.10.10\n              Five-cycle report without name lookups.\n       mtr kali.org\n              Live view; press q to quit.',
     run: mtrRun,
     complete: (info) => (info.cur && info.cur[0] === '-' ? [] : hostNames()),
+  });
+
+
+  /* ============================================== sockets: ss and netstat */
+  const SERVICES = { 21: 'ftp', 22: 'ssh', 23: 'telnet', 25: 'smtp', 53: 'domain', 67: 'bootps', 68: 'bootpc', 80: 'http', 110: 'pop3', 111: 'sunrpc', 123: 'ntp', 139: 'netbios-ssn', 143: 'imap2', 161: 'snmp', 389: 'ldap', 443: 'https', 445: 'microsoft-ds', 515: 'printer', 631: 'ipp', 873: 'rsync', 993: 'imaps', 995: 'pop3s', 2049: 'nfs', 3306: 'mysql', 5353: 'mdns', 5432: 'postgresql', 8080: 'http-alt' };
+  const portText = (port, numeric) => (numeric || port === '*' ? String(port) : SERVICES[port] || String(port));
+  const BACKLOG = { apache2: 511, nginx: 511, mariadbd: 80, mysqld: 80 };
+
+  /** Every socket the machine has open, one row per bound address. */
+  function localSockets(ctx) {
+    const m = ctx.machine; const rows = []; const fds = {};
+    const owner = (l) => { const p = m.procs.find((x) => x.pid === l.pid); return p ? p.user : 'root'; };
+    for (const l of K.net.listening(m)) {
+      const proto = l.proto === 'udp' ? 'udp' : 'tcp';
+      const prog = l.prog || String(l.name || l.unit || '?').replace(/\.service$/, '');
+      const base = { proto, state: proto === 'tcp' ? 'LISTEN' : 'UNCONN', recvq: 0, sendq: proto === 'tcp' ? l.backlog || BACKLOG[prog] || 128 : 0, lport: l.port, pport: '*', pid: l.pid, prog, owner: owner(l) };
+      const add = (v6, laddr, extra) => { fds[l.pid] = (fds[l.pid] || 2) + 1; rows.push(Object.assign({}, base, { v6, laddr, paddr: v6 ? '::' : '0.0.0.0', fd: fds[l.pid] }, extra)); };
+      const addr = l.addr || '0.0.0.0';
+      if (addr !== '0.0.0.0') add(false, addr);
+      else if (prog === 'apache2') add(true, '::', { star: true });
+      else { add(false, '0.0.0.0'); add(true, '::'); }
+    }
+    const nm = m.procs.find((p) => /NetworkManager/.test(p.cmd));
+    const eth = m.primaryIface();
+    if (nm && eth && m.profile === 'kali') rows.push({ proto: 'udp', state: 'UNCONN', recvq: 0, sendq: 0, laddr: eth.ip + '%' + eth.name, lport: 68, paddr: '0.0.0.0', pport: '*', v6: false, pid: nm.pid, prog: 'NetworkManager', owner: 'root', fd: 29, plainAddr: eth.ip });
+    return rows;
+  }
+  /** Rows after the tool's own filters (-t -u -l -a -4 -6). */
+  function selectSockets(ctx, f) {
+    return localSockets(ctx).filter((r) => (f.tcp && r.proto === 'tcp') || (f.udp && r.proto === 'udp'))
+      .filter((r) => (f.listening && r.state !== 'ESTAB') || f.all || (!f.listening && !f.all && r.state === 'ESTAB'))
+      .filter((r) => (f.v4 && !r.v6) || (f.v6 && r.v6) || (!f.v4 && !f.v6))
+      .sort((a, b) => (a.proto === b.proto ? 0 : a.proto === 'udp' ? -1 : 1));
+  }
+  const visibleProc = (ctx, r) => ctx.isRoot || r.owner === ctx.user.name;
+
+  const SS_USAGE = 'Usage: ss [ OPTIONS ]\n       ss [ OPTIONS ] [ FILTER ]\n   -h, --help          this message\n   -V, --version       output version information\n   -n, --numeric       don\'t resolve service names\n   -r, --resolve       resolve host names\n   -a, --all           display all sockets\n   -l, --listening     display listening sockets\n   -o, --options       show timer information\n   -e, --extended      show detailed socket information\n   -m, --memory        show socket memory usage\n   -p, --processes     show process using socket\n   -i, --info          show internal TCP information\n   -s, --summary       show socket usage summary\n   -4, --ipv4          display only IP version 4 sockets\n   -6, --ipv6          display only IP version 6 sockets\n   -0, --packet        display PACKET sockets\n   -t, --tcp           display only TCP sockets\n   -u, --udp           display only UDP sockets\n   -d, --dccp          display only DCCP sockets\n   -w, --raw           display only RAW sockets\n   -x, --unix          display only Unix domain sockets\n   -H, --no-header     Suppress header line\n   -O, --oneline       socket\'s data printed on a single line\n\n   -A, --query=QUERY, --socket=QUERY\n       QUERY := {all|inet|tcp|udp|raw|unix|unix_dgram|unix_stream|unix_seqpacket|packet|netlink|vsock_stream|vsock_dgram|tipc}[,QUERY]\n\n   -D, --diag=FILE     Dump raw information about TCP sockets to FILE\n   -F, --filter=FILE   read filter information from FILE\n       FILTER := [ state STATE-FILTER ] [ EXPRESSION ]\n       STATE-FILTER := {all|connected|synchronized|bucket|big|TCP-STATES}\n         TCP-STATES := {established|syn-sent|syn-recv|fin-wait-{1,2}|time-wait|closed|close-wait|last-ack|listening|closing}\n          connected := {established|syn-sent|syn-recv|fin-wait-{1,2}|time-wait|close-wait|last-ack|closing}\n       synchronized := {established|syn-recv|fin-wait-{1,2}|time-wait|close-wait|last-ack|closing}\n          bucket := {syn-recv|time-wait}\n             big := {established|syn-sent|fin-wait-{1,2}|closed|close-wait|last-ack|listening|closing}\n';
+
+  async function ssRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'hVnraloemMpiOsHtudwx046A:D:F:f:bKNEzSTQCc', long: ['help', 'version', 'numeric', 'resolve', 'all', 'listening', 'options', 'extended', 'memory', 'processes', 'info', 'summary', 'ipv4', 'ipv6', 'packet', 'tcp', 'udp', 'raw', 'unix', 'dccp', 'no-header', 'oneline', 'query=', 'socket=', 'diag=', 'filter='], alias: { help: 'h', version: 'V', numeric: 'n', resolve: 'r', all: 'a', listening: 'l', options: 'o', extended: 'e', memory: 'm', processes: 'p', info: 'i', summary: 's', ipv4: '4', ipv6: '6', packet: '0', tcp: 't', udp: 'u', raw: 'w', unix: 'x', 'no-header': 'H', oneline: 'O' } });
+    if (g.err) { ctx.eprintln('ss: ' + g.err); ctx.err(SS_USAGE); return 1; }
+    const o = g.opts;
+    if (o.h) { ctx.out(SS_USAGE); return 0; }
+    if (o.V) { ctx.println(IP_VERSION.replace('ip utility', 'ss utility')); return 0; }
+    const anyProto = o.t || o.u || o.x || o.w || o.d || o['0'];
+    const f = { tcp: !anyProto || !!o.t, udp: !anyProto || !!o.u, listening: !!o.l, all: !!o.a, v4: !!o['4'], v6: !!o['6'] };
+    if (o.x && !o.t && !o.u) { f.tcp = false; f.udp = false; }
+    const rows = selectSockets(ctx, f);
+    const netid = (f.tcp ? 1 : 0) + (f.udp ? 1 : 0) + (o.x ? 1 : 0) > 1;
+    const text = rows.map((r) => {
+      const star = r.star ? '*' : r.v6 ? '[' + r.laddr + ']' : r.laddr;
+      const pstar = r.star ? '*' : r.v6 ? '[' + r.paddr + ']' : r.paddr;
+      const users = o.p && visibleProc(ctx, r) ? 'users:(("' + r.prog + '",pid=' + r.pid + ',fd=' + r.fd + '))' : '';
+      return [r.proto, r.state, String(r.recvq), String(r.sendq), star + ':', portText(r.lport, o.n), pstar + ':', r.pport, users];
+    });
+    const heads = ['Netid', 'State', 'Recv-Q', 'Send-Q', 'Local Address:', 'Port', 'Peer Address:', 'Port', 'Process'];
+    const all = o.H ? text : [heads].concat(text);
+    const w = heads.map((h, c) => Math.max(c === 2 || c === 3 ? 6 : 0, ...all.map((r) => r[c].length)));
+    w[4] = w[6] = Math.max(w[4], w[6]);
+    const align = [0, 0, 0, 0, 1, 0, 1, 0, 0]; const delim = ['', ' ', ' ', ' ', ' ', '', ' ', '', ''];
+    const out = all.map((r) => {
+      let line = '';
+      r.forEach((cell, c) => {
+        if (c === 0 && !netid) return;
+        const lead = (c === 1 && !netid) ? '' : delim[c];
+        line += lead + (align[c] ? padL(cell, w[c]) : pad(cell, w[c]));
+      });
+      return line;
+    });
+    if (out.length) ctx.println(out.join('\n'));
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'ss', path: '/usr/bin/ss', pkg: 'iproute2', section: 8,
+    summary: 'another utility to investigate sockets',
+    synopsis: 'ss [options] [ FILTER ]',
+    man: 'DESCRIPTION\n       ss is used to dump socket statistics. It allows showing information similar to netstat. It can display more TCP and state information than other tools.\n\nOPTIONS\n       -t, --tcp      Display TCP sockets.\n       -u, --udp      Display UDP sockets.\n       -l, --listening\n              Display only listening sockets (these are omitted by default).\n       -a, --all      Display both listening and non-listening sockets.\n       -n, --numeric  Do not try to resolve service names.\n       -p, --processes\n              Show process using socket. Other users\' processes are only shown to root.\n       -4, --ipv4; -6, --ipv6\n              Display only IP version 4 or 6 sockets.\n       -H, --no-header\n              Suppress the header line.\n       -V, --version  Output version information.\n\nEXAMPLES\n       ss -tulpn\n              All listening TCP and UDP sockets with the owning process.\n       ss -tlnH\n              Listening TCP sockets without a header, handy for scripts.',
+    run: ssRun,
+  });
+
+  /* ---------------------------------------------------------------- netstat */
+  const NETSTAT_USAGE = 'usage: netstat [-vWeenNcCF] [<Af>] -r         netstat {-V|--version|-h|--help}\n       netstat [-vWnNcaeol] [<Socket> ...]\n       netstat { [-vWeenNac] -I[<Iface>] | [-veenNac] -i | [-cnNe] -M | -s [-6tuw] } [delay]\n\n        -r, --route              display routing table\n        -I, --interfaces=<Iface> display interface table for <Iface>\n        -i, --interfaces         display interface table\n        -g, --groups             display multicast group memberships\n        -s, --statistics         display networking statistics (like SNMP)\n        -M, --masquerade         display masqueraded connections\n\n        -v, --verbose            be verbose\n        -W, --wide               don\'t truncate IP addresses\n        -n, --numeric            don\'t resolve names\n        --numeric-hosts          don\'t resolve host names\n        --numeric-ports          don\'t resolve port names\n        --numeric-users          don\'t resolve user names\n        -N, --symbolic           resolve hardware names\n        -e, --extend             display other/more information\n        -p, --programs           display PID/Program name for sockets\n        -o, --timers             display timers\n        -c, --continuous         continuous listing\n\n        -l, --listening          display listening server sockets\n        -a, --all                display all sockets (default: connected)\n        -F, --fib                display Forwarding Information Base (default)\n        -C, --cache              display routing cache instead of FIB\n        -Z, --context            display SELinux security context for sockets\n\n  <Socket>={-t|--tcp} {-u|--udp} {-U|--udplite} {-S|--sctp} {-w|--raw}\n           {-x|--unix} --ax25 --ipx --netrom\n  <AF>=Use \'-6|-4\' or \'-A <af>\' or \'--<af>\'; default: inet\n  List of possible address families (which support routing):\n    inet (DARPA Internet) inet6 (IPv6) ax25 (AMPR AX.25) \n    netrom (AMPR NET/ROM) ipx (Novell IPX) ddp (Appletalk DDP) \n    x25 (CCITT X.25) \n';
+  const NET_TOOLS_VERSION = 'net-tools 2.10';
+
+  function ifaceStatsRow(m, i) {
+    const s = nlStats(m, i);
+    const lo = i.kind === 'loopback';
+    const flg = (lo ? 'L' : 'BM') + (i.promisc ? 'p' : '') + (isUp(i) ? 'RU' : '');
+    return pad(i.name, 5) + ' ' + padL(i.mtu || 1500, 8) + ' ' + padL(s.rxp, 8) + ' ' + padL(0, 6) + ' ' + padL(0, 6) + ' ' + pad('0', 6) + ' ' + padL(s.txp, 8) + ' ' + padL(0, 6) + ' ' + padL(0, 6) + ' ' + padL(0, 6) + ' ' + flg;
+  }
+  const IFACE_STATS_HEAD = 'Iface      MTU    RX-OK RX-ERR RX-DRP RX-OVR    TX-OK TX-ERR TX-DRP TX-OVR Flg';
+  const UNIX_SOCKETS = [
+    ['unix', 2, '[ ACC ]', 'STREAM', 'LISTENING', 17418, '/run/user/1000/systemd/private'], ['unix', 2, '[ ACC ]', 'STREAM', 'LISTENING', 12874, '/run/systemd/private'],
+    ['unix', 2, '[ ACC ]', 'STREAM', 'LISTENING', 12876, '/run/dbus/system_bus_socket'], ['unix', 2, '[ ACC ]', 'SEQPACKET', 'LISTENING', 12883, '/run/udev/control'],
+    ['unix', 2, '[ ]', 'DGRAM', '', 12858, '/run/systemd/notify'],
+  ];
+
+  function netstatRoutes(ctx, numeric) {
+    const m = ctx.machine;
+    const rows = m.routes.filter((r) => !r.type).slice().sort(displayOrder).map((r) => {
+      const c = r.dst === 'default' ? { network: 0, mask: 0, bits: 0 } : U.parseCidr(r.dst);
+      const flags = 'U' + (r.via ? 'G' : '') + (c.bits === 32 ? 'H' : '');
+      return { dst: U.intToIp(c.network), via: r.via || '0.0.0.0', mask: U.maskFromBits(c.bits), flags, metric: r.metric || 0, dev: r.dev, def: r.dst === 'default' };
+    });
+    return rows.map((r) => Object.assign(r, numeric ? {} : { dst: r.def ? 'default' : r.dst, via: r.via === '0.0.0.0' ? r.via : rdns(ctx, r.via) || r.via }));
+  }
+
+  async function netstatRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'rIiMgsvWnNecoplaFCZtuUSwxd46hVAc:', long: ['route', 'interfaces', 'groups', 'statistics', 'verbose', 'wide', 'numeric', 'numeric-hosts', 'numeric-ports', 'numeric-users', 'symbolic', 'extend', 'programs', 'timers', 'continuous', 'listening', 'all', 'fib', 'cache', 'tcp', 'udp', 'raw', 'unix', 'help', 'version', 'ipv4', 'ipv6', 'masquerade', 'udplite', 'sctp', 'context'], alias: { route: 'r', interfaces: 'i', numeric: 'n', programs: 'p', listening: 'l', all: 'a', tcp: 't', udp: 'u', raw: 'w', unix: 'x', help: 'h', version: 'V', extend: 'e', wide: 'W', verbose: 'v', ipv4: '4', ipv6: '6' } });
+    if (g.err) { ctx.eprintln('netstat: ' + g.err); ctx.err(NETSTAT_USAGE); return 1; }
+    const o = g.opts; const m = ctx.machine;
+    if (o.h) { ctx.out(NETSTAT_USAGE); return 0; }
+    if (o.V) { ctx.println(NET_TOOLS_VERSION + '\nFred Baumgarten, Alan Cox, Bernd Eckenfels, Phil Blundell, Tuan Hoang, Brian Micek and others\n+NEW_ADDRT +RTNETLINK +IPV6 +IPX +AX25 +NETROM +X25 +ATALK +ECONET +ROSE'); return 0; }
+    if (o.r) {
+      const rows = netstatRoutes(ctx, !!o.n);
+      const lines = ['Kernel IP routing table', 'Destination     Gateway         Genmask         Flags   MSS Window  irtt Iface'];
+      for (const r of rows) lines.push(pad(r.dst, 15) + ' ' + pad(r.via, 15) + ' ' + pad(r.mask, 15) + ' ' + pad(r.flags, 5) + ' ' + padL(0, 5) + ' ' + pad('0', 6) + ' ' + padL(0, 5) + ' ' + r.dev);
+      ctx.println(lines.join('\n'));
+      return 0;
+    }
+    if (o.i) {
+      const list = netToolsOrder(m).filter((i) => o.a || isUp(i));
+      ctx.println(['Kernel Interface table', IFACE_STATS_HEAD].concat(list.map((i) => ifaceStatsRow(m, i))).join('\n'));
+      return 0;
+    }
+    if (o.s) { ctx.eprintln('netstat: statistics are not available in the simulator'); return 1; }
+    const anyProto = o.t || o.u || o.w || o.x;
+    const f = { tcp: !anyProto || !!o.t, udp: !anyProto || !!o.u, listening: !!o.l, all: !!o.a, v4: !!o['4'], v6: !!o['6'] };
+    const rows = selectSockets(ctx, f);
+    if (o.p && !ctx.isRoot) ctx.err('(Not all processes could be identified, non-owned process info\n will not be shown, you would have to be root to see it all.)\n');
+    const kind = o.l && !o.a ? 'only servers' : o.a ? 'servers and established' : 'w/o servers';
+    const lines = ['Active Internet connections (' + kind + ')', 'Proto Recv-Q Send-Q Local Address           Foreign Address         State      ' + (o.p ? ' PID/Program name    ' : '')];
+    for (const r of rows.slice().sort((a, b) => (a.proto === b.proto ? 0 : a.proto === 'tcp' ? -1 : 1) || (a.v6 ? 1 : 0) - (b.v6 ? 1 : 0))) {
+      const a = r.v6 ? '::' : r.plainAddr || r.laddr;
+      const host = (name) => (o.n ? name : name === '127.0.0.1' ? 'localhost' : name);
+      const local = (r.v6 ? ':::' : host(a) + ':') + portText(r.lport, o.n);
+      const foreign = (r.v6 ? ':::' : '0.0.0.0:') + '*';
+      const proc = o.p ? ' ' + pad(visibleProc(ctx, r) ? r.pid + '/' + r.prog : '-', 20) : '';
+      lines.push(pad(r.proto + (r.v6 ? '6' : ''), 5) + ' ' + padL(r.recvq, 6) + ' ' + padL(r.sendq, 6) + ' ' + pad(local, 23) + ' ' + pad(foreign, 23) + ' ' + pad(r.proto === 'tcp' ? r.state : '', 11).slice(0, 11) + proc);
+    }
+    if (o.a && !o.t && !o.u || o.x) {
+      lines.push('Active UNIX domain sockets (' + (o.l && !o.a ? 'only servers' : 'servers and established') + ')', 'Proto RefCnt Flags       Type       State         I-Node   Path');
+      for (const u of UNIX_SOCKETS) lines.push(pad(u[0], 5) + ' ' + pad(String(u[1]), 6) + ' ' + pad(u[2], 11) + ' ' + pad(u[3], 10) + ' ' + pad(u[4], 13) + ' ' + pad(String(u[5]), 8) + ' ' + u[6]);
+    }
+    ctx.println(lines.join('\n'));
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'netstat', path: '/usr/bin/netstat', pkg: 'net-tools', section: 8, only: 'kali',
+    summary: 'Print network connections, routing tables, interface statistics, masquerade connections, and multicast memberships',
+    synopsis: 'netstat [address_family_options] [--tcp|-t] [--udp|-u] [--raw|-w] [--listening|-l] [--all|-a] [--numeric|-n] [--programs|-p]\n       netstat {--route|-r} [-n]\n       netstat {--interfaces|-i}',
+    man: 'DESCRIPTION\n       Netstat prints information about the Linux networking subsystem. The type of information printed is controlled by the first argument: sockets (the default), the routing table (-r) or the interface table (-i).\n\nOPTIONS\n       -t, --tcp; -u, --udp\n              Show only TCP or UDP sockets.\n       -l, --listening\n              Show only listening sockets.\n       -a, --all\n              Show both listening and non-listening sockets.\n       -n, --numeric\n              Show numerical addresses instead of trying to determine symbolic host, port or user names.\n       -p, --programs\n              Show the PID and name of the program to which each socket belongs. Other users\' programs are only shown to root.\n       -r, --route\n              Display the kernel routing tables.\n       -i, --interfaces\n              Display a table of all network interfaces.\n\nEXAMPLES\n       netstat -tulpn\n              Listening TCP and UDP sockets with their programs.\n       netstat -rn\n              The routing table without name lookups.',
+    run: netstatRun,
+  });
+
+
+  /* ------------------------------------------------ ifconfig, route and arp */
+  const NET_TOOLS_USAGE_IF = 'Usage:\n  ifconfig [-a] [-v] [-s] <interface> [[<AF>] <address>]\n  [add <address>[/<prefixlen>]]\n  [del <address>[/<prefixlen>]]\n  [[-]broadcast [<address>]]  [[-]pointopoint [<address>]]\n  [netmask <address>]  [dstaddr <address>]  [tunnel <address>]\n  [outfill <NN>] [keepalive <NN>]\n  [hw <HW> <address>]  [mtu <NN>]\n  [[-]trailers]  [[-]arp]  [[-]allmulti]\n  [multicast]  [[-]promisc]\n  [mem_start <NN>]  [io_addr <NN>]  [irq <NN>]  [media <type>]\n  [txqueuelen <NN>]\n  [[-]dynamic]\n  [up|down] ...\n\n  <HW>=Hardware Type.\n  List of possible hardware types:\n    loop (Local Loopback) slip (Serial Line IP) cslip (VJ Serial Line IP) \n    slip6 (6-bit Serial Line IP) cslip6 (VJ 6-bit Serial Line IP) adaptive (Adaptive Serial Line IP) \n    ash (Ash) ether (Ethernet) ax25 (AMPR AX.25) \n    netrom (AMPR NET/ROM) rose (AMPR ROSE) tunnel (IPIP Tunnel) \n    ppp (Point-to-Point Protocol) hdlc ((Cisco)-HDLC) lapb (LAPB) \n    arcnet (ARCnet) dlci (Frame Relay DLCI) frad (Frame Relay Access Device) \n    sit (IPv6-in-IPv4) fddi (Fiber Distributed Data Interface) hippi (HIPPI) \n    irda (IrLAP) ec (Econet) x25 (generic X.25) \n    eui64 (Generic EUI-64) \n  <AF>=Address family. Default: inet\n  List of possible address families:\n    unix (UNIX Domain) inet (DARPA Internet) inet6 (IPv6) \n    ax25 (AMPR AX.25) netrom (AMPR NET/ROM) rose (AMPR ROSE) \n    ipx (Novell IPX) ddp (Appletalk DDP) ec (Econet) \n    ash (Ash) x25 (CCITT X.25) \n';
+
+  const IFF = { UP: 1, BROADCAST: 2, LOOPBACK: 8, RUNNING: 0x40, NOARP: 0x80, PROMISC: 0x100, MULTICAST: 0x1000 };
+  function ifFlagNames(i) {
+    const f = [];
+    if (isUp(i)) f.push('UP');
+    f.push(i.kind === 'loopback' ? 'LOOPBACK' : 'BROADCAST');
+    if (isUp(i)) f.push('RUNNING');
+    if (i.promisc) f.push('PROMISC');
+    if (i.kind !== 'loopback') f.push(i.kind === 'dummy' ? 'NOARP' : 'MULTICAST');
+    return f;
+  }
+  const byteSize = (n) => {
+    if (n < 1024) return n + ' bytes';
+    const u = ['KiB', 'MiB', 'GiB', 'TiB']; let v = n; let k = -1;
+    do { v /= 1024; k++; } while (v >= 1024 && k < 3);
+    return (v.toFixed(1)) + ' ' + u[k];
+  };
+  const humanBytes = (n) => (n < 1024 ? n + ' (' + n.toFixed(1) + ' B)' : n + ' (' + byteSize(n) + ')');
+
+  function ifconfigBlock(m, i) {
+    const names = ifFlagNames(i);
+    const num = names.reduce((a, n) => a + IFF[n], 0);
+    const lines = [i.name + ': flags=' + num + '<' + names.join(',') + '>  mtu ' + (i.mtu || 1500)];
+    if (i.ip) {
+      const c = U.parseCidr(i.ip + '/' + i.bits);
+      lines.push('        inet ' + i.ip + '  netmask ' + U.maskFromBits(i.bits) + (i.kind !== 'loopback' && i.bits < 31 ? '  broadcast ' + U.intToIp(c.broadcast) : ''));
+    }
+    if (i.kind === 'loopback') lines.push('        inet6 ::1  prefixlen 128  scopeid 0x10<host>');
+    else if (isUp(i)) lines.push('        inet6 ' + linkLocal6(i.mac).slice(0, -3) + '  prefixlen 64  scopeid 0x20<link>');
+    lines.push(i.kind === 'loopback' ? '        loop  txqueuelen 1000  (Local Loopback)' : '        ether ' + i.mac + '  txqueuelen 1000  (Ethernet)');
+    const s = nlStats(m, i);
+    lines.push('        RX packets ' + s.rxp + '  bytes ' + humanBytes(s.rx), '        RX errors 0  dropped 0  overruns 0  frame 0',
+      '        TX packets ' + s.txp + '  bytes ' + humanBytes(s.tx), '        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0', '');
+    return lines.join('\n');
+  }
+  /** Netmask argument as a prefix length, or null. */
+  function maskBits(mask) {
+    if (!U.isIPv4(mask)) return null;
+    const n = U.ipToInt(mask); let bits = 0;
+    while (bits < 32 && (n & (0x80000000 >>> bits))) bits++;
+    return U.maskFromBits(bits) === mask ? bits : null;
+  }
+  const classfulBits = (ip) => { const a = +ip.split('.')[0]; return a < 128 ? 8 : a < 192 ? 16 : 24; };
+
+  function ifconfigSet(ctx, i, args) {
+    const m = ctx.machine; let ip = null; let bits = null;
+    const deny = (what) => { ctx.eprintln(what + ': Operation not permitted'); return 255; };
+    for (let n = 0; n < args.length; n++) {
+      const a = args[n];
+      if (a === 'up' || a === 'down' || a === '-promisc' || a === 'promisc') {
+        if (!ctx.isRoot) return deny('SIOCSIFFLAGS');
+        if (a === 'up') setLinkState(m, i, true); else if (a === 'down') setLinkState(m, i, false); else i.promisc = a === 'promisc';
+      } else if (a === 'netmask') {
+        bits = maskBits(args[++n]);
+        if (bits == null) { ctx.eprintln('ifconfig: bad netmask'); return 255; }
+      } else if (a === 'mtu') {
+        if (!ctx.isRoot) return deny('SIOCSIFMTU');
+        i.mtu = parseInt(args[++n], 10) || i.mtu;
+      } else if (a === 'hw') {
+        const mac = args[n + 2]; n += 2;
+        if (!ctx.isRoot) return deny('SIOCSIFHWADDR');
+        if (!MAC_RE.test(mac || '')) { ctx.eprintln('ifconfig: bad hardware address'); return 255; }
+        i.mac = mac.toLowerCase();
+      } else if (['broadcast', 'pointopoint', 'dstaddr', 'txqueuelen', 'metric'].includes(a)) n++;
+      else if (a === 'add' || a === 'del') n++;
+      else if (U.isIPv4(a.split('/')[0])) { ip = a; } else { ctx.eprintln('ifconfig: `--help\' gives usage information.'); return 255; }
+    }
+    if (ip) {
+      if (!ctx.isRoot) return deny('SIOCSIFADDR');
+      const [addr, len] = ip.split('/');
+      const b = len != null ? parseInt(len, 10) : bits != null ? bits : classfulBits(addr);
+      const old = addrList(i)[0];
+      setAddrList(i, [{ ip: addr, bits: b }].concat((i.secondary || []).slice()));
+      if (old) m.routes.splice(0, m.routes.length, ...m.routes.filter((r) => !(r.proto === 'kernel' && r.dev === i.name)));
+      if (isUp(i)) m.routes.push(connectedRoute(i, { ip: addr, bits: b }));
+      pruneRoutes(m); sortRoutes(m);
+    } else if (bits != null) {
+      if (!ctx.isRoot) return deny('SIOCSIFNETMASK');
+      const old = addrList(i)[0];
+      if (old) { setAddrList(i, [{ ip: old.ip, bits }].concat(i.secondary || [])); m.routes.splice(0, m.routes.length, ...m.routes.filter((r) => !(r.proto === 'kernel' && r.dev === i.name))); if (isUp(i)) m.routes.push(connectedRoute(i, { ip: old.ip, bits })); pruneRoutes(m); sortRoutes(m); }
+    }
+    return 0;
+  }
+
+  async function ifconfigRun(ctx) {
+    const m = ctx.machine;
+    const args = ctx.args.slice();
+    const flags = { a: false, s: false, v: false };
+    while (args.length && /^-[asv]+$/.test(args[0])) for (const ch of args.shift().slice(1)) flags[ch] = true;
+    if (args[0] === '--version' || args[0] === '-V') { ctx.println(NET_TOOLS_VERSION); return 0; }
+    if (args[0] === '--help' || args[0] === '-h') { ctx.err(NET_TOOLS_USAGE_IF); return 0; }
+    if (args[0] && args[0][0] === '-' && !/^-(promisc)$/.test(args[0])) { ctx.eprintln('ifconfig: option `' + args[0] + "' not recognised."); ctx.eprintln("ifconfig: `--help' gives usage information."); return 1; }
+    const name = args[0] && !['up', 'down'].includes(args[0]) ? args.shift() : null;
+    if (name == null) {
+      const list = netToolsOrder(m).filter((i) => flags.a || isUp(i));
+      if (flags.s) ctx.println([IFACE_STATS_HEAD].concat(list.map((i) => ifaceStatsRow(m, i))).join('\n'));
+      else if (list.length) ctx.println(list.map((i) => ifconfigBlock(m, i)).join('\n'));
+      return 0;
+    }
+    const i = ifaceByName(m, name.replace(/:\d+$/, ''));
+    if (!i) { ctx.eprintln(name + ': error fetching interface information: Device not found'); return 1; }
+    if (args.length) return ifconfigSet(ctx, i, args);
+    ctx.println(flags.s ? [IFACE_STATS_HEAD, ifaceStatsRow(m, i)].join('\n') : ifconfigBlock(m, i));
+    return 0;
+  }
+  K.cmd.register({
+    name: 'ifconfig', path: '/usr/sbin/ifconfig', pkg: 'net-tools', section: 8, only: 'kali',
+    summary: 'configure a network interface',
+    synopsis: 'ifconfig [-v] [-a] [-s] [interface]\n       ifconfig [-v] interface [aftype] options | address ...',
+    man: 'DESCRIPTION\n       Ifconfig is used to configure the kernel-resident network interfaces. It is used at boot time to set up interfaces as necessary. After that, it is usually only needed when debugging or when system tuning is needed.\n\n       If no arguments are given, ifconfig displays the status of the currently active interfaces. If a single interface argument is given, it displays the status of the given interface only; if a single -a argument is given, it displays the status of all interfaces, even those that are down.\n\nOPTIONS\n       -a     display all interfaces which are currently available, even if down\n       -s     display a short list (like netstat -i)\n       up     This flag causes the interface to be activated. It is implicitly specified if an address is assigned to the interface.\n       down   This flag causes the driver for this interface to be shut down.\n       netmask addr\n              Set the IP network mask for this interface.\n       mtu N  Set the Maximum Transfer Unit of an interface.\n       [-]promisc\n              Enable or disable the promiscuous mode of the interface.\n       hw class address\n              Set the hardware address of this interface.\n\n       Changing an interface needs root.\n\nEXAMPLES\n       ifconfig eth0\n              Show only eth0.\n       sudo ifconfig eth0 down\n              Shut the interface down.',
+    run: ifconfigRun,
+    complete: (info) => (info.index === 1 || info.index === 2 ? ifaceNames(K.kali || info.ctx.machine).concat(info.index === 1 ? ['-a', '-s'] : ['up', 'down', 'netmask', 'mtu', 'promisc']) : ['up', 'down', 'netmask', 'mtu', 'promisc']),
+  });
+
+  /* ------------------------------------------------------------------ route */
+  const ROUTE_USAGE = 'Usage: route [-nNvee] [-FC] [<AF>]           List kernel routing tables\n       route [-v] [-FC] {add|del|flush} ...  Modify routing table for AF.\n\n       route {-h|--help} [<AF>]              Detailed usage syntax for specified AF.\n       route {-V|--version}                  Display version/author and exit.\n\n        -v, --verbose            be verbose\n        -n, --numeric            don\'t resolve names\n        -e, --extend             display other/more information\n        -F, --fib                display Forwarding Information Base (default)\n        -C, --cache              display routing cache instead of FIB\n\n  <AF>=Use -4, -6, \'-A <af>\' or \'--<af>\'; default: inet\n  List of possible address families (which support routing):\n    inet (DARPA Internet) inet6 (IPv6) ax25 (AMPR AX.25) \n    netrom (AMPR NET/ROM) ipx (Novell IPX) ddp (Appletalk DDP) \n    x25 (CCITT X.25) \n';
+  const ROUTE_ERR = { perm: 'Operation not permitted', nodev: 'No such device', badgw: 'Network is unreachable', exists: 'File exists', nosuch: 'No such process' };
+
+  function routeTable(ctx, numeric) {
+    const lines = ['Kernel IP routing table', 'Destination     Gateway         Genmask         Flags Metric Ref    Use Iface'];
+    for (const r of netstatRoutes(ctx, numeric)) lines.push(pad(r.dst, 15) + ' ' + pad(r.via, 15) + ' ' + pad(r.mask, 15) + ' ' + pad(r.flags, 5) + ' ' + pad(String(r.metric), 6) + ' ' + pad('0', 6) + ' ' + padL(0, 3) + ' ' + r.dev);
+    return lines.join('\n');
+  }
+  /** Parse net-tools "add|del [-net|-host] TARGET [netmask M] [gw G] [metric N] [dev D]". */
+  function routeFromArgs(ctx, args) {
+    const r = {}; let target = null; let mask = null; let host = false;
+    for (let n = 0; n < args.length; n++) {
+      const a = args[n];
+      if (a === '-net') continue;
+      if (a === '-host') host = true;
+      else if (a === 'netmask') mask = args[++n];
+      else if (a === 'gw') r.via = args[++n];
+      else if (a === 'metric') r.metric = parseInt(args[++n], 10) || 0;
+      else if (a === 'dev') r.dev = args[++n];
+      else if (a === 'mss' || a === 'window' || a === 'irtt') n++;
+      else if (a === 'default') target = 'default';
+      else if (target == null) target = a;
+      else { ctx.eprintln(ROUTE_USAGE); return null; }
+    }
+    if (target == null) { ctx.err(ROUTE_USAGE); return null; }
+    if (target === 'default' || target === '0.0.0.0' && (mask === '0.0.0.0' || mask == null) && !host) r.dst = 'default';
+    else {
+      const [addr, len] = target.split('/');
+      if (!U.isIPv4(addr)) { ctx.eprintln(target + ': Unknown host'); return null; }
+      const bits = host ? 32 : len != null ? parseInt(len, 10) : mask != null ? maskBits(mask) : 32;
+      if (bits == null) { ctx.eprintln('route: bogus netmask ' + mask); return null; }
+      const c = U.parseCidr(addr + '/' + bits);
+      if (((c.ip & c.mask) >>> 0) !== c.ip) { ctx.eprintln('route: netmask ' + U.maskFromBits(bits) + " doesn't match route address"); return null; }
+      r.dst = addr + '/' + bits;
+    }
+    if (r.via && !U.isIPv4(r.via)) { ctx.eprintln(r.via + ': Unknown host'); return null; }
+    if (r.dev && !ifaceByName(ctx.machine, r.dev)) { ctx.eprintln('SIOCADDRT: No such device'); return null; }
+    return r;
+  }
+  async function routeRun(ctx) {
+    const args = ctx.args.slice(); let numeric = false;
+    while (args.length && /^-[nNveFC]+$/.test(args[0])) { if (args.shift().includes('n')) numeric = true; }
+    if (args[0] === '-V' || args[0] === '--version') { ctx.println(NET_TOOLS_VERSION); return 0; }
+    if (args[0] === '-h' || args[0] === '--help') { ctx.out(ROUTE_USAGE); return 0; }
+    if (args[0] && args[0][0] === '-' && !['-net', '-host'].includes(args[0])) { ctx.eprintln("route: invalid option -- '" + args[0].replace(/^-+/, '')[0] + "'"); ctx.err(ROUTE_USAGE); return 1; }
+    if (!args.length) { ctx.println(routeTable(ctx, numeric)); return 0; }
+    const cmd = args.shift();
+    if (cmd !== 'add' && cmd !== 'del' && cmd !== 'delete') { ctx.eprintln('route: ' + (cmd === 'flush' ? 'flush: not supported' : "unknown command '" + cmd + "'")); return 1; }
+    const r = routeFromArgs(ctx, args);
+    if (!r) return 1;
+    const err = applyRoute(ctx, cmd === 'add' ? 'add' : 'delete', r);
+    if (!err) return 0;
+    ctx.eprintln((cmd === 'add' ? 'SIOCADDRT: ' : 'SIOCDELRT: ') + ROUTE_ERR[err]);
+    return 7;
+  }
+  K.cmd.register({
+    name: 'route', path: '/usr/sbin/route', pkg: 'net-tools', section: 8, only: 'kali',
+    summary: 'show / manipulate the IP routing table',
+    synopsis: 'route [-CFvnee]\n       route [-v] [-A family] add [-net|-host] target [netmask Nm] [gw Gw] [metric N] [dev If]\n       route [-v] [-A family] del [-net|-host] target [gw Gw] [netmask Nm] [metric N] [dev If]',
+    man: 'DESCRIPTION\n       Route manipulates the kernel\'s IP routing tables. Its primary use is to set up static routes to specific hosts or networks via an interface after it has been configured with the ifconfig program.\n\n       When the add or del options are used, route modifies the routing tables. Without these options, route displays the current contents of the routing tables. Changing the table needs root.\n\nOPTIONS\n       -n     show numerical addresses instead of trying to determine symbolic host names.\n       -net   the target is a network.\n       -host  the target is a host.\n       netmask NM\n              when adding a network route, the netmask to be used.\n       gw GW  route packets via a gateway.\n       metric M\n              set the metric field in the routing table.\n       dev If force the route to be associated with the specified device.\n\nEXAMPLES\n       route -n\n              Show the routing table without name lookups.\n       sudo route add -net 172.30.0.0 netmask 255.255.0.0 gw 10.10.10.1\n              Reach another network through the lab gateway.\n       sudo route del default\n              Remove the default route.',
+    run: routeRun,
+  });
+
+  /* -------------------------------------------------------------------- arp */
+  const ARP_USAGE = 'Usage:\n  arp [-vn]  [<HW>] [-i <if>] [-a] [<hostname>]             <-Display ARP cache\n  arp [-v]          [-i <if>] -d  <host> [pub]               <-Delete ARP entry\n  arp [-vnD] [<HW>] [-i <if>] -f  [<filename>]            <-Add entry from file\n  arp [-v]   [<HW>] [-i <if>] -s  <host> <hwaddr> [temp]            <-Add entry\n  arp [-v]   [<HW>] [-i <if>] -Ds <host> <if> [netmask <nm>] pub          <-\'\'-\n\n        -a                       display (all) hosts in alternative (BSD) style\n        -e                       display (all) hosts in default (Linux) style\n        -s, --set                set a new ARP entry\n        -d, --delete             delete a specified entry\n        -v, --verbose            be verbose\n        -n, --numeric            don\'t resolve names\n        -i, --device             specify network interface (e.g. eth0)\n        -D, --use-device         read <hwaddr> from given device\n        -A, -p, --protocol       specify protocol family\n        -f, --file               read new entries from file or from /etc/ethers\n\n  <HW>=Use \'-H <hw>\' to specify hardware address type. Default: ether\n  List of possible hardware types (which support ARP):\n    ash (Ash) ether (Ethernet) ax25 (AMPR AX.25) \n    netrom (AMPR NET/ROM) rose (AMPR ROSE) arcnet (ARCnet) \n    dlci (Frame Relay DLCI) fddi (Fiber Distributed Data Interface) hippi (HIPPI) \n    irda (IrLAP) x25 (generic X.25) eui64 (Generic EUI-64) \n';
+  async function arpRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'vneaDsdfi:H:A:p:hV', long: ['verbose', 'numeric', 'set', 'delete', 'file', 'device=', 'use-device', 'protocol=', 'help', 'version', 'all', 'display'], alias: { verbose: 'v', numeric: 'n', set: 's', delete: 'd', file: 'f', device: 'i', help: 'h', version: 'V' } });
+    if (g.err) { ctx.eprintln('arp: ' + g.err); ctx.err(ARP_USAGE); return 1; }
+    const o = g.opts; const m = ctx.machine;
+    if (o.V) { ctx.println(NET_TOOLS_VERSION); return 0; }
+    if (o.h) { ctx.err(ARP_USAGE); return 0; }
+    m.arp = m.arp || new Map();
+    if (o.i && !ifaceByName(m, o.i)) { ctx.eprintln('arp: in_arp: device \'' + o.i + "' not found"); return 1; }
+    if (o.d || o.s) {
+      const ip = g.rest[0];
+      if (!ip) { ctx.eprintln('arp: need host name'); return 1; }
+      const dest = lookup(ctx, ip);
+      if (dest.err) { ctx.eprintln('arp: ' + ip + ': Unknown host'); return 1; }
+      if (!ctx.isRoot) { ctx.eprintln(o.d ? 'SIOCDARP(dontpub): Operation not permitted' : 'SIOCSARP: Operation not permitted'); return 255; }
+      if (o.d) { if (!m.arp.delete(dest.ip)) { ctx.eprintln('No ARP entry for ' + ip); return 255; } return 0; }
+      const mac = g.rest[1];
+      if (!mac) { ctx.eprintln('arp: need hardware address'); return 1; }
+      if (!MAC_RE.test(mac)) { ctx.eprintln('arp: invalid hardware address'); return 1; }
+      const rt = routeLookup(m, dest.ip);
+      m.arp.set(dest.ip, { ip: dest.ip, mac: mac.toLowerCase(), dev: o.i || (rt && rt.dev) || (m.primaryIface() || {}).name, ts: K.clock.now(), state: 'REACHABLE', permanent: true });
+      return 0;
+    }
+    let entries = Array.from(m.arp.values()).filter((e) => !o.i || e.dev === o.i);
+    if (g.rest.length) {
+      const dest = lookup(ctx, g.rest[0]);
+      entries = dest.err ? [] : entries.filter((e) => e.ip === dest.ip);
+      if (!entries.length) { ctx.println((dest.err ? g.rest[0] : g.rest[0]) + ' (' + (dest.ip || g.rest[0]) + ') -- no entry'); return o.a ? 0 : 1; }
+    }
+    if (!entries.length) return 0;
+    if (o.a) {
+      ctx.println(entries.map((e) => {
+        const name = o.n ? null : rdns(ctx, e.ip);
+        const incomplete = e.state === 'FAILED';
+        return (name || '?') + ' (' + e.ip + ') at ' + (incomplete ? '<incomplete>' : e.mac + ' [ether]' + (e.permanent ? ' PERM' : '')) + ' on ' + e.dev;
+      }).join('\n'));
+      return 0;
+    }
+    ctx.println(['Address                  HWtype  HWaddress           Flags Mask            Iface'].concat(entries.map((e) => {
+      const incomplete = e.state === 'FAILED';
+      const name = o.n ? e.ip : rdns(ctx, e.ip) || e.ip;
+      return pad(name, 24) + ' ' + pad(incomplete ? '' : 'ether', 7) + ' ' + pad(incomplete ? '(incomplete)' : e.mac, 19) + ' ' + pad(incomplete ? '' : e.permanent ? 'CM' : 'C', 5) + ' ' + pad('', 15) + ' ' + e.dev;
+    })).join('\n'));
+    return 0;
+  }
+  K.cmd.register({
+    name: 'arp', path: '/usr/sbin/arp', pkg: 'net-tools', section: 8, only: 'kali',
+    summary: 'manipulate the system ARP cache',
+    synopsis: 'arp [-vn] [-H type] [-i if] [-a] [hostname]\n       arp [-v] [-i if] -d hostname [pub]\n       arp [-v] [-H type] [-i if] -s hostname hw_addr [temp]',
+    man: 'DESCRIPTION\n       Arp manipulates or displays the kernel\'s IPv4 network neighbour cache. It can add entries to the table, delete one or display the current content.\n\nOPTIONS\n       -a [hostname]\n              Use alternate BSD style output format (with no fixed columns).\n       -e     Use default Linux style output format (with fixed columns).\n       -n     Show numerical addresses instead of trying to determine symbolic host, port or user names.\n       -i If  Select an interface.\n       -d hostname\n              Remove any entry for the specified host (root).\n       -s hostname hw_addr\n              Manually create an ARP address mapping entry for host hostname with hardware address set to hw_addr (root).\n\nEXAMPLES\n       arp -a\n              BSD style listing of all neighbours.\n       arp -n\n              Numeric table of the cache.',
+    run: arpRun,
   });
 
 

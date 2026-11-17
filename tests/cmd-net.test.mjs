@@ -369,3 +369,141 @@ test('traceroute works in a pipeline', async () => {
   const sim = await net();
   assert.equal(await sim.out('traceroute -n -q 1 10.10.10.10 | grep -c "10.10.10.10"'), '2\n');
 });
+
+/* ------------------------------------------------- ss, netstat, ifconfig, route, arp */
+
+async function withSsh() {
+  const sim = await net();
+  await sim.run('sudo systemctl start ssh');
+  return sim;
+}
+
+test('ss: listening sockets with the iproute2 column layout', async () => {
+  const sim = await withSsh();
+  const lines = (await sim.out('ss -tln')).split('\n');
+  assert.equal(lines[0], 'State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess');
+  assert.equal(lines[1], 'LISTEN 0      128          0.0.0.0:22         0.0.0.0:*          ');
+  assert.equal(lines[2], 'LISTEN 0      128             [::]:22            [::]:*          ');
+  assert.equal(await sim.out('ss -tlnH -4'), 'LISTEN 0      128    0.0.0.0:22 0.0.0.0:*\n');
+});
+
+test('ss: -u adds the Netid column; service names without -n; -p only for root', async () => {
+  const sim = await withSsh();
+  const udp = (await sim.out('ss -ul')).split('\n');
+  assert.match(udp[0], /^State  Recv-Q Send-Q +Local Address:Port +Peer Address:PortProcess$/);
+  assert.match(udp[1], /^UNCONN 0      0      +10\.10\.10\.5%eth0:bootpc +0\.0\.0\.0:\* +$/);
+  const both = (await sim.out('ss -tuln')).split('\n');
+  assert.match(both[0], /^Netid State  Recv-Q Send-Q/);
+  assert.match(await sim.out('ss -tl'), /0\.0\.0\.0:ssh/);
+  assert.doesNotMatch(await sim.out('ss -tlnp'), /users:/);
+  const root = await sim.out('sudo ss -tlnp');
+  assert.match(root, /users:\(\("sshd",pid=\d+,fd=3\)\)/);
+  assert.match(root, /users:\(\("sshd",pid=\d+,fd=4\)\)/);
+});
+
+test('ss: nothing established, option errors and version', async () => {
+  const sim = await net();
+  assert.equal(await sim.out('ss -t'), 'State Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess\n');
+  assert.equal(await sim.out('ss -tlnH'), '');
+  const r = await sim.run('ss -z');
+  assert.match(r.err, /^ss: invalid option -- 'z'\nUsage: ss \[ OPTIONS \]/);
+  assert.equal(r.code, 1);
+  assert.match((await sim.run('ss -V')).out, /^ss utility, iproute2-/);
+  sim.machine.listeners.push({ port: 4444, proto: 'tcp', addr: '0.0.0.0', prog: 'nc', pid: 4242, name: 'nc' });
+  assert.match(await sim.out('ss -tln'), /LISTEN 0 +128 +0\.0\.0\.0:4444/);
+});
+
+test('netstat: -tulpn, -rn, -i and the non-root warning', async () => {
+  const sim = await withSsh();
+  const r = await sim.run('netstat -tulpn');
+  assert.match(r.err, /^\(Not all processes could be identified, non-owned process info\n will not be shown/);
+  const lines = r.out.split('\n');
+  assert.equal(lines[0], 'Active Internet connections (only servers)');
+  assert.equal(lines[1], 'Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name    ');
+  assert.match(lines.find((l) => l.startsWith('tcp ')), /^tcp        0    128 0\.0\.0\.0:22              0\.0\.0\.0:\*               LISTEN      -  +$/);
+  const root = await sim.out('sudo netstat -tulpn');
+  assert.match(root, /\ntcp6       0    128 :::22                   :::\*                    LISTEN      \d+\/sshd +\n/);
+  assert.match(root, /\nudp        0      0 10\.10\.10\.5:68           0\.0\.0\.0:\*                           \d+\/NetworkManager +\n/);
+  assert.equal(await sim.out('netstat -rn'), 'Kernel IP routing table\nDestination     Gateway         Genmask         Flags   MSS Window  irtt Iface\n0.0.0.0         10.10.10.1      0.0.0.0         UG        0 0          0 eth0\n10.10.10.0      0.0.0.0         255.255.255.0   U         0 0          0 eth0\n');
+  const i = (await sim.out('netstat -i')).split('\n');
+  assert.equal(i[0], 'Kernel Interface table');
+  assert.equal(i[1], 'Iface      MTU    RX-OK RX-ERR RX-DRP RX-OVR    TX-OK TX-ERR TX-DRP TX-OVR Flg');
+  assert.match(i[2], /^eth0      1500 +\d+      0      0 0 +\d+      0      0      0 BMRU$/);
+  assert.match(i[3], /^lo       65536 +\d+      0      0 0 +\d+      0      0      0 LRU$/);
+});
+
+test('ifconfig: net-tools layout, -a, an interface, errors', async () => {
+  const sim = await net();
+  const out = await sim.out('ifconfig');
+  const lines = out.split('\n');
+  assert.equal(lines[0], 'eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500');
+  assert.equal(lines[1], '        inet 10.10.10.5  netmask 255.255.255.0  broadcast 10.10.10.255');
+  assert.match(lines[2], /^        inet6 fe80::[0-9a-f:]+  prefixlen 64  scopeid 0x20<link>$/);
+  assert.match(lines[3], /^        ether [0-9a-f:]{17}  txqueuelen 1000  \(Ethernet\)$/);
+  assert.match(lines[4], /^        RX packets \d+  bytes \d+ \(\d+\.\d MiB\)$/);
+  assert.equal(lines[5], '        RX errors 0  dropped 0  overruns 0  frame 0');
+  assert.equal(lines[7], '        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0');
+  assert.equal(lines[8], '');
+  assert.equal(lines[9], 'lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536');
+  assert.equal(lines[12], '        loop  txqueuelen 1000  (Local Loopback)');
+  const r = await sim.run('ifconfig eth9');
+  assert.equal(r.err, 'eth9: error fetching interface information: Device not found\n');
+  assert.equal(r.code, 1);
+  assert.doesNotMatch(await sim.out('ifconfig lo'), /eth0/);
+});
+
+test('ifconfig: up and down as root, refused without', async () => {
+  const sim = await net();
+  sim.machine.sudoStamp = {};
+  const r = await sim.run('ifconfig eth0 down');
+  assert.equal(r.err, 'SIOCSIFFLAGS: Operation not permitted\n');
+  assert.equal(r.code, 255);
+  sim.machine.sudoStamp.kali = sim.K.clock.now();
+  assert.equal((await sim.run('sudo ifconfig eth0 down')).code, 0);
+  assert.doesNotMatch(await sim.out('ifconfig'), /eth0/);
+  assert.match(await sim.out('ifconfig -a'), /^eth0: flags=4098<BROADCAST,MULTICAST>  mtu 1500/);
+  assert.equal(await sim.out('ip route'), '');
+  await sim.run('sudo ifconfig eth0 up');
+  assert.match(await sim.out('ip route'), /^default via 10\.10\.10\.1/);
+  await sim.run('sudo ifconfig eth0 10.10.10.99 netmask 255.255.255.0');
+  assert.match(await sim.out('ip -br a show eth0'), /10\.10\.10\.99\/24/);
+  assert.match(await sim.out('ip route'), /^default via 10\.10\.10\.1 dev eth0 proto dhcp src 10\.10\.10\.99/);
+});
+
+test('route: table, -n, add and delete', async () => {
+  const sim = await net();
+  assert.equal(await sim.out('route -n'), 'Kernel IP routing table\nDestination     Gateway         Genmask         Flags Metric Ref    Use Iface\n0.0.0.0         10.10.10.1      0.0.0.0         UG    100    0        0 eth0\n10.10.10.0      0.0.0.0         255.255.255.0   U     100    0        0 eth0\n');
+  assert.match(await sim.out('route'), /\ndefault         gw\.halcyon\.lab  0\.0\.0\.0         UG    100/);
+  let r = await sim.run('route add -net 172.30.0.0 netmask 255.255.0.0 gw 10.10.10.1');
+  assert.equal(r.err, 'SIOCADDRT: Operation not permitted\n');
+  assert.equal((await sim.run('sudo route add -net 172.30.0.0 netmask 255.255.0.0 gw 10.10.10.1')).code, 0);
+  assert.match(await sim.out('route -n'), /\n172\.30\.0\.0      10\.10\.10\.1      255\.255\.0\.0     UG    0      0        0 eth0\n/);
+  assert.equal((await sim.run('sudo route add -net 172.30.0.0 netmask 255.255.0.0 gw 10.10.10.1')).err, 'SIOCADDRT: File exists\n');
+  assert.equal((await sim.run('sudo route add -net 172.31.0.0 netmask 255.255.0.0 gw 192.168.1.1')).err, 'SIOCADDRT: Network is unreachable\n');
+  assert.equal((await sim.run('sudo route del -net 172.30.0.0 netmask 255.255.0.0')).code, 0);
+  assert.equal((await sim.run('sudo route del -net 172.30.0.0 netmask 255.255.0.0')).err, 'SIOCDELRT: No such process\n');
+  await sim.run('sudo route del default');
+  assert.equal((await sim.run('ping -c 1 8.8.8.8')).err, 'ping: connect: Network is unreachable\n');
+  await sim.run('sudo route add default gw 10.10.10.1');
+  assert.equal((await sim.run('ping -c 1 8.8.8.8')).code, 0);
+});
+
+test('arp: table, -a, -n, set and delete', async () => {
+  const sim = await net();
+  assert.equal(await sim.out('arp'), '');
+  await sim.run('ping -c 1 10.10.10.10');
+  const t = (await sim.out('arp -n')).split('\n');
+  assert.equal(t[0], 'Address                  HWtype  HWaddress           Flags Mask            Iface');
+  assert.match(t[1], /^10\.10\.10\.10 {14}ether   [0-9a-f:]{17}   C {21}eth0$/);
+  assert.match(await sim.out('arp -a'), /^web01\.halcyon\.lab \(10\.10\.10\.10\) at [0-9a-f:]{17} \[ether\] on eth0\n$/);
+  assert.match(await sim.out('arp -an'), /^\? \(10\.10\.10\.10\) at /);
+  assert.equal((await sim.run('arp -d 10.10.10.10')).err, 'SIOCDARP(dontpub): Operation not permitted\n');
+  assert.equal((await sim.run('sudo arp -s 10.10.10.99 02:00:00:00:00:99')).code, 0);
+  assert.match(await sim.out('arp -n'), /10\.10\.10\.99 +ether +02:00:00:00:00:99 +CM +eth0/);
+  assert.equal((await sim.run('sudo arp -d 10.10.10.99')).code, 0);
+  assert.equal((await sim.run('sudo arp -d 10.10.10.99')).err, 'No ARP entry for 10.10.10.99\n');
+  sim.K.net.hostById('web01').up = false;
+  sim.machine.arp.clear();
+  await sim.run('ping -c 1 10.10.10.10');
+  assert.match(await sim.out('arp -an'), /^\? \(10\.10\.10\.10\) at <incomplete> on eth0\n$/);
+});
