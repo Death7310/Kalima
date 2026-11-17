@@ -34,16 +34,19 @@
       {
         id: 'file',
         prompt: T(
-          'Before you open a file you did not create, find out what it is. `file` examines the content, not the name, and reports the type:',
+          'Move to the practice data first, so that the paths you type stay short. Then, before opening a file you did not create, find out what it is:',
           '',
           '```',
-          'file ' + ACCESS + ' /usr/bin/ls',
+          'cd ' + DATA,
+          'file logs/access.log /usr/bin/ls',
           '```',
           '',
-          'You gave two arguments, so there are two answers. The log is `ASCII text`: plain text that is safe to print. `/usr/bin/ls` is an `ELF` executable, a compiled program. Printing a file like that produces a screenful of garbage, and `file` is how you find out beforehand.'
+          '`file` examines the content, not the name, and reports the type. You gave it two arguments, so there are two answers. The log is `ASCII text`: plain text that is safe to print. `/usr/bin/ls` is an `ELF` executable, a compiled program. Printing a file like that produces a screenful of garbage, and `file` is how you find out beforehand.',
+          '',
+          'The rest of this lesson uses paths relative to `' + DATA + '`. If a command answers `No such file or directory`, look at the prompt and run the `cd` again.'
         ),
-        hint: 'Type `file` followed by the two paths, with a space between them.',
-        solution: 'file ' + ACCESS + ' /usr/bin/ls',
+        hint: 'Run the two lines one after the other. The step completes on the second. The solution joins them with `&&`, which runs the second command only if the first one succeeded.',
+        solution: 'cd ' + DATA + ' && file logs/access.log /usr/bin/ls',
         check: { cmd: 'file', out: /access\.log:\s+ASCII text/ },
       },
       {
@@ -52,19 +55,19 @@
           'Next, find out how long it is. `wc` (*word count*) counts the lines, words and bytes in a file. With the option `-l` it prints only the number of lines:',
           '',
           '```',
-          'wc -l ' + ACCESS,
+          'wc -l logs/access.log',
           '```',
           '',
           'The answer is 476 lines. A terminal window shows a few dozen lines at a time, so printing this file whole would send most of it scrolling past. The line count tells you which viewer to reach for.'
         ),
-        hint: 'The option is a lowercase letter L. Use the Up arrow to bring back the path from the previous command.',
-        solution: 'wc -l ' + ACCESS,
+        hint: 'The option is a lowercase letter L. The path is the same one you gave to `file`.',
+        solution: 'wc -l logs/access.log',
         check: { cmd: 'wc', out: /\b476\b/ },
       },
       {
         id: 'count',
-        prompt: 'The same directory holds a second log, `auth.log`. Count its lines in the same way. How many does it have?',
-        hint: 'Press Up to bring back the `wc -l` command and change the file name at the end to `auth.log`.',
+        prompt: 'The `logs` directory holds a second log, `logs/auth.log`. Count its lines in the same way. How many does it have?',
+        hint: 'Press the Up arrow to bring back the `wc -l` command, and change the file name at the end to `auth.log`.',
         solution: '450',
         answer: /^450(\s*lines?)?\.?$/i,
       },
@@ -74,13 +77,13 @@
           '`cat` prints a whole file to the terminal without stopping, which suits short files. The depot shift log is 35 lines long:',
           '',
           '```',
-          'cat ' + DATA + '/text/shift-log.txt',
+          'cat text/shift-log.txt',
           '```',
           '',
           'All of it is now on screen, and you can scroll the terminal back to read the top. The name comes from *concatenate*: given several files, `cat` prints them one after another. With `-n` it numbers the lines.'
         ),
         hint: 'Type `cat`, a space and the path of the file.',
-        solution: 'cat ' + DATA + '/text/shift-log.txt',
+        solution: 'cat text/shift-log.txt',
         check: { cmd: 'cat', all: [{ out: /Gate opened/ }, { out: /Gate closed/ }] },
       },
       {
@@ -89,13 +92,13 @@
           'For a long file, look at the beginning first. `head` prints the first 10 lines, or as many as you ask for with `-n`:',
           '',
           '```',
-          'head -n 3 ' + ACCESS,
+          'head -n 3 logs/access.log',
           '```',
           '',
           'Three lines are enough to learn the layout. Each line is one request to a web server: the address of the client, the time, the request in quotes, the status code and the size of the reply. The last quoted field is the name the client\'s software gave for itself.'
         ),
         hint: 'After `-n` comes a space and the number of lines you want.',
-        solution: 'head -n 3 ' + ACCESS,
+        solution: 'head -n 3 logs/access.log',
         check: { cmd: 'head', out: /00:30:02/, not: { out: /00:45:02/ } },
       },
       {
@@ -103,10 +106,10 @@
         prompt: T(
           '`tail` is the mirror image of `head`. It prints the end of a file, which is where a log keeps its newest entries, and it takes `-n` in the same way.',
           '',
-          'Show the last 5 lines of `' + AUTH + '`.'
+          'Show the last 5 lines of `logs/auth.log`.'
         ),
         hint: 'The command has the same shape as the `head` command you just ran: the name, `-n`, a number, then the path.',
-        solution: 'tail -n 5 ' + AUTH,
+        solution: 'tail -n 5 logs/auth.log',
         check: { cmd: 'tail', out: /21:17:01[^\n]*session closed/, not: { out: /21:17:01[^\n]*session opened/ } },
       },
       {
@@ -122,7 +125,7 @@
           'To read a long file properly, open it in a **pager**. `less` shows one screen at a time and never changes the file:',
           '',
           '```',
-          'less ' + ACCESS,
+          'less logs/access.log',
           '```',
           '',
           'Inside `less` you press keys instead of typing commands:',
@@ -134,8 +137,8 @@
           '',
           'Try each of them. Then press `g`, type `/admin` and press Enter. `less` jumps to the first line that contains `admin`. Note the client address at the start of that line before you press `q`: the next step asks for it.'
         ),
-        hint: 'Start `less` with the path of the access log. This step completes when you leave `less` with `q`.',
-        solution: 'less ' + ACCESS,
+        hint: 'Start `less` with the path of the access log, `logs/access.log`. This step completes when you leave `less` with `q`.',
+        solution: 'less logs/access.log',
         check: { cmd: 'less', line: /access\.log/, not: { out: /No such file|is a directory/ } },
       },
       {
@@ -148,12 +151,12 @@
       {
         id: 'header',
         prompt: T(
-          'Choosing a viewer comes down to asking what you need to see. The file `' + DATA + '/data/shipments.csv` is a table, and its first line names the columns.',
+          'Choosing a viewer comes down to asking what you need to see. The file `data/shipments.csv` is a table, and its first line names the columns.',
           '',
           'Print only that first line.'
         ),
         hint: 'Which command shows the beginning of a file, and which option sets how many lines it prints?',
-        solution: 'head -n 1 ' + DATA + '/data/shipments.csv',
+        solution: 'head -n 1 data/shipments.csv',
         check: { line: /shipments\.csv/, out: /id,date,origin,destination/, not: { out: /HF-2026-/ } },
       },
     ],
