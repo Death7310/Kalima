@@ -24100,6 +24100,19 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
   // arp-scan names vendors from the IEEE registry, which spells some of them differently from Nmap.
   const IEEE_NAMES = { VMware: 'VMware, Inc.', Microsoft: 'Microsoft Corporation', 'Axis Communications': 'Axis Communications AB', 'Oracle VirtualBox virtual NIC': 'PCS Systemtechnik GmbH' };
   const ARPSCAN_PACKET_MS = 2.56; // gap between two requests at the default bandwidth
+  const ARPSCAN_BACKOFF = 1.5;    // each further attempt waits this much longer for its answer
+
+  /** Time arp-scan spends on hosts that stay silent: every retry pass, then the last timeout. */
+  function arpScanSilence(silent, firstPass, retry, timeout) {
+    let ms = 0; let pass = firstPass;
+    for (let attempt = 1; attempt < retry; attempt++) {
+      ms += Math.max(0, timeout - pass);
+      pass = silent * ARPSCAN_PACKET_MS;
+      ms += pass;
+      timeout *= ARPSCAN_BACKOFF;
+    }
+    return ms + timeout;
+  }
 
   const etherIface = (machine, name) => (name ? machine.ifaces.find((i) => i.name === name) : machine.primaryIface());
   /** The lab host that answers ARP for this address on the interface's segment, if any. */
@@ -24141,7 +24154,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     for (const word of g.opts.l ? [iface.ip + '/' + iface.bits] : g.rest) {
       const spec = arpScanTarget(ctx.machine, word);
       if (spec) specs.push(spec);
-      else ctx.err('WARNING: get_host_address failed for "' + word + '" - target ignored\n');
+      else ctx.err('WARNING: get_host_address failed for "' + word + '": Name or service not known - target ignored\n');
     }
     if (!specs.length) { ctx.err('ERROR: No hosts to process.\n'); return 1; }
     const say = (line) => { if (!g.opts.x) ctx.out(line + '\n'); };
@@ -24149,6 +24162,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     say('Starting arp-scan ' + ARPSCAN_VERSION + ' with ' + specs.reduce((n, sp) => n + sp.count, 0) + ' hosts (' + ARPSCAN_URL + ')');
     let hosts = 0; let responded = 0; let elapsed = 0; let batch = 0;
     const wait = (ms) => { elapsed += ms; return ctx.sleep(ms); };
+    const sendBatch = () => { const ms = batch * ARPSCAN_PACKET_MS; batch = 0; return wait(ms); };
     for (const spec of specs) {
       for (const ip of guardedAddresses(ctx, spec, 'arp-scan')) {
         hosts++;
@@ -24157,12 +24171,12 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
           responded++;
           ctx.out(ip + '\t' + host.mac + (g.opts.q ? '' : '\t' + (IEEE_NAMES[host.macVendor] || host.macVendor || '(Unknown)')) + '\n');
         }
-        if (++batch === 64) { await wait(batch * ARPSCAN_PACKET_MS); batch = 0; }
+        if (++batch === 64) await sendBatch();
       }
     }
-    // Hosts that stay silent are asked again before arp-scan gives up on them.
+    await sendBatch();
     const silent = hosts - responded;
-    await wait(batch * ARPSCAN_PACKET_MS + (silent ? (retry - 1) * silent * ARPSCAN_PACKET_MS + retry * timeout * 0.6 + timeout * 0.5 : 60) + K.net.jitter(30, 40));
+    await wait((silent ? arpScanSilence(silent, elapsed, retry, timeout) : 0) + K.net.jitter(40, 40));
     say('');
     say(responded + ' packets received by filter, 0 packets dropped by kernel');
     const secs = elapsed / 1000;
@@ -24206,6 +24220,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     '                      limited to at most 131072 targets',
     '                      (give start and end IP in the target list, or a CIDR address)',
     '                      (ex. fping -g 192.168.1.0 192.168.1.255 or fping -g 192.168.1.0/24)',
+    '   -h, --help         show this page',
     '   -i, --interval=MSEC  interval between sending ping packets (default: 10 ms)',
     '   -p, --period=MSEC  interval between ping packets to one target (in ms)',
     '                      (in loop and count modes, default: 1000 ms)',
@@ -24230,19 +24245,44 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     return ms < 1 ? ms.toFixed(3) : ms < 10 ? ms.toFixed(2) : ms < 100 ? ms.toFixed(1) : ms.toFixed(0);
   }
 
-  /** The address list of fping -g: a CIDR block without its network and broadcast address, or START END. */
+  /**
+   * The address list of fping -g: a CIDR block without its network and broadcast address, or START END.
+   * Returns a specification, { fail } with fping's message, or null when the usage text is due.
+   */
   function fpingGenerate(args) {
+    const unparsable = (sep, addr) => ({ fail: 'fping' + sep + " can't parse address " + addr + ': Name or service not known\n' });
     let lo; let hi;
     if (args.length === 1) {
-      const m = /^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/.exec(args[0]);
-      const block = m && +m[2] >= 1 && +m[2] <= 32 ? U.parseCidr(args[0]) : null;
-      if (!block) return null;
-      const whole = block.bits >= 31;
+      const slash = args[0].lastIndexOf('/');
+      if (slash < 0) return null;
+      const addr = args[0].slice(0, slash); const mask = args[0].slice(slash + 1);
+      if (!U.isIPv4(addr)) return unparsable(',', addr);
+      if (!/^\d+$/.test(mask) || +mask < 1 || +mask > 32) return { fail: 'fping: netmask must be between 1 and 32 (is: ' + mask + ')\n' };
+      const block = U.parseCidr(args[0]); const whole = block.bits >= 31;
       lo = block.network + (whole ? 0 : 1); hi = block.broadcast - (whole ? 0 : 1);
-    } else if (args.length === 2 && U.isIPv4(args[0]) && U.isIPv4(args[1])) {
+    } else if (args.length === 2) {
+      const bad = args.find((a) => !U.isIPv4(a));
+      if (bad) return unparsable(':', bad);
       lo = U.ipToInt(args[0]); hi = U.ipToInt(args[1]);
     } else return null;
+    if (hi - lo + 1 > FPING_MAX_GENERATE) return { fail: 'fping: -g parameter generates too many addresses\n' };
     return rangeSpec(args.join(' '), lo, hi);
+  }
+
+  /** K.getopt words its errors like GNU getopt; fping's own option parser words them like this. */
+  function fpingOptionError(err) {
+    const long = /'--([^']+)'/.exec(err);
+    if (!long) return err;
+    const what = /requires an argument/.test(err) ? 'option requires an argument' : /allow an argument/.test(err) ? 'option takes no arguments' : 'invalid option';
+    return what + " -- '" + long[1] + "'";
+  }
+
+  /** Everything on standard input: the pipe, or lines typed at the terminal until Ctrl-D. */
+  async function stdinText(ctx) {
+    if (ctx.stdin != null) return ctx.stdin;
+    let text = '';
+    for (let line = await ctx.readLine(''); line != null; line = await ctx.readLine('')) text += line + '\n';
+    return text;
   }
 
   /** Resolve fping's target words; returns { targets: [{ip, label}], unknown } after the scope guard. */
@@ -24267,7 +24307,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
       long: ['alive', 'addr', 'count=', 'rdns', 'elapsed', 'file=', 'generate', 'help', 'interval=', 'name', 'period=', 'quiet', 'retry=', 'stats', 'timeout=', 'unreach', 'version'],
       alias: { alive: 'a', addr: 'A', count: 'c', rdns: 'd', elapsed: 'e', file: 'f', generate: 'g', help: 'h', interval: 'i', name: 'n', period: 'p', quiet: 'q', retry: 'r', stats: 's', timeout: 't', unreach: 'u', version: 'v' },
     });
-    if (g.err) return { fail: 'fping: ' + g.err + "\nsee 'fping -h' for usage information\n" };
+    if (g.err) return { fail: 'fping: ' + fpingOptionError(g.err) + "\nsee 'fping -h' for usage information\n" };
     const o = { opts: g.opts, words: g.rest, alive: g.opts.a, unreach: g.opts.u, quiet: g.opts.q, stats: g.opts.s, elapsed: g.opts.e, byAddr: g.opts.A, byName: g.opts.n || g.opts.d };
     const number = (key, fallback, min) => {
       if (g.opts[key] == null) return fallback;
@@ -24296,7 +24336,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
           waiting.push(t);
           if (r.status === 'unreachable' && attempt < o.retry) {
             st.other++;
-            if (!o.quiet) ctx.err('ICMP Host Unreachable from ' + r.from + ' for ICMP Echo sent to ' + t.ip + '\n');
+            if (!o.quiet) ctx.err('ICMP Host Unreachable from ' + r.from + ' for ICMP Echo sent to ' + t.label + (U.isIPv4(t.label) ? '' : ' (' + r.from + ')') + '\n');
           }
         }
         await st.wait(o.interval);
@@ -24327,7 +24367,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
         if (seq < o.count - 1) await st.wait(Math.max(0, o.period - targets.length * o.interval));
       }
     } finally {
-      ctx.err('\n');
+      if (!o.quiet) ctx.err('\n');
       for (const t of targets) {
         const rtt = t.times.length ? ', min/avg/max = ' + [Math.min.apply(null, t.times), t.times.reduce((a, b) => a + b, 0) / t.times.length, Math.max.apply(null, t.times)].map(fpingTime).join('/') : '';
         ctx.err(t.label.padEnd(width) + ' : xmt/rcv/%loss = ' + t.xmt + '/' + t.times.length + '/' + (t.xmt ? loss(t) : 0) + '%' + rtt + '\n');
@@ -24338,12 +24378,12 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
   function fpingStats(ctx, targets, unknown, st) {
     const n = (v) => String(v).padStart(8);
     const alive = targets.filter((t) => t.alive).length;
-    const rtt = (v) => ' ' + (st.replies.length ? fpingTime(v) : '0.00') + ' ms';
+    const rtt = (v) => ' ' + fpingTime(st.replies.length ? v : 0) + ' ms';
     const sum = st.replies.reduce((a, b) => a + b, 0);
     ctx.err(['', n(targets.length) + ' targets', n(alive) + ' alive', n(targets.length - alive) + ' unreachable', n(unknown) + ' unknown addresses', '',
       n(st.timeouts) + ' timeouts (waiting for response)', n(st.sent) + ' ICMP Echos sent', n(st.replies.length) + ' ICMP Echo Replies received', n(st.other) + ' other ICMP received', '',
       rtt(Math.min.apply(null, st.replies)) + ' (min round trip time)', rtt(sum / st.replies.length) + ' (avg round trip time)', rtt(Math.max.apply(null, st.replies)) + ' (max round trip time)',
-      (st.elapsed / 1000).toFixed(3).padStart(12) + ' sec (elapsed real time)', '', ''].join('\n'));
+      ' ' + (st.elapsed / 1000).toFixed(3).padStart(12) + ' sec (elapsed real time)', '', ''].join('\n'));
   }
 
   async function fpingRun(ctx) {
@@ -24351,30 +24391,30 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     if (o.fail) { ctx.err(o.fail); return 1; }
     if (o.opts.h) { ctx.out(FPING_USAGE); return 0; }
     if (o.opts.v) { ctx.out('fping: Version 5.4\n'); return 0; }
-    let words = o.words;
+    let words = o.words; const file = o.opts.f;
+    if ((file != null && (words.length || o.opts.g)) || (o.opts.g && !words.length)) { ctx.err(FPING_USAGE); return 1; }
     if (o.opts.g) {
       o.generate = fpingGenerate(words);
-      if (!o.generate) { ctx.err(FPING_USAGE); return 1; }
-      if (o.generate.count > FPING_MAX_GENERATE) { ctx.err('fping: -g parameter generates too many addresses\n'); return 1; }
-    } else if (o.opts.f != null || (!words.length && ctx.stdin != null)) {
-      let text = ctx.stdin || '';
-      if (o.opts.f != null && o.opts.f !== '-') {
-        try { text = ctx.fs.read(o.opts.f); } catch (e) { ctx.err('fping: fopen: ' + e.message + '\n'); return 4; }
+      if (!o.generate || o.generate.fail) { ctx.err(o.generate ? o.generate.fail : FPING_USAGE); return 1; }
+    } else if (!words.length) {
+      // Without targets fping reads them from a file, by default standard input.
+      let text;
+      if (file == null || file === '-') text = await stdinText(ctx);
+      else {
+        try { text = ctx.fs.read(file); } catch (e) { ctx.err('fping: fopen : ' + e.message + '\n'); return 4; }
       }
       words = text.split('\n').map((line) => line.replace(/#.*/, '').trim().split(/\s+/)[0]).filter(Boolean);
-    } else if (!words.length) { ctx.err(FPING_USAGE); return 1; }
+    }
     const found = fpingTargets(ctx, o, words);
+    if (!found.targets.length) return found.unknown ? 2 : 1;
     const st = { sent: 0, replies: [], timeouts: 0, other: 0, elapsed: 0, wait(ms) { st.elapsed += ms; return ctx.sleep(ms); } };
-    let interrupted = false;
     try {
       if (o.count) await fpingCount(ctx, o, found.targets, st);
       else await fpingOnce(ctx, o, found.targets, st);
     } catch (e) {
-      if (!(e instanceof K.Interrupt)) throw e;
-      interrupted = true;
+      if (!(e instanceof K.Interrupt)) throw e; // Ctrl-C ends the run early; the summary and the exit status still follow
     }
     if (o.stats) fpingStats(ctx, found.targets, found.unknown, st);
-    if (interrupted) return 130;
     return found.unknown ? 2 : found.targets.every((t) => t.alive) ? 0 : 1;
   }
 
@@ -24412,6 +24452,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
   const ARPING_USAGE = 'ARPing 2.26, by Thomas Habets <thomas@habets.se>\n' +
     'usage: arping [ -qr ] [ -c <count> ] [ -i <interface> ] <host/ip>\nFor complete usage info, use --help or check the manpage.\n';
 
+  const ARPING_INTERVAL = 1000;
   const arpingTime = (ms) => (ms < 1 ? (ms * 1000).toFixed(3) + ' usec' : ms < 1000 ? ms.toFixed(3) + ' msec' : (ms / 1000).toFixed(3) + ' sec');
 
   function arpingStats(ctx, ip, sent, times) {
@@ -24448,23 +24489,25 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     }
     const say = (line) => { if (!g.opts.q) ctx.out(line + '\n'); };
     const host = arpNeighbour(iface, res.ip);
-    const times = []; let sent = 0; let interrupted = false;
+    const times = []; let sent = 0;
     if (!g.opts.r) say('ARPING ' + res.ip);
     try {
-      for (; sent < count; sent++) {
-        if (sent) await ctx.sleep(1000);
-        if (!host) { if (!g.opts.r) say('Timeout'); continue; }
-        const rtt = K.net.jitter(host.latency.base, host.latency.jitter);
-        times.push(rtt);
-        say(g.opts.r ? host.mac : '60 bytes from ' + host.mac + ' (' + res.ip + '): index=' + sent + ' time=' + arpingTime(rtt));
+      while (sent < count) {
+        if (host) {
+          const rtt = K.net.jitter(host.latency.base, host.latency.jitter);
+          times.push(rtt);
+          say(g.opts.r ? host.mac : '60 bytes from ' + host.mac + ' (' + res.ip + '): index=' + sent + ' time=' + arpingTime(rtt));
+        }
+        sent++;
+        // The next request goes out a second later; a missing answer is only known by then.
+        if (sent < count || !host) await ctx.sleep(ARPING_INTERVAL);
+        if (!host && !g.opts.r) say('Timeout');
       }
-      if (!host) await ctx.sleep(1000);
     } catch (e) {
-      if (!(e instanceof K.Interrupt)) throw e;
-      interrupted = true; sent++;
+      if (!(e instanceof K.Interrupt)) throw e; // like ping, Ctrl-C ends the run with the statistics
     }
     if (!g.opts.q && !g.opts.r) arpingStats(ctx, res.ip, sent, times);
-    return interrupted ? 130 : times.length ? 0 : 1;
+    return times.length ? 0 : 1;
   }
 
   K.cmd.register({
@@ -26389,6 +26432,22 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     return out;
   }
 
+  /**
+   * Aligned columns under a header row. The last column takes what is left of the
+   * line and wraps; `paints` may give a colour function for each column.
+   */
+  function table(ctx, head, body, paints) {
+    const last = head.length - 1;
+    const widths = head.map((h, i) => Math.max.apply(null, [h].concat(body.map((r) => r[i])).map((cell) => cell.length)));
+    const indent = 2 + widths.slice(0, last).reduce((sum, w) => sum + w + 2, 0);
+    const room = Math.max(20, textWidth(ctx) - indent);
+    const line = (cells, paint) => {
+      const fixed = cells.slice(0, last).map((cell, i) => paint(i)(cell.padEnd(widths[i])) + '  ').join('');
+      return wrap(cells[last], room).map((l, n) => (n ? ' '.repeat(indent) : '  ' + fixed) + paint(last)(l) + '\n').join('');
+    };
+    return line(head, () => pen(ctx).head) + body.map((r) => line(r, (i) => (paints && paints[i]) || identity)).join('');
+  }
+
   const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 
   /* ------------------------------------------------------------- time speed */
@@ -26440,9 +26499,14 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
   const SUBCOMMANDS = [
     ['help', '', 'this overview'],
     ['status', '', 'the release being simulated, time speed and lesson progress'],
+    ['scope', '', 'the engagement scope, the rules in brief and the scope guard'],
+    ['hosts', '[--all]', 'lab hosts that have answered you so far'],
+    ['lessons', '', 'modules and lessons with completion marks'],
     ['speed', '[MODE]', 'show or set how fast simulated time passes'],
+    ['reset', '[--yes]', 'restart the simulated machine and the lab'],
     ['about', '', 'version, and what is and is not simulated'],
   ];
+  const usageOf = ([name, arg]) => name + (arg ? ' ' + arg : '');
 
   const KEYS = [
     ['Tab', 'complete a command, an option or a file name'],
@@ -26469,7 +26533,7 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
 
   function cmdHelp(ctx) {
     const p = pen(ctx); const e = K.net.world.engagement;
-    const usage = SUBCOMMANDS.map(([name, arg, text]) => ['kalima ' + name + (arg ? ' ' + arg : ''), text]);
+    const usage = SUBCOMMANDS.map((sub) => ['kalima ' + usageOf(sub), sub[2]]);
     ctx.out(
       banner(ctx) +
       para(ctx, 'This terminal, its filesystem, the lab network and the "internet" behind it are all simulated. Nothing you type leaves this page, so you can experiment freely.', 0) + '\n' +
@@ -29855,6 +29919,496 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
     order: 30,
     summary: 'Know who you are on the system, read and set file permissions with confidence, and use root privilege only for the commands that need it.',
     lessons: [usersLesson, readLesson, changeLesson, sudoLesson],
+  });
+
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+<script>
+// ---- 50-lessons-50-pkg.js
+/* Kalima — curriculum module "pkg": packages and keeping Kali current.
+ *
+ * Lessons: pkg-update, pkg-install, pkg-inspect. They use the simulated apt
+ * and dpkg and need no practice files. Because the app does not reset the
+ * machine between lessons, every check tests the state a step leaves behind
+ * (what is installed, what is still waiting to be upgraded) or what the line
+ * printed, and the one question whose answer depends on that state reads the
+ * state instead of assuming a fresh machine.
+ *
+ * Steps where apt asks "Continue? [Y/n]" after sudo give a testSolution that
+ * runs `sudo -k` first: the headless replay cannot know whether sudo still
+ * remembers the password, and the answer to the wrong prompt would abort.
+ */
+;(function (root) {
+  'use strict';
+  const K = root.K;
+
+  const T = (...lines) => lines.join('\n');
+  const APT = ['apt', 'apt-get'];
+  /** What a line printed, without colour codes. */
+  const outOf = (ev) => K.util.stripAnsi(ev.output || '');
+
+  /** Number of installed packages with a newer version waiting, or null before the machine exists. */
+  const pending = () => {
+    const m = K.kali;
+    if (!m || !m.packages || !m.state || !m.state.admin) return null;
+    const up = m.state.admin.upgradable || {};
+    return Object.keys(up).filter((n) => { const p = m.packages.get(n); return !!p && p.status === 'installed' && up[n] !== p.version; }).length;
+  };
+  const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+
+  /* ---------------------------------------------------------------- update */
+  const updateLesson = {
+    id: 'pkg-update',
+    title: 'Keeping Kali current',
+    minutes: 10,
+    objectives: [
+      'Read `/etc/apt/sources.list.d/kali.sources` and say where this system gets its packages',
+      'Refresh the package lists with `sudo apt update` and read its summary line',
+      'List the upgrades that are waiting with `apt list --upgradable`',
+      'Upgrade with `sudo apt full-upgrade` and explain why Kali documents that command',
+    ],
+    intro: T(
+      'Kali is a *rolling* distribution based on Debian testing. There is no big yearly release to wait for: new versions of tools and security fixes flow into one suite, `kali-rolling`, all the time. A version such as 2026.3 only names the installer image, a snapshot of that suite on the day the image was built.',
+      '',
+      'A workstation that has fallen weeks behind is missing fixes, and its tools may behave differently from the documentation you are reading. Updating takes two commands, and each tells you what it is about to do before it does it. A good habit is to update before an engagement starts and not in the middle of one, so that your tools stay the same from the first result to the last.'
+    ),
+    steps: [
+      {
+        id: 'release',
+        prompt: T(
+          'First confirm what you are sitting at. Every modern Linux system describes itself in one small file:',
+          '',
+          '```',
+          'cat /etc/os-release',
+          '```',
+          '',
+          'Three lines matter here. `PRETTY_NAME` says *Rolling*. `VERSION_ID` is the image this machine was installed from. `ID_LIKE=debian` tells you the family: Kali is built on Debian, so software arrives as Debian packages and is managed with `apt`.'
+        ),
+        hint: 'Print the file `/etc/os-release` with `cat`.',
+        solution: 'cat /etc/os-release',
+        check: { any: [{ out: /VERSION_CODENAME=kali-rolling/ }, { cmd: 'lsb_release', out: /kali-rolling/ }] },
+      },
+      {
+        id: 'sources',
+        prompt: T(
+          'Where do those packages come from? `apt` reads the answer from a file:',
+          '',
+          '```',
+          'cat /etc/apt/sources.list.d/kali.sources',
+          '```',
+          '',
+          'Each line is a field name, a colon and a value:',
+          '',
+          '- `Types: deb` asks for ready-built packages.',
+          '- `URIs` is the address of the Kali mirror service.',
+          '- `Suites: kali-rolling` is the stream of packages this system follows.',
+          '- `Components` are sections of the archive, sorted by license.',
+          '- `Signed-By` names the key file `apt` uses to check that what it downloads really was published by Kali.',
+          '',
+          'The address begins with plain `http`. That is deliberate: `apt` does not trust the connection, it trusts the signature.'
+        ),
+        hint: 'Use `cat` on `/etc/apt/sources.list.d/kali.sources`. Tab completion saves typing the long path.',
+        solution: 'cat /etc/apt/sources.list.d/kali.sources',
+        check: { out: /Suites:\s*kali-rolling/ },
+      },
+      {
+        id: 'components',
+        prompt: 'Look at the `Components` line again. How many components does it list?',
+        hint: 'Count the words after `Components:`. They are separated by spaces, and `non-free-firmware` is one word.',
+        solution: '4',
+        answer: /^(4|four)( components?)?\.?$/i,
+      },
+      {
+        id: 'update',
+        prompt: T(
+          'Your system keeps its own copy of the list of packages the mirror offers. That copy goes stale. Refresh it:',
+          '',
+          '```',
+          'sudo apt update',
+          '```',
+          '',
+          'It needs `sudo` because the lists are stored in a system directory; without it you get `Permission denied`. The password is `kali`.',
+          '',
+          'Read the output from the top. A line that starts with `Get:` is a list that was downloaded, and `Hit:` means your copy was already current. The last line is the summary: how many installed packages have a newer version waiting.',
+          '',
+          '`apt update` installs nothing. It only learns what is available.'
+        ),
+        hint: 'Type `sudo apt update` and give the password `kali` when asked.',
+        solution: 'sudo apt update',
+        input: ['kali'],
+        check: { cmd: APT, args: ['update'], user: 'root', exit: 0, out: /Reading package lists/ },
+      },
+      {
+        id: 'count',
+        prompt: 'Read the last line that `sudo apt update` printed. How many packages can be upgraded? If the line says that all packages are up to date, answer `0`.',
+        hint: 'The last line reads either `N packages can be upgraded. Run \'apt list --upgradable\' to see them.` or `All packages are up to date.` Run `sudo apt update` again if it has scrolled away.',
+        // the right number depends on whether this machine has been upgraded already
+        get solution() { const n = pending(); return String(n == null ? 7 : n); },
+        answer: {
+          test(text) {
+            const n = pending(); const want = n == null ? 7 : n;
+            const t = String(text).trim().toLowerCase().replace(/\s+packages?\.?$/, '').replace(/\.$/, '');
+            if (/^\d+$/.test(t)) return parseInt(t, 10) === want;
+            if (want === 0 && /^(none|no)$/.test(t)) return true;
+            return NUMBER_WORDS.indexOf(t) === want;
+          },
+        },
+      },
+      {
+        id: 'list',
+        prompt: T(
+          'The summary gave you a number. Now see the names:',
+          '',
+          '```',
+          'apt list --upgradable',
+          '```',
+          '',
+          'No `sudo` this time, because looking changes nothing. Each line reads: package name, a slash and the suite, the **new** version, the architecture, and in brackets the version you have now. Comparing the two versions tells you how big the step is.',
+          '',
+          'If this machine is already up to date, you see only `Listing... Done`.'
+        ),
+        hint: 'The command is `apt list` with the option `--upgradable`.',
+        solution: 'apt list --upgradable',
+        check: { cmd: 'apt', args: ['list', '--upgradable'], exit: 0, out: /Listing/ },
+      },
+      {
+        id: 'upgrade',
+        prompt: T(
+          'Now install the new versions:',
+          '',
+          '```',
+          'sudo apt full-upgrade',
+          '```',
+          '',
+          'Before it changes anything, `apt` shows its plan. Read the `Summary` lines: how many packages it will upgrade, install and remove, and how much it will download. Then it asks `Continue? [Y/n]`. Answer `y`. If nothing is waiting, the summary shows zeros and `apt` simply finishes.',
+          '',
+          'Why `full-upgrade` and not `upgrade`? In a rolling distribution packages are sometimes renamed, split or replaced. `apt upgrade` never removes a package, so it holds back every upgrade that would need a removal and can leave you with a mix of old and new. `full-upgrade` is allowed to remove a package when the upgrade requires it. That is the command the Kali documentation gives, and it is why you read the `Removing` count before you say yes.'
+        ),
+        hint: 'Type `sudo apt full-upgrade`, read the summary, and answer `y` at the `Continue?` question.',
+        solution: 'sudo apt full-upgrade',
+        testSolution: ['sudo -k', 'sudo apt full-upgrade'],
+        input: ['kali', 'y'],
+        check: { cmd: APT, argsRe: /(^|\s)(full|dist)-upgrade(\s|$)/, user: 'root', exit: 0, fn: () => pending() === 0 },
+      },
+      {
+        id: 'confirm',
+        prompt: T(
+          'Check the result instead of assuming it. Ask `apt` once more whether anything is waiting to be upgraded. You have used two commands in this lesson that can tell you; either one will do.',
+          '',
+          'You are looking for `All packages are up to date.` or for a list with no packages in it.'
+        ),
+        hint: '`apt list --upgradable` prints the waiting upgrades, and `sudo apt update` ends with a summary line.',
+        solution: 'apt list --upgradable',
+        input: ['kali'],
+        check: {
+          any: [
+            { cmd: 'apt', args: ['list', '--upgradable'], exit: 0, fn: (ev) => /Listing/.test(outOf(ev)) && !/upgradable from/.test(outOf(ev)) },
+            { cmd: APT, args: ['update'], user: 'root', exit: 0, out: /All packages are up to date/ },
+          ],
+        },
+      },
+      {
+        id: 'history',
+        prompt: T(
+          '`apt` keeps a record of every change it makes. Read the end of it:',
+          '',
+          '```',
+          'tail /var/log/apt/history.log',
+          '```',
+          '',
+          'Each entry has the start time, the exact command line, who requested it, what was upgraded (old version, then new) and the end time. When a tool behaves differently from last week, this file tells you whether it changed and when. It is worth a line in your engagement notes whenever you upgrade during a job.'
+        ),
+        hint: 'Use `tail` on the file `/var/log/apt/history.log`.',
+        solution: 'tail /var/log/apt/history.log',
+        check: { cmd: ['tail', 'cat', 'less', 'more', 'head', 'grep', 'tac'], argsRe: /\/var\/log\/apt\/history\.log|(^|\s)history\.log/, exit: 0 },
+      },
+    ],
+    quiz: [
+      {
+        q: 'You run `sudo apt update` and its last line says that 12 packages can be upgraded. What has changed on the system at this point?',
+        choices: [
+          'The 12 packages have been upgraded',
+          'The 12 packages have been downloaded and will be installed at the next restart',
+          'Only the local lists of available packages were refreshed; nothing was installed',
+          'Nothing at all; `apt update` only prints a report',
+        ],
+        answer: 2,
+        why: '`apt update` downloads fresh package lists and compares them with what is installed. Installing the new versions is a separate step, `sudo apt full-upgrade`.',
+      },
+      {
+        q: 'Why does the Kali documentation tell you to upgrade with `apt full-upgrade` and not with `apt upgrade`?',
+        choices: [
+          '`apt upgrade` only works on Debian stable',
+          '`full-upgrade` may remove a package when an upgrade requires it, while `upgrade` holds such upgrades back and can leave the system half-updated',
+          '`full-upgrade` also refreshes the package lists first',
+          '`full-upgrade` is faster because it skips the confirmation question',
+        ],
+        answer: 1,
+        why: 'In a rolling distribution packages are regularly renamed or replaced. `apt upgrade` never removes anything, so it skips those upgrades; `full-upgrade` carries them out. Neither command refreshes the lists, and both ask before they act.',
+      },
+      {
+        q: 'You have not run `apt update` for a month. `apt list --upgradable` prints only `Listing... Done`. Can you conclude that the system is current?',
+        choices: [
+          'Yes, an empty list always means there is nothing newer',
+          'No. The list is compared with the local copy of the package lists, and that copy is a month old',
+          'No, because `apt list` needs `sudo` to see upgrades',
+          'Yes, because `apt list` contacts the mirror by itself',
+        ],
+        answer: 1,
+        why: '`apt list` reads only the lists stored on your machine. Until `sudo apt update` refreshes them, `apt` cannot know what the mirror has published since.',
+      },
+      {
+        q: 'A colleague types `apt update` and gets `Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)`. What is the cause?',
+        choices: [
+          'The mirror is unreachable',
+          'Another package manager is running',
+          'The command was run without `sudo`, and an ordinary user may not write the package lists',
+          'The file `kali.sources` is damaged',
+        ],
+        answer: 2,
+        why: 'The package lists live under `/var/lib/apt/lists`, which only root may write. Error 13, permission denied, points to missing privilege, not to the network.',
+      },
+    ],
+    refs: ['apt(8)', 'sources.list(5)', 'apt-secure(8)', 'os-release(5)', 'Kali Linux Revealed, ch. 8 (Debian Package Management)'],
+  };
+
+  K.lessons.register({
+    id: 'pkg',
+    title: 'Packages and keeping Kali current',
+    order: 50,
+    summary: 'Know where Kali\'s software comes from, keep the system up to date, install and remove tools cleanly, and find out which package any file belongs to.',
+    lessons: [updateLesson],
+  });
+
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+<script>
+// ---- 50-lessons-60-net.js
+/* Kalima — curriculum module "net": networking fundamentals.
+ *
+ * Lessons: net-addresses, net-routes, net-ping, net-path, net-ports,
+ * net-troubleshoot. They read the Kali machine's own configuration and send
+ * ordinary client traffic (ping, traceroute, one HTTP request) to the lab and
+ * to the simulated internet. Nothing is seeded: the only files written are a
+ * few appended lines in ~/engagement/notes.md. Checks test what a line printed
+ * or the state it left behind (interface up or down, port 22 listening or not).
+ * net-troubleshoot takes eth0 down and its last step requires it to be up again.
+ */
+;(function (root) {
+  'use strict';
+  const K = root.K;
+
+  const T = (...lines) => lines.join('\n');
+  const NOTES = '/home/kali/engagement/notes.md';
+  /** Everything a line printed, without colors. */
+  const outOf = (ev) => K.util.stripAnsi(ev.output || '');
+  /** Does the line's output match every one of these patterns? */
+  const prints = (...res) => (ev) => { const o = outOf(ev); return res.every((r) => { r.lastIndex = 0; return r.test(o); }); };
+  /** The line appended to the notes file (with >> or tee -a). */
+  const appendsToNotes = { any: [{ line: />>\s*\S*notes\.md/ }, { cmd: 'tee', args: ['-a'], argsRe: /notes\.md/ }] };
+  /** Shown in the hint of each lesson's first step, in case an earlier exercise left the interface down. */
+  const IF_DOWN = ' If `eth0` shows `DOWN`, an earlier exercise left it switched off: run `sudo ip link set eth0 up` first.';
+
+  /* ------------------------------------------------------------- addresses */
+  const addressesLesson = {
+    id: 'net-addresses',
+    title: 'Interfaces and addresses',
+    minutes: 10,
+    objectives: [
+      'List your network interfaces and their state with `ip -br a` and `ip a`',
+      'Read the IPv4 address, prefix length and MAC address of an interface',
+      'Work out from an address such as `10.10.10.5/24` which hosts are on your local segment',
+      'Print your addresses with `hostname -I` and record your source address in the engagement notes',
+    ],
+    intro: T(
+      'Every packet your workstation sends carries a source address, and every decision about where a packet goes starts from the machine\'s own network configuration. Before you look at anyone else\'s systems you need to be able to read your own: which interfaces exist, which of them is connected, what address it has, and which other machines that address makes your direct neighbors.',
+      '',
+      'On an engagement this is also a safety check. The scope names networks, and your address tells you which network you are really connected to. The client will want to know which address your testing came from, so it belongs in your notes.'
+    ),
+    steps: [
+      {
+        id: 'brief',
+        prompt: T(
+          'The tool for network configuration on Linux is `ip`. It is followed by the kind of thing you want to see, here `a`, short for `address`. The option `-br` asks for the brief form:',
+          '',
+          '```',
+          'ip -br a',
+          '```',
+          '',
+          'There is one line per network interface, with three columns: the name, the state, and the addresses.',
+          '',
+          '- `lo` is the *loopback* interface. Every system has one. Traffic sent to it never leaves the machine. Its state `UNKNOWN` is normal, because there is no cable whose state could be reported.',
+          '- `eth0` is the first Ethernet interface, the one that connects you to the lab. `UP` means it is switched on and connected. On other systems the same kind of interface may be called something like `enp0s3`.'
+        ),
+        hint: 'Type `ip -br a` and press Enter.' + IF_DOWN,
+        solution: 'ip -br a',
+        check: { cmd: 'ip', out: /^eth0\s+UP\s+10\.10\.10\.5\/24/m },
+      },
+      {
+        id: 'address',
+        prompt: T(
+          'Look at the line for `eth0`. The third column holds two addresses. The one made of four numbers is the IPv4 address, and the long one that begins with `fe80` is an IPv6 address that the system gave itself.',
+          '',
+          'What is the IPv4 address of `eth0`? Give it as it is printed, including the slash and the number after it.'
+        ),
+        hint: 'It is the first entry in the third column of the `eth0` line, in the form `a.b.c.d/nn`.',
+        solution: '10.10.10.5/24',
+        answer: /^10\.10\.10\.5\s*\/\s*24$/,
+      },
+      {
+        id: 'full',
+        prompt: T(
+          'Without `-br`, `ip` prints everything it knows. Name an interface after `show` to limit the output to that one:',
+          '',
+          '```',
+          'ip a show eth0',
+          '```',
+          '',
+          'Read it line by line.',
+          '',
+          '- The first line gives the name, then flags in angle brackets. `UP` means the interface is switched on, and `LOWER_UP` means the link under it, the cable or its virtual equivalent, is connected.',
+          '- `link/ether` is followed by the *MAC address*, the hardware address of the network card. Machines on the same segment use it to deliver data to each other.',
+          '- `inet` is the IPv4 address. `brd` is the broadcast address of the network, and `dynamic` says the address was handed out by a DHCP server and not typed in by hand.',
+          '- `inet6` is the IPv6 address. `scope link` means it is valid on this segment only.'
+        ),
+        hint: 'Type `ip a show eth0`. `ip addr show eth0` is the same command with the object spelled out further.',
+        solution: 'ip a show eth0',
+        check: { cmd: 'ip', fn: prints(/link\/ether 08:00:27:1d:77:55/, /inet 10\.10\.10\.5\/24 brd 10\.10\.10\.255/) },
+      },
+      {
+        id: 'mac',
+        prompt: T(
+          'A MAC address is written as six pairs of hexadecimal digits separated by colons. The first three pairs identify the maker of the card. The lab machine\'s card begins with `08:00:27`, which belongs to the virtual network cards of VirtualBox.',
+          '',
+          'What is the full MAC address of `eth0`?'
+        ),
+        hint: 'It follows `link/ether` on the second line. Do not confuse it with `ff:ff:ff:ff:ff:ff` after `brd`, which is the address for "everyone on this segment".',
+        solution: '08:00:27:1d:77:55',
+        answer: /^08[:-]00[:-]27[:-]1d[:-]77[:-]55$/i,
+      },
+      {
+        id: 'loopback',
+        prompt: T(
+          'Now print the same full view for the loopback interface, and only for that one.',
+          '',
+          'In its output, `inet 127.0.0.1/8` is followed by `scope host`: the address is valid inside this machine only. On every computer `127.0.0.1` means "myself". A service that listens on `127.0.0.1` alone cannot be reached from any other machine, which is why administrators use it for things that should stay private.'
+        ),
+        hint: 'Use the command from the step before last and change the interface name to `lo`.',
+        solution: 'ip a show lo',
+        check: { cmd: 'ip', out: /inet 127\.0\.0\.1\/8 scope host/, not: { out: /eth0/ } },
+      },
+      {
+        id: 'prefix',
+        prompt: T(
+          'Back to `10.10.10.5/24`. An IPv4 address is four numbers from 0 to 255, which is 32 bits. The number after the slash, the *prefix length*, says how many of those bits name the network. The remaining bits name one host inside it.',
+          '',
+          '`/24` covers the first three numbers. So your network is `10.10.10.0/24`, and it contains the addresses `10.10.10.0` to `10.10.10.255`. The first names the network itself and the last is the broadcast address you saw after `brd`, which leaves 254 addresses for hosts.',
+          '',
+          'Your machine treats every address in that range as a neighbor on the same segment and sends to it directly. Everything else has to go through a router.',
+          '',
+          'Here are two addresses: `10.10.11.5` and `10.10.10.200`. Which one is on your local segment?'
+        ),
+        hint: 'Compare the first three numbers of each address with `10.10.10`.',
+        solution: '10.10.10.200',
+        answer: /^(the\s+)?(second(\s+one)?|10\.10\.10\.200(\s*\/\s*24)?)\.?$/i,
+      },
+      {
+        id: 'ipv4',
+        prompt: T(
+          '`ip` takes the options `-4` and `-6` to limit what it shows to one address family. They go before the object, next to `-br`.',
+          '',
+          'Print the brief listing again, this time with IPv4 addresses only. The `fe80` address should disappear from the `eth0` line.'
+        ),
+        hint: 'Add `-4` to the first command of this lesson: `ip -4 -br ...`',
+        solution: 'ip -4 -br a',
+        check: { cmd: 'ip', out: /^eth0\s+UP\s+10\.10\.10\.5\/24\s*$/m },
+      },
+      {
+        id: 'hostname',
+        prompt: T(
+          'When you only want the addresses, for a note or a script, there is a shorter way:',
+          '',
+          '```',
+          'hostname -I',
+          '```',
+          '',
+          'It prints every address of the machine on one line and leaves out the loopback address and the `fe80` address.',
+          '',
+          'The capital letter matters. `hostname -i` in lower case looks up the machine\'s own name instead, and on Kali that answers `127.0.1.1`, an address that is of no use to anybody else.'
+        ),
+        hint: 'Type `hostname -I` with a capital I.',
+        solution: 'hostname -I',
+        check: { cmd: 'hostname', argsRe: /(^|\s)(-I|--all-ip-addresses)(\s|$)/, out: /^10\.10\.10\.5\s*$/m },
+      },
+      {
+        id: 'notes',
+        prompt: T(
+          'At the start of an engagement, record the address you are working from. Afterwards the client can tell your traffic apart from everything else in their logs, and you can show which network you were on.',
+          '',
+          'Append the brief line for `eth0` to your notes in `~/engagement/notes.md`. Nothing that is already in the file may be lost.'
+        ),
+        hint: '`ip -br a show eth0` prints the one line. `>>` appends the output of a command to a file, where a single `>` would replace the file.',
+        solution: 'ip -br a show eth0 >> ~/engagement/notes.md',
+        check: { cmd: 'ip', all: [appendsToNotes], file: { path: NOTES, contains: /^eth0\s+UP\s+10\.10\.10\.5\/24/m } },
+      },
+    ],
+    quiz: [
+      {
+        q: 'A machine has the address `192.168.4.17/24`. Which of these addresses is on its local segment?',
+        choices: [
+          '`192.168.5.17`',
+          '`192.186.4.17`',
+          '`192.168.4.200`',
+          '`10.168.4.17`',
+        ],
+        answer: 2,
+        why: 'With a prefix length of 24 the first three numbers name the network, so everything that starts with `192.168.4.` is local. Each of the others differs somewhere in the first three numbers.',
+      },
+      {
+        q: '`ip -br a` shows `lo  UNKNOWN  127.0.0.1/8`. A colleague is worried about the state. What do you tell them?',
+        choices: [
+          'That is normal: the loopback interface has no physical link whose state could be reported, and it works',
+          'The loopback interface has failed and the machine should be restarted',
+          'It means that no cable is plugged into `eth0`',
+          'It means that `127.0.0.1` has not been assigned yet',
+        ],
+        answer: 0,
+        why: '`UNKNOWN` is what `ip` always shows for `lo`. The interface exists in software only, so there is no carrier to detect. The flags in the full view show that it is `UP`.',
+      },
+      {
+        q: 'A database on a server listens on `127.0.0.1` only. You type that address into a client on your Kali machine. What do you reach?',
+        choices: [
+          'The database, because `127.0.0.1` is the address the server chose for it',
+          'The gateway, which forwards the connection to the server',
+          'Nothing at all, because `127.0.0.1` cannot be used as a destination',
+          'Your own Kali machine, because `127.0.0.1` always means the machine you are on',
+        ],
+        answer: 3,
+        why: 'Loopback addresses never leave the machine that uses them. Seen from Kali, `127.0.0.1` is Kali. The database can only be reached by programs running on the server itself.',
+      },
+      {
+        q: 'The scope of your engagement is `10.10.10.0/24`. After reconnecting your machine, `ip -br a` shows `eth0  UP  172.16.8.31/16`. What should you conclude?',
+        choices: [
+          'Nothing has changed, because the interface is still `UP`',
+          'You are connected to a different network from the one in scope, so stop and sort that out before you send anything',
+          'The address is wrong and the quickest fix is to set `10.10.10.5` by hand',
+          'The prefix length changed, so more hosts are in scope now',
+        ],
+        answer: 1,
+        why: 'Your address shows which network you are on, and `172.16.8.31/16` is not in `10.10.10.0/24`. Whatever you send now reaches somebody else\'s systems. Find out where you are connected, and to whom the network belongs, before you do anything else.',
+      },
+    ],
+    refs: ['ip(8)', 'ip-address(8)', 'hostname(1)', 'RFC 4632 (CIDR notation)', 'RFC 1918 (private addresses)', 'Kali Linux Revealed, ch. 5'],
+  };
+
+  K.lessons.register({
+    id: 'net',
+    title: 'Networking fundamentals',
+    order: 60,
+    summary: 'Read your own addresses and routes, test reachability with ping, follow the path a packet takes, see which ports are listening, and find a network fault by working upward from the cable.',
+    lessons: [addressesLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
