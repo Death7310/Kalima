@@ -483,12 +483,222 @@
     refs: ['apt(8)', 'apt-get(8)', 'apt-cache(8)', 'dpkg(1)', 'Kali Linux Revealed, ch. 8 (Debian Package Management)'],
   };
 
+  /* --------------------------------------------------------------- inspect */
+  const DPKG = ['dpkg', 'dpkg-query'];
+  const linesOf = (ev) => outOf(ev).split('\n').map((l) => l.trim()).filter(Boolean);
+
+  const inspectLesson = {
+    id: 'pkg-inspect',
+    title: 'Which package is this? Inspecting what is installed',
+    minutes: 12,
+    objectives: [
+      'List installed packages and their versions with `dpkg -l`',
+      'Find the package that owns a file with `dpkg -S`, and the files a package installed with `dpkg -L`',
+      'Compare the installed version of a package with the version on offer using `apt-cache policy`',
+      'Explain what a metapackage is and how Kali uses metapackages to group its tools',
+    ],
+    intro: T(
+      'Everything `apt` installs is recorded in a database kept by `dpkg`, the lower-level tool that `apt` drives. That database can answer questions you will ask on every system you work on: which version of this tool do I have, where did this file come from, and what did that package put on my disk.',
+      '',
+      'The answers matter for more than housekeeping. A result is only reproducible if your notes say which version of the tool produced it. And on a machine you are asked to review, being able to tell the files that belong to the distribution from the ones somebody added by hand is the start of many findings. All of these commands only read, so none of them needs `sudo`.'
+    ),
+    steps: [
+      {
+        id: 'list',
+        prompt: T(
+          '`dpkg -l` lists packages. On its own it prints every package on the system, so give it a pattern:',
+          '',
+          '```',
+          'dpkg -l \'openssh*\'',
+          '```',
+          '',
+          'The quotes hand the `*` to `dpkg` instead of letting the shell try to match it against file names.',
+          '',
+          'The first three lines are a legend for the two letters that start each row. The first letter is what was *asked for* and the second is the *current state*. `ii` means asked to be installed, and installed: the normal case. `rc` would mean removed, with configuration files left behind. After the letters come the name, the version, the architecture and a description cut to fit the screen.'
+        ),
+        hint: 'Type `dpkg -l` followed by the pattern in single quotes: `\'openssh*\'`.',
+        solution: 'dpkg -l \'openssh*\'',
+        check: { cmd: DPKG, exit: 0, argsRe: /(^|\s)(-l|--list)(\s|$)/, out: /^ii\s+openssh-server\s/m },
+      },
+      {
+        id: 'version',
+        prompt: 'Read the row for `openssh-server`. Which version is installed? Type it exactly as the `Version` column shows it.',
+        hint: 'The version is the third thing on the row, after `ii` and the name. It contains a colon, and it ends before `amd64`.',
+        solution: '1:10.0p1-7',
+        answer: /^(1:)?10\.0p1-7$/,
+      },
+      {
+        id: 'owner',
+        prompt: T(
+          'Now turn the question around. You have a file, and you want to know which package it belongs to. `-S` searches the database for a path:',
+          '',
+          '```',
+          'dpkg -S /usr/bin/ssh',
+          '```',
+          '',
+          'The answer has the package name before the colon and the path after it. Notice that the package is not called `ssh`. Package names and command names often differ, which is exactly why this lookup is useful.'
+        ),
+        hint: 'Type `dpkg -S` followed by the full path `/usr/bin/ssh`. The `S` is a capital letter.',
+        solution: 'dpkg -S /usr/bin/ssh',
+        check: { cmd: DPKG, exit: 0, out: /^openssh-client: \/usr\/bin\/ssh$/m },
+      },
+      {
+        id: 'owner-dig',
+        prompt: T(
+          'Your turn. Find out which package the command `dig` came from.',
+          '',
+          '`dpkg -S` wants a path, and you only have a command name. `which dig` prints the path of the program that runs when you type `dig`.'
+        ),
+        hint: 'Run `which dig` to get the path, then give that path to `dpkg -S`. You can also do it in one line: `dpkg -S $(which dig)`.',
+        solution: 'dpkg -S /usr/bin/dig',
+        check: { cmd: DPKG, exit: 0, out: /^bind9-dnsutils: \/usr\/bin\/dig$/m },
+      },
+      {
+        id: 'unowned',
+        prompt: T(
+          'Not every file belongs to a package. Ask about the file that holds this machine\'s name:',
+          '',
+          '```',
+          'dpkg -S /etc/hostname',
+          '```',
+          '',
+          '`no path found` is the answer, not a failure of the tool: no package installed this file. It was written when the system was set up. Files you create, and software installed by hand, give the same reply.',
+          '',
+          'On a system you are reviewing, this is a quick test. A program in `/usr/bin` that no package owns did not come from the distribution, and it is worth asking who put it there.'
+        ),
+        hint: 'The same command as before with a different path: `dpkg -S /etc/hostname`.',
+        solution: 'dpkg -S /etc/hostname',
+        check: { cmd: DPKG, exit: 1, argsRe: /\/etc\/hostname/, out: /no path found matching pattern/ },
+      },
+      {
+        id: 'files',
+        prompt: T(
+          'The opposite lookup starts from a package and lists every file it installed. That is `-L`:',
+          '',
+          '```',
+          'dpkg -L openssh-client',
+          '```',
+          '',
+          'Read the list by directory. Paths under `/usr/bin` are the programs you can run, so this one package gives you `ssh`, `scp` and two more. Paths under `/usr/share/man` are their manual pages, and `/usr/share/doc` holds the license. When you have installed something and do not know what it is called on the command line, this list tells you.'
+        ),
+        hint: 'Type `dpkg -L openssh-client`, with a capital `L` this time.',
+        solution: 'dpkg -L openssh-client',
+        check: { cmd: DPKG, exit: 0, argsRe: /(^|\s)(-L|--listfiles)(\s|$)/, out: /^\/usr\/bin\/ssh-keygen$/m },
+      },
+      {
+        id: 'programs',
+        prompt: T(
+          'Usually you only want the programs. List the files of the package `iproute2`, and keep only the lines that contain `bin/`.',
+          '',
+          'You know the tool that keeps matching lines, and the `|` that connects two commands.'
+        ),
+        hint: 'Send the output of `dpkg -L iproute2` through `grep bin/`.',
+        solution: 'dpkg -L iproute2 | grep bin/',
+        check: {
+          cmd: DPKG, argsRe: /iproute2/, exit: 0,
+          fn: (ev) => { const l = linesOf(ev); return l.length > 0 && l.every((x) => /\/s?bin(\/|$)/.test(x)) && l.indexOf('/usr/bin/ip') >= 0 && l.indexOf('/usr/bin/ss') >= 0; },
+        },
+      },
+      {
+        id: 'policy',
+        prompt: T(
+          '`dpkg` knows what is installed. `apt` also knows what the repository offers, and one command shows both side by side:',
+          '',
+          '```',
+          'apt-cache policy kali-linux-default',
+          '```',
+          '',
+          '`Installed` is the version on this machine, `Candidate` is the version `apt` would install if you asked now, and the line with the address shows which repository the candidate comes from. When the two versions differ, an upgrade is waiting.',
+          '',
+          'Run this before you install something unfamiliar: it tells you whether you already have it, and where it would come from.'
+        ),
+        hint: 'Type `apt-cache policy` followed by the package name `kali-linux-default`.',
+        solution: 'apt-cache policy kali-linux-default',
+        check: { cmd: ['apt-cache', 'apt'], args: ['policy'], exit: 0, out: /^kali-linux-default:\n\s+Installed:/m },
+      },
+      {
+        id: 'installed',
+        prompt: 'Read the `Installed` line of that output. What does it say about `kali-linux-default` on this machine? Type the value shown after `Installed:`.',
+        hint: 'The value is a word in round brackets. It means the package is not installed here.',
+        solution: '(none)',
+        answer: /^\(?none\)?\.?$/i,
+      },
+      {
+        id: 'meta',
+        prompt: T(
+          '`kali-linux-default` is a *metapackage*. It contains no programs of its own. It is a named list: installing it installs everything it depends on. Kali groups its tools this way. `kali-linux-default` is the tool set of the standard desktop image, `kali-linux-headless` is the same idea without the tools that need a graphical desktop, and the `kali-tools-*` family groups tools by subject. Look inside two of them:',
+          '',
+          '```',
+          'apt-cache depends kali-linux-default kali-tools-top10',
+          '```',
+          '',
+          'Each name is followed by its `Depends` lines. Metapackages can point at other metapackages, which is how a single name can stand for a whole tool set. This workstation was built from the small `kali-linux-core` set, with individual tools added one by one.'
+        ),
+        hint: 'Type `apt-cache depends` followed by both package names.',
+        solution: 'apt-cache depends kali-linux-default kali-tools-top10',
+        check: {
+          all: [
+            { cmd: ['apt-cache', 'apt'], exit: 0, out: /Depends:.*\bkali-tools-top10\b/ },
+            { out: /Depends:.*\bnmap\b/ },
+          ],
+        },
+      },
+    ],
+    quiz: [
+      {
+        q: 'On a server you are reviewing, `dpkg -S /usr/local/bin/sync-reports` answers `no path found matching pattern`. What have you learned?',
+        choices: [
+          'The file does not exist',
+          'The package that owns the file is damaged',
+          'No installed package put that file there: it was added by hand or by some other installer',
+          'You need `sudo` to search the package database',
+        ],
+        answer: 2,
+        why: '`dpkg -S` searches the lists of files that installed packages own. A file nobody registered there did not come from a package. In `/usr/local` that is normal for locally installed software, and it tells you where to ask next.',
+      },
+      {
+        q: 'You have just installed the package `bind9-dnsutils` and want to know which commands it gave you. Which line answers that?',
+        choices: [
+          '`dpkg -S bind9-dnsutils`',
+          '`dpkg -L bind9-dnsutils | grep bin/`',
+          '`dpkg -l bind9-dnsutils`',
+          '`apt search bind9-dnsutils`',
+        ],
+        answer: 1,
+        why: '`-L` lists the files a package installed, and its programs are the paths in a `bin` directory. `-S` goes the other way, from a path to a package, and `-l` shows only the version and state.',
+      },
+      {
+        q: 'For the package `curl`, `apt-cache policy` shows `Installed: 8.17.0-1` and `Candidate: 8.17.0-2`. What will `sudo apt full-upgrade` do with `curl`?',
+        choices: [
+          'Nothing, because `curl` is already installed',
+          'Replace version 8.17.0-1 with 8.17.0-2',
+          'Remove `curl`, because the versions do not match',
+          'Install both versions side by side',
+        ],
+        answer: 1,
+        why: 'The candidate is the version `apt` would install now. When it is newer than the installed version, the package is upgradable and the next upgrade brings it to the candidate.',
+      },
+      {
+        q: 'What does installing the package `kali-linux-headless` put on a system?',
+        choices: [
+          'A kernel without graphics drivers',
+          'Kali\'s default tools that work without a graphical desktop, pulled in as dependencies of a package that is itself almost empty',
+          'Only documentation about Kali',
+          'A setting that switches the desktop off',
+        ],
+        answer: 1,
+        why: 'It is a metapackage: a list of dependencies with a name. Asking for it makes `apt` install every tool on the list, which is why one short command can set up a whole tool set.',
+      },
+    ],
+    refs: ['dpkg(1)', 'dpkg-query(1)', 'apt-cache(8)', 'apt_preferences(5)', 'Kali Linux Revealed, ch. 8 (Debian Package Management)'],
+  };
+
   K.lessons.register({
     id: 'pkg',
     title: 'Packages and keeping Kali current',
     order: 50,
     summary: 'Know where Kali\'s software comes from, keep the system up to date, install and remove tools cleanly, and find out which package any file belongs to.',
-    lessons: [updateLesson, installLesson],
+    lessons: [updateLesson, installLesson, inspectLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
