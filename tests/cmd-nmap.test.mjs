@@ -21,6 +21,8 @@ const portLines = (out) => out.split('\n').filter((l) => /^(PORT|\d+\/(tcp|udp))
 async function interrupted(sim, line, afterMs = 20) {
   const { K, shell, term } = sim;
   K.clock.useReal(); K.settings.timeScale = 1;
+  term.feed('kali');
+  await shell.capture('sudo true'); // the sudo timestamp from virtual time means nothing on the real clock
   term.take();
   const pending = shell.runLine(line);
   setTimeout(() => term.raiseInterrupt(), afterMs);
@@ -517,4 +519,255 @@ test('nmap: Ctrl-C stops a running scan', async () => {
   assert.match(r.output, /^Starting Nmap 7\.98/);
   assert.match(r.output, /caught SIGINT signal, cleaning up\n$/);
   assert.doesNotMatch(r.output, /Nmap done/);
+});
+
+/* ------------------------------------------------------------------ arp-scan */
+
+test('arp-scan -l: header, one line per responding host and the closing summary', async () => {
+  const sim = await lab();
+  const r = await sim.run('sudo arp-scan -l');
+  assert.equal(r.code, 0);
+  assert.equal(r.err, '');
+  const lines = r.out.split('\n');
+  assert.match(lines[0], /^Interface: eth0, type: EN10MB, MAC: 08:00:27:[0-9a-f:]{8}, IPv4: 10\.10\.10\.5$/);
+  assert.equal(lines[1], 'Starting arp-scan 1.10.0 with 256 hosts (https://github.com/royhills/arp-scan)');
+  assert.match(lines[2], /^10\.10\.10\.1\t00:1b:21:[0-9a-f:]{8}\tIntel Corporate$/);
+  assert.match(lines[3], /^10\.10\.10\.10\t00:0c:29:[0-9a-f:]{8}\tVMware, Inc\.$/);
+  assert.equal(lines.filter((l) => /^10\.10\.10\.\d+\t/.test(l)).length, 11, 'every lab host answers ARP, the scanner itself is not listed');
+  assert.match(r.out, /\n10\.10\.10\.50\t00:15:5d:[0-9a-f:]{8}\tMicrosoft Corporation\n/, 'a host that drops ICMP still answers ARP');
+  assert.match(r.out, /\n10\.10\.10\.90\t[0-9a-f:]{17}\tVMware, Inc\.\n\n11 packets received by filter, 0 packets dropped by kernel\n/);
+  const end = /\nEnding arp-scan 1\.10\.0: 256 hosts scanned in (\d\.\d{3}) seconds \((\d+\.\d\d) hosts\/sec\)\. 11 responded\n$/.exec(r.out);
+  assert.ok(end, 'closing summary');
+  assert.ok(+end[1] > 1.5 && +end[1] < 2.6, 'a /24 takes about two seconds: ' + end[1]);
+  assert.ok(Math.abs(256 / +end[1] - +end[2]) < 0.1, 'the rate matches the duration');
+  assert.equal((await sim.run('sudo arp-scan --localnet')).out.split('\n').length, lines.length);
+});
+
+test('arp-scan: explicit targets, ranges, -I, -q and -x', async () => {
+  const sim = await lab();
+  let r = await sim.run('sudo arp-scan -I eth0 10.10.10.1-10.10.10.20');
+  assert.match(r.out, /Starting arp-scan 1\.10\.0 with 20 hosts /);
+  assert.deepEqual(r.out.split('\n').filter((l) => /\t/.test(l)).map((l) => l.split('\t')[0]), ['10.10.10.1', '10.10.10.10', '10.10.10.20']);
+  assert.match(r.out, /Ending arp-scan 1\.10\.0: 20 hosts scanned in 1\.\d{3} seconds \(\d+\.\d\d hosts\/sec\)\. 3 responded\n$/);
+
+  r = await sim.run('sudo arp-scan 10.10.10.0/28 --plain --quiet');
+  assert.match(r.out, /^10\.10\.10\.1\t[0-9a-f:]{17}\n10\.10\.10\.10\t[0-9a-f:]{17}\n$/, 'plain output has no header or footer, quiet output no vendor');
+  assert.match((await sim.run('sudo arp-scan 10.10.10.0:255.255.255.240')).out, /with 16 hosts /);
+
+  r = await sim.run('sudo arp-scan dc01.halcyon.lab 10.10.10.99 nosuchhost.halcyon.lab');
+  assert.equal(r.err, 'WARNING: get_host_address failed for "nosuchhost.halcyon.lab": Name or service not known - target ignored\n');
+  assert.match(r.out, /with 2 hosts [^\n]*\n10\.10\.10\.50\t[^\n]*\n\n1 packets received by filter, 0 packets dropped by kernel\nEnding arp-scan 1\.10\.0: 2 hosts scanned in \d\.\d{3} seconds [^\n]*\. 1 responded\n$/);
+
+  r = await sim.run('sudo arp-scan 10.10.10.10 10.10.10.20');
+  assert.match(r.out, /2 hosts scanned in 0\.\d{3} seconds/, 'nothing to wait for when every host answered');
+  assert.equal((await sim.run("sudo arp-scan -l -x | cut -f1 | tail -2")).out, '10.10.10.80\n10.10.10.90\n', 'usable in a pipeline');
+});
+
+test('arp-scan: needs root, and its error paths', async () => {
+  const sim = await lab();
+  let r = await sim.run('arp-scan -l');
+  assert.deepEqual([r.code, r.out, r.err], [1, '', "pcap_activate: eth0: You don't have permission to perform this capture on that device (socket: Operation not permitted)\n"]);
+  r = await sim.run('sudo arp-scan');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^Usage: arp-scan \[options\] \[hosts\.\.\.\]\n\nTarget hosts must be specified on the command line unless the --file or\n--localnet option is used\.\n/);
+  assert.match(r.err, /\nuse "arp-scan --help" for detailed information on the available options\.\n/);
+  r = await sim.run('sudo arp-scan --bogus');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^arp-scan: unrecognized option '--bogus'\nUsage: arp-scan /);
+  r = await sim.run('sudo arp-scan -l 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [1, 'ERROR: You can not specify targets with the --localnet option\n']);
+  r = await sim.run('sudo arp-scan -I eth7 -l');
+  assert.deepEqual([r.code, r.err], [1, 'ioctl: No such device\n']);
+  r = await sim.run('sudo arp-scan nosuchhost.halcyon.lab');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /target ignored\nERROR: No hosts to process\.\n$/);
+  r = await sim.run('arp-scan --help');
+  assert.equal(r.code, 0);
+  assert.match(r.out, /\n--localnet or -l\tGenerate addresses from network interface configuration\.\n/);
+  assert.match((await sim.run('arp-scan -V')).out, /^arp-scan 1\.10\.0\n\nCopyright \(C\) 2005-2022 Roy Hills\n/);
+  assert.match((await sim.run('man arp-scan')).out, /Send ARP requests to target hosts and display responses/);
+});
+
+test('arp-scan: addresses outside the scope are not probed', async () => {
+  const sim = await lab();
+  const r = await sim.run('sudo arp-scan 192.168.56.0/24 10.10.10.10');
+  assert.equal(r.err.match(/Out-of-scope target blocked/g).length, 1);
+  assert.match(r.err, /arp-scan is an active testing tool/);
+  assert.match(r.err, /\[kalima\] 255 more addresses of 192\.168\.56\.0\/24 outside the scope: skipped\./);
+  assert.match(r.out, /\n10\.10\.10\.10\t/);
+  assert.match(r.out, /: 1 hosts scanned in [^\n]* 1 responded\n$/);
+});
+
+/* --------------------------------------------------------------------- fping */
+
+test('fping: alive and unreachable targets, exit status', async () => {
+  const sim = await lab();
+  let r = await sim.run('fping web01.halcyon.lab 10.10.10.20');
+  assert.deepEqual([r.code, r.out, r.err], [0, 'web01.halcyon.lab is alive\n10.10.10.20 is alive\n', '']);
+
+  r = await sim.run('fping 10.10.10.10 dc01.halcyon.lab');
+  assert.deepEqual([r.code, r.out, r.err], [1, '10.10.10.10 is alive\ndc01.halcyon.lab is unreachable\n', ''], 'a host that drops ICMP looks unreachable');
+
+  r = await sim.run('fping 10.10.10.99');
+  assert.equal(r.out, '10.10.10.99 is unreachable\n');
+  assert.equal(r.err, 'ICMP Host Unreachable from 10.10.10.5 for ICMP Echo sent to 10.10.10.99\n'.repeat(3), 'the kernel reports the failed ARP lookup');
+
+  r = await sim.run('fping nosuchhost.halcyon.lab 10.10.10.10');
+  assert.deepEqual([r.code, r.out, r.err], [2, '10.10.10.10 is alive\n', 'nosuchhost.halcyon.lab: Name or service not known\n']);
+
+  r = await sim.run('fping -e 10.10.10.10 10.10.10.60');
+  assert.match(r.out, /^10\.10\.10\.10 is alive \(0\.\d{3} ms\)\n10\.10\.10\.60 is alive \(\d\.\d\d ms\)\n$/);
+  assert.equal((await sim.run('fping -A web01.halcyon.lab')).out, '10.10.10.10 is alive\n');
+  assert.equal((await sim.run('fping -n 10.10.10.30')).out, 'db01.halcyon.lab is alive\n');
+  r = await sim.run('fping -q 10.10.10.10 10.10.10.99');
+  assert.deepEqual([r.code, r.out, r.err], [1, '', '']);
+});
+
+test('fping -a, -u and -g sweep a range', async () => {
+  const sim = await lab();
+  let r = await sim.run('fping -a -g 10.10.10.0/24 2>/dev/null');
+  assert.equal(r.code, 1);
+  assert.equal(r.out, ['1', '5', '10', '20', '30', '40', '53', '60', '70', '80'].map((n) => '10.10.10.' + n + '\n').join(''), 'the hosts that answer ICMP; dc01 and backup01 do not');
+
+  r = await sim.run('fping -u -g 10.10.10.8 10.10.10.11 2>/dev/null');
+  assert.equal(r.out, '10.10.10.8\n10.10.10.9\n10.10.10.11\n');
+  r = await sim.run('fping -g 10.10.10.0/30');
+  assert.equal(r.out, '10.10.10.1 is alive\n10.10.10.2 is unreachable\n', 'network and broadcast address are left out');
+  r = await sim.run('fping -g 10.10.10.10/32');
+  assert.equal(r.out, '10.10.10.10 is alive\n');
+  assert.equal((await sim.run('fping -a -g 10.10.10.0/24 2>/dev/null | wc -l')).out.trim(), '10');
+
+  await sim.run('printf "10.10.10.10\\n# printers\\n  printer.halcyon.lab  the big one\\n" > /tmp/hosts.txt');
+  assert.equal((await sim.run('fping -f /tmp/hosts.txt')).out, '10.10.10.10 is alive\nprinter.halcyon.lab is alive\n');
+  assert.equal((await sim.run('echo 10.10.10.30 | fping')).out, '10.10.10.30 is alive\n');
+  assert.equal((await sim.run('cat /tmp/hosts.txt | fping -a -f -')).out, '10.10.10.10\nprinter.halcyon.lab\n');
+});
+
+test('fping -c: per-ping lines, per-target statistics, -q and -s', async () => {
+  const sim = await lab();
+  let r = await sim.run('fping -c 3 web01.halcyon.lab 10.10.10.50');
+  assert.equal(r.code, 1);
+  const out = r.out.split('\n');
+  assert.equal(out.length, 7);
+  assert.match(out[0], /^web01\.halcyon\.lab : \[0\], 64 bytes, 0\.\d{3} ms \(0\.\d{3} avg, 0% loss\)$/);
+  assert.equal(out[1], '10.10.10.50       : [0], timed out (NaN avg, 100% loss)');
+  assert.match(out[4], /^web01\.halcyon\.lab : \[2\], 64 bytes, /);
+  assert.match(r.err, /^\nweb01\.halcyon\.lab : xmt\/rcv\/%loss = 3\/3\/0%, min\/avg\/max = 0\.\d{3}\/0\.\d{3}\/0\.\d{3}\n10\.10\.10\.50       : xmt\/rcv\/%loss = 3\/0\/100%\n$/);
+
+  r = await sim.run('fping -q -c 2 10.10.10.10');
+  assert.equal(r.out, '');
+  assert.match(r.err, /^10\.10\.10\.10 : xmt\/rcv\/%loss = 2\/2\/0%, min\/avg\/max = [\d.]+\/[\d.]+\/[\d.]+\n$/);
+  r = await sim.run('fping -q -c 1 -g 10.10.10.8/30 2>&1 | grep -c "0/100%"');
+  assert.equal(r.out, '1\n', 'the summary can be filtered once stderr is redirected');
+
+  r = await sim.run('fping -s 10.10.10.10 10.10.10.50');
+  assert.match(r.err, /^\n {7}2 targets\n {7}1 alive\n {7}1 unreachable\n {7}0 unknown addresses\n\n {7}1 timeouts \(waiting for response\)\n {7}5 ICMP Echos sent\n {7}1 ICMP Echo Replies received\n {7}0 other ICMP received\n\n 0\.\d{3} ms \(min round trip time\)\n 0\.\d{3} ms \(avg round trip time\)\n 0\.\d{3} ms \(max round trip time\)\n {8}4\.\d{3} sec \(elapsed real time\)\n\n$/);
+  r = await sim.run('fping -s -r 0 10.10.10.50');
+  assert.match(r.err, /\n 0\.000 ms \(min round trip time\)\n/);
+});
+
+test('fping: usage, version, option errors and the scope guard', async () => {
+  const sim = await lab();
+  let r = await sim.run('fping -h');
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^Usage: fping \[options\] \[targets\.\.\.\]\n\nProbing options:\n/);
+  assert.match(r.out, /\n   -a, --alive        show targets that are alive\n/);
+  assert.equal((await sim.run('fping -v')).out, 'fping: Version 5.4\n');
+  r = await sim.run('fping -Z 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [1, "fping: invalid option -- 'Z'\nsee 'fping -h' for usage information\n"]);
+  r = await sim.run('fping --bogus 10.10.10.10');
+  assert.equal(r.err, "fping: invalid option -- 'bogus'\nsee 'fping -h' for usage information\n");
+  r = await sim.run('fping -a -u 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [1, 'fping: specify only one of a, u\n']);
+  r = await sim.run('fping -g');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^Usage: fping /);
+  r = await sim.run('fping -g 10.0.0.0/8');
+  assert.deepEqual([r.code, r.err], [1, 'fping: -g parameter generates too many addresses\n']);
+  r = await sim.run('fping -g 10.10.10.0/40');
+  assert.equal(r.err, 'fping: netmask must be between 1 and 32 (is: 40)\n');
+  r = await sim.run('fping -f /tmp/missing.txt');
+  assert.deepEqual([r.code, r.err], [4, 'fping: fopen : No such file or directory\n']);
+  assert.match((await sim.run('man fping')).out, /send ICMP ECHO_REQUEST packets to network hosts/);
+
+  r = await sim.run('fping 8.8.8.8 10.10.10.10');
+  assert.match(r.err, /Out-of-scope target blocked: 8\.8\.8\.8/);
+  assert.equal(r.out, '10.10.10.10 is alive\n');
+  r = await sim.run('fping -a -g 203.0.113.0/29');
+  assert.equal(r.err.match(/Out-of-scope target blocked/g).length, 1);
+  assert.deepEqual([r.code, r.out], [1, '']);
+});
+
+/* -------------------------------------------------------------------- arping */
+
+test('arping: replies, timeouts and statistics', async () => {
+  const sim = await lab();
+  let r = await sim.run('sudo arping -c 3 10.10.10.50');
+  assert.equal(r.code, 0);
+  const lines = r.out.split('\n');
+  assert.equal(lines[0], 'ARPING 10.10.10.50');
+  for (let i = 0; i < 3; i++) assert.match(lines[1 + i], new RegExp('^60 bytes from 00:15:5d:[0-9a-f:]{8} \\(10\\.10\\.10\\.50\\): index=' + i + ' time=(\\d{3}\\.\\d{3} usec|\\d\\.\\d{3} msec)$'));
+  assert.deepEqual(lines.slice(4, 7), ['', '--- 10.10.10.50 statistics ---', '3 packets transmitted, 3 packets received,   0% unanswered (0 extra)']);
+  assert.match(lines[7], /^rtt min\/avg\/max\/std-dev = 0\.\d{3}\/0\.\d{3}\/\d\.\d{3}\/0\.\d{3} ms$/);
+
+  r = await sim.run('sudo arping -c 2 10.10.10.99');
+  assert.deepEqual([r.code, r.out], [1, 'ARPING 10.10.10.99\nTimeout\nTimeout\n\n--- 10.10.10.99 statistics ---\n2 packets transmitted, 0 packets received, 100% unanswered (0 extra)\n\n']);
+
+  r = await sim.run('sudo arping -c 1 -I eth0 gw.halcyon.lab');
+  assert.match(r.out, /^ARPING 10\.10\.10\.1\n60 bytes from 00:1b:21:[0-9a-f:]{8} \(10\.10\.10\.1\): index=0 /);
+  r = await sim.run('sudo arping -r -c 2 gw.halcyon.lab');
+  assert.match(r.out, /^(00:1b:21:[0-9a-f:]{8}\n){2}$/, '-r prints only the MAC address');
+  assert.equal((await sim.run('sudo arping -r -c 1 10.10.10.10 | tr a-f A-F')).out, sim.K.net.hostById('web01').mac.toUpperCase() + '\n');
+  r = await sim.run('sudo arping -q -c 1 10.10.10.10');
+  assert.deepEqual([r.code, r.out], [0, '']);
+  assert.equal((await sim.run('sudo arping -q -c 1 10.10.10.99')).code, 1);
+});
+
+test('arping: needs root, error paths and the scope guard', async () => {
+  const sim = await lab();
+  let r = await sim.run('arping -c 1 10.10.10.10');
+  assert.deepEqual([r.code, r.out, r.err], [1, '', 'arping: libnet_init(LIBNET_LINK, <null>): libnet_open_link(): UID/EUID 0 or capability CAP_NET_RAW required\n']);
+  r = await sim.run('sudo arping');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^ARPing 2\.26, by Thomas Habets <thomas@habets\.se>\nusage: arping /);
+  r = await sim.run('sudo arping -Z 10.10.10.10');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^arping: invalid option -- 'Z'\nARPing 2\.26, /);
+  r = await sim.run('sudo arping -c 1 -i eth7 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [1, 'arping: libnet_init(LIBNET_LINK, eth7): libnet_check_iface() ioctl: No such device\n']);
+  r = await sim.run('sudo arping -c 1 nosuchhost.halcyon.lab');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^arping: Can't resolve nosuchhost\.halcyon\.lab, or nosuchhost\.halcyon\.lab is broadcast: /);
+  r = await sim.run('sudo arping -c 1 8.8.8.8');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /Out-of-scope target blocked: 8\.8\.8\.8/);
+  assert.equal(r.out, '');
+  assert.equal((await sim.run('arping --help')).code, 0);
+  assert.match((await sim.run('man arping')).out, /sends arp and\/or ip pings to a given host/);
+});
+
+test('arping and fping: Ctrl-C ends the run with the statistics', async () => {
+  const sim = await lab();
+  let r = await interrupted(sim, 'sudo arping 10.10.10.10');
+  assert.match(r.output, /ARPING 10\.10\.10\.10\n60 bytes from [0-9a-f:]{17} \(10\.10\.10\.10\): index=0 [^\n]*\n\n--- 10\.10\.10\.10 statistics ---\n1 packets transmitted, 1 packets received, {3}0% unanswered \(0 extra\)\n/);
+  assert.equal(r.code, 0, 'like ping, the exit status says whether a reply came');
+
+  const sim2 = await lab();
+  r = await interrupted(sim2, 'fping -c 50 10.10.10.10');
+  assert.match(r.output, /10\.10\.10\.10 : \[0\], 64 bytes, [^\n]*\n\n10\.10\.10\.10 : xmt\/rcv\/%loss = 1\/1\/0%, min\/avg\/max = /);
+
+  const sim3 = await lab();
+  r = await interrupted(sim3, 'sudo arp-scan -t 5000 10.10.10.99');
+  assert.equal(r.code, 130);
+  assert.doesNotMatch(r.output, /Ending arp-scan/);
+});
+
+test('discovery tools: tab completion offers lab hosts and interfaces', async () => {
+  const sim = await lab();
+  const complete = (l) => sim.shell.complete(l, l.length).items.map((i) => i.text);
+  assert.deepEqual(complete('fping db'), ['db01.halcyon.lab']);
+  assert.deepEqual(complete('sudo arp-scan 10.'), ['10.10.10.0/24']);
+  assert.deepEqual(complete('sudo arp-scan -I e'), ['eth0']);
+  assert.deepEqual(complete('sudo arping -i e'), ['eth0']);
+  assert.ok(complete('sudo arping ').includes('gw.halcyon.lab'));
 });

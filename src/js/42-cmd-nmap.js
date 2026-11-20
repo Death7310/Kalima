@@ -1363,6 +1363,19 @@
   // arp-scan names vendors from the IEEE registry, which spells some of them differently from Nmap.
   const IEEE_NAMES = { VMware: 'VMware, Inc.', Microsoft: 'Microsoft Corporation', 'Axis Communications': 'Axis Communications AB', 'Oracle VirtualBox virtual NIC': 'PCS Systemtechnik GmbH' };
   const ARPSCAN_PACKET_MS = 2.56; // gap between two requests at the default bandwidth
+  const ARPSCAN_BACKOFF = 1.5;    // each further attempt waits this much longer for its answer
+
+  /** Time arp-scan spends on hosts that stay silent: every retry pass, then the last timeout. */
+  function arpScanSilence(silent, firstPass, retry, timeout) {
+    let ms = 0; let pass = firstPass;
+    for (let attempt = 1; attempt < retry; attempt++) {
+      ms += Math.max(0, timeout - pass);
+      pass = silent * ARPSCAN_PACKET_MS;
+      ms += pass;
+      timeout *= ARPSCAN_BACKOFF;
+    }
+    return ms + timeout;
+  }
 
   const etherIface = (machine, name) => (name ? machine.ifaces.find((i) => i.name === name) : machine.primaryIface());
   /** The lab host that answers ARP for this address on the interface's segment, if any. */
@@ -1404,7 +1417,7 @@
     for (const word of g.opts.l ? [iface.ip + '/' + iface.bits] : g.rest) {
       const spec = arpScanTarget(ctx.machine, word);
       if (spec) specs.push(spec);
-      else ctx.err('WARNING: get_host_address failed for "' + word + '" - target ignored\n');
+      else ctx.err('WARNING: get_host_address failed for "' + word + '": Name or service not known - target ignored\n');
     }
     if (!specs.length) { ctx.err('ERROR: No hosts to process.\n'); return 1; }
     const say = (line) => { if (!g.opts.x) ctx.out(line + '\n'); };
@@ -1412,6 +1425,7 @@
     say('Starting arp-scan ' + ARPSCAN_VERSION + ' with ' + specs.reduce((n, sp) => n + sp.count, 0) + ' hosts (' + ARPSCAN_URL + ')');
     let hosts = 0; let responded = 0; let elapsed = 0; let batch = 0;
     const wait = (ms) => { elapsed += ms; return ctx.sleep(ms); };
+    const sendBatch = () => { const ms = batch * ARPSCAN_PACKET_MS; batch = 0; return wait(ms); };
     for (const spec of specs) {
       for (const ip of guardedAddresses(ctx, spec, 'arp-scan')) {
         hosts++;
@@ -1420,12 +1434,12 @@
           responded++;
           ctx.out(ip + '\t' + host.mac + (g.opts.q ? '' : '\t' + (IEEE_NAMES[host.macVendor] || host.macVendor || '(Unknown)')) + '\n');
         }
-        if (++batch === 64) { await wait(batch * ARPSCAN_PACKET_MS); batch = 0; }
+        if (++batch === 64) await sendBatch();
       }
     }
-    // Hosts that stay silent are asked again before arp-scan gives up on them.
+    await sendBatch();
     const silent = hosts - responded;
-    await wait(batch * ARPSCAN_PACKET_MS + (silent ? (retry - 1) * silent * ARPSCAN_PACKET_MS + retry * timeout * 0.6 + timeout * 0.5 : 60) + K.net.jitter(30, 40));
+    await wait((silent ? arpScanSilence(silent, elapsed, retry, timeout) : 0) + K.net.jitter(40, 40));
     say('');
     say(responded + ' packets received by filter, 0 packets dropped by kernel');
     const secs = elapsed / 1000;
@@ -1469,6 +1483,7 @@
     '                      limited to at most 131072 targets',
     '                      (give start and end IP in the target list, or a CIDR address)',
     '                      (ex. fping -g 192.168.1.0 192.168.1.255 or fping -g 192.168.1.0/24)',
+    '   -h, --help         show this page',
     '   -i, --interval=MSEC  interval between sending ping packets (default: 10 ms)',
     '   -p, --period=MSEC  interval between ping packets to one target (in ms)',
     '                      (in loop and count modes, default: 1000 ms)',
@@ -1493,19 +1508,44 @@
     return ms < 1 ? ms.toFixed(3) : ms < 10 ? ms.toFixed(2) : ms < 100 ? ms.toFixed(1) : ms.toFixed(0);
   }
 
-  /** The address list of fping -g: a CIDR block without its network and broadcast address, or START END. */
+  /**
+   * The address list of fping -g: a CIDR block without its network and broadcast address, or START END.
+   * Returns a specification, { fail } with fping's message, or null when the usage text is due.
+   */
   function fpingGenerate(args) {
+    const unparsable = (sep, addr) => ({ fail: 'fping' + sep + " can't parse address " + addr + ': Name or service not known\n' });
     let lo; let hi;
     if (args.length === 1) {
-      const m = /^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/.exec(args[0]);
-      const block = m && +m[2] >= 1 && +m[2] <= 32 ? U.parseCidr(args[0]) : null;
-      if (!block) return null;
-      const whole = block.bits >= 31;
+      const slash = args[0].lastIndexOf('/');
+      if (slash < 0) return null;
+      const addr = args[0].slice(0, slash); const mask = args[0].slice(slash + 1);
+      if (!U.isIPv4(addr)) return unparsable(',', addr);
+      if (!/^\d+$/.test(mask) || +mask < 1 || +mask > 32) return { fail: 'fping: netmask must be between 1 and 32 (is: ' + mask + ')\n' };
+      const block = U.parseCidr(args[0]); const whole = block.bits >= 31;
       lo = block.network + (whole ? 0 : 1); hi = block.broadcast - (whole ? 0 : 1);
-    } else if (args.length === 2 && U.isIPv4(args[0]) && U.isIPv4(args[1])) {
+    } else if (args.length === 2) {
+      const bad = args.find((a) => !U.isIPv4(a));
+      if (bad) return unparsable(':', bad);
       lo = U.ipToInt(args[0]); hi = U.ipToInt(args[1]);
     } else return null;
+    if (hi - lo + 1 > FPING_MAX_GENERATE) return { fail: 'fping: -g parameter generates too many addresses\n' };
     return rangeSpec(args.join(' '), lo, hi);
+  }
+
+  /** K.getopt words its errors like GNU getopt; fping's own option parser words them like this. */
+  function fpingOptionError(err) {
+    const long = /'--([^']+)'/.exec(err);
+    if (!long) return err;
+    const what = /requires an argument/.test(err) ? 'option requires an argument' : /allow an argument/.test(err) ? 'option takes no arguments' : 'invalid option';
+    return what + " -- '" + long[1] + "'";
+  }
+
+  /** Everything on standard input: the pipe, or lines typed at the terminal until Ctrl-D. */
+  async function stdinText(ctx) {
+    if (ctx.stdin != null) return ctx.stdin;
+    let text = '';
+    for (let line = await ctx.readLine(''); line != null; line = await ctx.readLine('')) text += line + '\n';
+    return text;
   }
 
   /** Resolve fping's target words; returns { targets: [{ip, label}], unknown } after the scope guard. */
@@ -1530,7 +1570,7 @@
       long: ['alive', 'addr', 'count=', 'rdns', 'elapsed', 'file=', 'generate', 'help', 'interval=', 'name', 'period=', 'quiet', 'retry=', 'stats', 'timeout=', 'unreach', 'version'],
       alias: { alive: 'a', addr: 'A', count: 'c', rdns: 'd', elapsed: 'e', file: 'f', generate: 'g', help: 'h', interval: 'i', name: 'n', period: 'p', quiet: 'q', retry: 'r', stats: 's', timeout: 't', unreach: 'u', version: 'v' },
     });
-    if (g.err) return { fail: 'fping: ' + g.err + "\nsee 'fping -h' for usage information\n" };
+    if (g.err) return { fail: 'fping: ' + fpingOptionError(g.err) + "\nsee 'fping -h' for usage information\n" };
     const o = { opts: g.opts, words: g.rest, alive: g.opts.a, unreach: g.opts.u, quiet: g.opts.q, stats: g.opts.s, elapsed: g.opts.e, byAddr: g.opts.A, byName: g.opts.n || g.opts.d };
     const number = (key, fallback, min) => {
       if (g.opts[key] == null) return fallback;
@@ -1559,7 +1599,7 @@
           waiting.push(t);
           if (r.status === 'unreachable' && attempt < o.retry) {
             st.other++;
-            if (!o.quiet) ctx.err('ICMP Host Unreachable from ' + r.from + ' for ICMP Echo sent to ' + t.ip + '\n');
+            if (!o.quiet) ctx.err('ICMP Host Unreachable from ' + r.from + ' for ICMP Echo sent to ' + t.label + (U.isIPv4(t.label) ? '' : ' (' + r.from + ')') + '\n');
           }
         }
         await st.wait(o.interval);
@@ -1590,7 +1630,7 @@
         if (seq < o.count - 1) await st.wait(Math.max(0, o.period - targets.length * o.interval));
       }
     } finally {
-      ctx.err('\n');
+      if (!o.quiet) ctx.err('\n');
       for (const t of targets) {
         const rtt = t.times.length ? ', min/avg/max = ' + [Math.min.apply(null, t.times), t.times.reduce((a, b) => a + b, 0) / t.times.length, Math.max.apply(null, t.times)].map(fpingTime).join('/') : '';
         ctx.err(t.label.padEnd(width) + ' : xmt/rcv/%loss = ' + t.xmt + '/' + t.times.length + '/' + (t.xmt ? loss(t) : 0) + '%' + rtt + '\n');
@@ -1601,12 +1641,12 @@
   function fpingStats(ctx, targets, unknown, st) {
     const n = (v) => String(v).padStart(8);
     const alive = targets.filter((t) => t.alive).length;
-    const rtt = (v) => ' ' + (st.replies.length ? fpingTime(v) : '0.00') + ' ms';
+    const rtt = (v) => ' ' + fpingTime(st.replies.length ? v : 0) + ' ms';
     const sum = st.replies.reduce((a, b) => a + b, 0);
     ctx.err(['', n(targets.length) + ' targets', n(alive) + ' alive', n(targets.length - alive) + ' unreachable', n(unknown) + ' unknown addresses', '',
       n(st.timeouts) + ' timeouts (waiting for response)', n(st.sent) + ' ICMP Echos sent', n(st.replies.length) + ' ICMP Echo Replies received', n(st.other) + ' other ICMP received', '',
       rtt(Math.min.apply(null, st.replies)) + ' (min round trip time)', rtt(sum / st.replies.length) + ' (avg round trip time)', rtt(Math.max.apply(null, st.replies)) + ' (max round trip time)',
-      (st.elapsed / 1000).toFixed(3).padStart(12) + ' sec (elapsed real time)', '', ''].join('\n'));
+      ' ' + (st.elapsed / 1000).toFixed(3).padStart(12) + ' sec (elapsed real time)', '', ''].join('\n'));
   }
 
   async function fpingRun(ctx) {
@@ -1614,30 +1654,30 @@
     if (o.fail) { ctx.err(o.fail); return 1; }
     if (o.opts.h) { ctx.out(FPING_USAGE); return 0; }
     if (o.opts.v) { ctx.out('fping: Version 5.4\n'); return 0; }
-    let words = o.words;
+    let words = o.words; const file = o.opts.f;
+    if ((file != null && (words.length || o.opts.g)) || (o.opts.g && !words.length)) { ctx.err(FPING_USAGE); return 1; }
     if (o.opts.g) {
       o.generate = fpingGenerate(words);
-      if (!o.generate) { ctx.err(FPING_USAGE); return 1; }
-      if (o.generate.count > FPING_MAX_GENERATE) { ctx.err('fping: -g parameter generates too many addresses\n'); return 1; }
-    } else if (o.opts.f != null || (!words.length && ctx.stdin != null)) {
-      let text = ctx.stdin || '';
-      if (o.opts.f != null && o.opts.f !== '-') {
-        try { text = ctx.fs.read(o.opts.f); } catch (e) { ctx.err('fping: fopen: ' + e.message + '\n'); return 4; }
+      if (!o.generate || o.generate.fail) { ctx.err(o.generate ? o.generate.fail : FPING_USAGE); return 1; }
+    } else if (!words.length) {
+      // Without targets fping reads them from a file, by default standard input.
+      let text;
+      if (file == null || file === '-') text = await stdinText(ctx);
+      else {
+        try { text = ctx.fs.read(file); } catch (e) { ctx.err('fping: fopen : ' + e.message + '\n'); return 4; }
       }
       words = text.split('\n').map((line) => line.replace(/#.*/, '').trim().split(/\s+/)[0]).filter(Boolean);
-    } else if (!words.length) { ctx.err(FPING_USAGE); return 1; }
+    }
     const found = fpingTargets(ctx, o, words);
+    if (!found.targets.length) return found.unknown ? 2 : 1;
     const st = { sent: 0, replies: [], timeouts: 0, other: 0, elapsed: 0, wait(ms) { st.elapsed += ms; return ctx.sleep(ms); } };
-    let interrupted = false;
     try {
       if (o.count) await fpingCount(ctx, o, found.targets, st);
       else await fpingOnce(ctx, o, found.targets, st);
     } catch (e) {
-      if (!(e instanceof K.Interrupt)) throw e;
-      interrupted = true;
+      if (!(e instanceof K.Interrupt)) throw e; // Ctrl-C ends the run early; the summary and the exit status still follow
     }
     if (o.stats) fpingStats(ctx, found.targets, found.unknown, st);
-    if (interrupted) return 130;
     return found.unknown ? 2 : found.targets.every((t) => t.alive) ? 0 : 1;
   }
 
@@ -1675,6 +1715,7 @@
   const ARPING_USAGE = 'ARPing 2.26, by Thomas Habets <thomas@habets.se>\n' +
     'usage: arping [ -qr ] [ -c <count> ] [ -i <interface> ] <host/ip>\nFor complete usage info, use --help or check the manpage.\n';
 
+  const ARPING_INTERVAL = 1000;
   const arpingTime = (ms) => (ms < 1 ? (ms * 1000).toFixed(3) + ' usec' : ms < 1000 ? ms.toFixed(3) + ' msec' : (ms / 1000).toFixed(3) + ' sec');
 
   function arpingStats(ctx, ip, sent, times) {
@@ -1711,23 +1752,25 @@
     }
     const say = (line) => { if (!g.opts.q) ctx.out(line + '\n'); };
     const host = arpNeighbour(iface, res.ip);
-    const times = []; let sent = 0; let interrupted = false;
+    const times = []; let sent = 0;
     if (!g.opts.r) say('ARPING ' + res.ip);
     try {
-      for (; sent < count; sent++) {
-        if (sent) await ctx.sleep(1000);
-        if (!host) { if (!g.opts.r) say('Timeout'); continue; }
-        const rtt = K.net.jitter(host.latency.base, host.latency.jitter);
-        times.push(rtt);
-        say(g.opts.r ? host.mac : '60 bytes from ' + host.mac + ' (' + res.ip + '): index=' + sent + ' time=' + arpingTime(rtt));
+      while (sent < count) {
+        if (host) {
+          const rtt = K.net.jitter(host.latency.base, host.latency.jitter);
+          times.push(rtt);
+          say(g.opts.r ? host.mac : '60 bytes from ' + host.mac + ' (' + res.ip + '): index=' + sent + ' time=' + arpingTime(rtt));
+        }
+        sent++;
+        // The next request goes out a second later; a missing answer is only known by then.
+        if (sent < count || !host) await ctx.sleep(ARPING_INTERVAL);
+        if (!host && !g.opts.r) say('Timeout');
       }
-      if (!host) await ctx.sleep(1000);
     } catch (e) {
-      if (!(e instanceof K.Interrupt)) throw e;
-      interrupted = true; sent++;
+      if (!(e instanceof K.Interrupt)) throw e; // like ping, Ctrl-C ends the run with the statistics
     }
     if (!g.opts.q && !g.opts.r) arpingStats(ctx, res.ip, sent, times);
-    return interrupted ? 130 : times.length ? 0 : 1;
+    return times.length ? 0 : 1;
   }
 
   K.cmd.register({
