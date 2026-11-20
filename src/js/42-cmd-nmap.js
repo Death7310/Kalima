@@ -202,9 +202,16 @@
     return specFromSets(text, sets, U.isIPv4(m[1]) ? null : m[1], res.ip);
   }
 
-  const specHas = (spec, n) => spec.sets[0][n >>> 24] && spec.sets[1][(n >>> 16) & 255] && spec.sets[2][(n >>> 8) & 255] && spec.sets[3][n & 255];
+  /** A run of consecutive addresses (arp-scan's START-END, fping -g), usable wherever a parsed target is. */
+  const rangeSpec = (text, lo, hi) => ({ text, range: [lo, hi], count: Math.max(0, hi - lo + 1), name: null, ip: null });
+
+  function specHas(spec, n) {
+    if (spec.range) return n >= spec.range[0] && n <= spec.range[1];
+    return spec.sets[0][n >>> 24] && spec.sets[1][(n >>> 16) & 255] && spec.sets[2][(n >>> 8) & 255] && spec.sets[3][n & 255];
+  }
 
   function* addresses(spec) {
+    if (spec.range) { for (let n = spec.range[0]; n <= spec.range[1]; n++) yield U.intToIp(n); return; }
     const v = spec.vals;
     for (const a of v[0]) for (const b of v[1]) for (const c of v[2]) for (const d of v[3]) yield a + '.' + b + '.' + c + '.' + d;
   }
@@ -1302,5 +1309,446 @@
       '       sudo nmap -p 22,80,443 --reason web01.halcyon.lab\n              Check three ports on one host and show the evidence for each state.',
     run: nmapRun,
     complete: (info) => (info.cur[0] === '-' ? [] : labTargets()),
+  });
+
+  /* ------------------------------------------------------------------ arp-scan */
+
+  const ARPSCAN_VERSION = '1.10.0';
+  const ARPSCAN_URL = 'https://github.com/royhills/arp-scan';
+  const ARPSCAN_USAGE = [
+    'Usage: arp-scan [options] [hosts...]', '',
+    'Target hosts must be specified on the command line unless the --file or',
+    '--localnet option is used.', '',
+    'arp-scan uses raw sockets, which requires privileges on some systems:', '',
+    'Linux with POSIX.1e capabilities support using libcap:',
+    '       arp-scan is capabilities aware. It requires CAP_NET_RAW in the permitted',
+    '       set and only enables that capability for the required functions.',
+    'BSD and macOS:',
+    '       You need read/write access to /dev/bpf*',
+    'Any operating system:',
+    '       Running as root or SUID root will work on any OS but other methods',
+    '       are preferable where possible.', '',
+  ];
+  const ARPSCAN_FOOTER = ['Report bugs or send suggestions at ' + ARPSCAN_URL, 'See the arp-scan homepage at ' + ARPSCAN_URL];
+  const ARPSCAN_BRIEF = ARPSCAN_USAGE.concat(['use "arp-scan --help" for detailed information on the available options.', ''], ARPSCAN_FOOTER).join('\n') + '\n';
+  const ARPSCAN_HELP = ARPSCAN_USAGE.concat([
+    'The target hosts can be specified as IP addresses or hostnames. You can also',
+    'specify the target as IPnetwork/bits (e.g. 192.168.1.0/24) to specify all hosts',
+    'in the given network (network and broadcast addresses included), or',
+    'IPstart-IPend (e.g. 192.168.1.3-192.168.1.27) to specify all hosts in the',
+    'inclusive range, or IPnetwork:NetMask (e.g. 192.168.1.0:255.255.255.0) to',
+    'specify all hosts in the given network and mask.', '',
+    'Options:', '',
+    '--help or -h\t\tDisplay this usage message and exit.', '',
+    '--localnet or -l\tGenerate addresses from network interface configuration.',
+    '\t\t\tUse the network interface IP address and network mask',
+    '\t\t\tto generate the list of target host addresses.', '',
+    '--interface=<s> or -I <s> Use network interface <s>.',
+    '\t\t\tIf this option is not specified, arp-scan will search',
+    '\t\t\tthe system interface list for the lowest numbered,',
+    '\t\t\tconfigured up interface (excluding loopback).', '',
+    '--retry=<i> or -r <i>\tSet total number of attempts per host to <i>,',
+    '\t\t\tdefault=2.', '',
+    '--timeout=<i> or -t <i>\tSet initial per host timeout to <i> ms, default=500.', '',
+    '--quiet or -q\t\tOnly display minimal output. No protocol decoding.',
+    '\t\t\tOnly the IP address and MAC address are displayed.', '',
+    '--plain or -x\t\tDisplay plain output showing only responding hosts.',
+    '\t\t\tThis option suppresses the printing of the header and',
+    '\t\t\tfooter text.', '',
+    '--version or -V\t\tDisplay program version and exit.', '',
+  ], ARPSCAN_FOOTER).join('\n') + '\n';
+  const ARPSCAN_VERSION_TEXT = 'arp-scan ' + ARPSCAN_VERSION + '\n\nCopyright (C) 2005-2022 Roy Hills\n' +
+    'License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\n' +
+    'There is NO WARRANTY, to the extent permitted by law.\n\nlibpcap version 1.10.5 (with TPACKET_V3)\nBuilt with libcap POSIX.1e capability support.\n';
+  // arp-scan names vendors from the IEEE registry, which spells some of them differently from Nmap.
+  const IEEE_NAMES = { VMware: 'VMware, Inc.', Microsoft: 'Microsoft Corporation', 'Axis Communications': 'Axis Communications AB', 'Oracle VirtualBox virtual NIC': 'PCS Systemtechnik GmbH' };
+  const ARPSCAN_PACKET_MS = 2.56; // gap between two requests at the default bandwidth
+
+  const etherIface = (machine, name) => (name ? machine.ifaces.find((i) => i.name === name) : machine.primaryIface());
+  /** The lab host that answers ARP for this address on the interface's segment, if any. */
+  function arpNeighbour(iface, ip) {
+    const host = K.net.knownHost(ip);
+    return host && host.up && !host.inet && iface.ip && ip !== iface.ip && U.inCidr(ip, iface.ip + '/' + iface.bits) ? host : null;
+  }
+
+  /** One arp-scan target: address, name, NET/BITS, NET:MASK or START-END. Returns null when a name does not resolve. */
+  function arpScanTarget(machine, word) {
+    const range = /^(\d+\.\d+\.\d+\.\d+)-(\d+\.\d+\.\d+\.\d+)$/.exec(word);
+    if (range && U.isIPv4(range[1]) && U.isIPv4(range[2])) return rangeSpec(word, U.ipToInt(range[1]), U.ipToInt(range[2]));
+    const masked = /^(\d+\.\d+\.\d+\.\d+):(\d+\.\d+\.\d+\.\d+)$/.exec(word);
+    if (masked && U.isIPv4(masked[1]) && U.isIPv4(masked[2])) {
+      const bits = U.ipToInt(masked[2]).toString(2).replace(/0+$/, '').length;
+      return Object.assign(parseTarget(machine, masked[1] + '/' + bits), { text: word });
+    }
+    return /^[\d.]+(\/\d+)?$/.test(word) && !U.isIPv4(word.replace(/\/\d+$/, '')) ? null : parseTarget(machine, word);
+  }
+
+  async function arpScanRun(ctx) {
+    const g = ctx.getopt({
+      short: 'lI:r:t:qxVh', long: ['localnet', 'interface=', 'retry=', 'timeout=', 'quiet', 'plain', 'version', 'help'],
+      alias: { localnet: 'l', interface: 'I', retry: 'r', timeout: 't', quiet: 'q', plain: 'x', version: 'V', help: 'h' },
+    });
+    if (g.err) { ctx.err('arp-scan: ' + g.err + '\n' + ARPSCAN_BRIEF); return 1; }
+    if (g.opts.h) { ctx.out(ARPSCAN_HELP); return 0; }
+    if (g.opts.V) { ctx.out(ARPSCAN_VERSION_TEXT); return 0; }
+    if (!g.rest.length && !g.opts.l) { ctx.err(ARPSCAN_BRIEF); return 1; }
+    const iface = etherIface(ctx.machine, g.opts.I);
+    if (!iface) { ctx.err('ioctl: No such device\n'); return 1; }
+    if (!ctx.isRoot) {
+      ctx.err('pcap_activate: ' + iface.name + ": You don't have permission to perform this capture on that device (socket: Operation not permitted)\n");
+      return 1;
+    }
+    if (g.opts.l && g.rest.length) { ctx.err('ERROR: You can not specify targets with the --localnet option\n'); return 1; }
+    const retry = Math.max(1, parseInt(g.opts.r, 10) || 2); const timeout = parseInt(g.opts.t, 10) || 500;
+    const specs = [];
+    for (const word of g.opts.l ? [iface.ip + '/' + iface.bits] : g.rest) {
+      const spec = arpScanTarget(ctx.machine, word);
+      if (spec) specs.push(spec);
+      else ctx.err('WARNING: get_host_address failed for "' + word + '" - target ignored\n');
+    }
+    if (!specs.length) { ctx.err('ERROR: No hosts to process.\n'); return 1; }
+    const say = (line) => { if (!g.opts.x) ctx.out(line + '\n'); };
+    say('Interface: ' + iface.name + ', type: EN10MB, MAC: ' + iface.mac + ', IPv4: ' + (iface.ip || '(none)'));
+    say('Starting arp-scan ' + ARPSCAN_VERSION + ' with ' + specs.reduce((n, sp) => n + sp.count, 0) + ' hosts (' + ARPSCAN_URL + ')');
+    let hosts = 0; let responded = 0; let elapsed = 0; let batch = 0;
+    const wait = (ms) => { elapsed += ms; return ctx.sleep(ms); };
+    for (const spec of specs) {
+      for (const ip of guardedAddresses(ctx, spec, 'arp-scan')) {
+        hosts++;
+        const host = arpNeighbour(iface, ip);
+        if (host) {
+          responded++;
+          ctx.out(ip + '\t' + host.mac + (g.opts.q ? '' : '\t' + (IEEE_NAMES[host.macVendor] || host.macVendor || '(Unknown)')) + '\n');
+        }
+        if (++batch === 64) { await wait(batch * ARPSCAN_PACKET_MS); batch = 0; }
+      }
+    }
+    // Hosts that stay silent are asked again before arp-scan gives up on them.
+    const silent = hosts - responded;
+    await wait(batch * ARPSCAN_PACKET_MS + (silent ? (retry - 1) * silent * ARPSCAN_PACKET_MS + retry * timeout * 0.6 + timeout * 0.5 : 60) + K.net.jitter(30, 40));
+    say('');
+    say(responded + ' packets received by filter, 0 packets dropped by kernel');
+    const secs = elapsed / 1000;
+    say('Ending arp-scan ' + ARPSCAN_VERSION + ': ' + hosts + ' hosts scanned in ' + secs.toFixed(3) + ' seconds (' + (hosts / secs).toFixed(2) + ' hosts/sec). ' + responded + ' responded');
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'arp-scan', path: '/usr/sbin/arp-scan', pkg: 'arp-scan', section: 1, only: 'kali',
+    summary: 'Send ARP requests to target hosts and display responses',
+    synopsis: 'arp-scan [options] [hosts...]',
+    man: 'DESCRIPTION\n' +
+      '       arp-scan sends ARP requests to the target hosts and displays every response: the IP address, the MAC address and the vendor ' +
+      'that the MAC address prefix is registered to. ARP works below IP, so a host firewall cannot hide a machine from it, but it only reaches ' +
+      'hosts on the local network segment. It needs raw access to the network interface, so it must be run as root.\n\n' +
+      '       Targets are IP addresses or host names, a network as NET/BITS (10.10.10.0/24) or NET:MASK, or a range as START-END ' +
+      '(10.10.10.1-10.10.10.50). Network and broadcast addresses are included.\n\n' +
+      'OPTIONS\n' +
+      '       -l, --localnet\n              Scan the network the interface is configured for.\n' +
+      '       -I NAME, --interface=NAME\n              Use this network interface instead of the first configured one.\n' +
+      '       -r N, --retry=N\n              Total number of attempts per host (default 2).\n' +
+      '       -t MS, --timeout=MS\n              Initial per-host timeout in milliseconds (default 500).\n' +
+      '       -q, --quiet\n              Show only the IP and MAC address.\n' +
+      '       -x, --plain\n              Show only responding hosts, without header and footer.\n' +
+      '       -h, --help; -V, --version\n              Display the usage message or the version and exit.\n\n' +
+      'EXAMPLES\n' +
+      '       sudo arp-scan -l\n              Every host on the lab network that answers ARP.\n' +
+      '       sudo arp-scan -I eth0 10.10.10.1-10.10.10.60\n              Ask a range of addresses on a named interface.',
+    run: arpScanRun,
+    complete: (info) => (info.words[info.index - 1] === '-I' ? info.machine.ifaces.map((i) => i.name) : info.cur[0] === '-' ? [] : labTargets()),
+  });
+
+  /* --------------------------------------------------------------------- fping */
+
+  const FPING_USAGE = [
+    'Usage: fping [options] [targets...]', '',
+    'Probing options:',
+    '   -c, --count=N      count mode: send N pings to each target and report stats',
+    '   -f, --file=FILE    read list of targets from a file ( - means stdin)',
+    '   -g, --generate     generate target list (only if no -f specified),',
+    '                      limited to at most 131072 targets',
+    '                      (give start and end IP in the target list, or a CIDR address)',
+    '                      (ex. fping -g 192.168.1.0 192.168.1.255 or fping -g 192.168.1.0/24)',
+    '   -i, --interval=MSEC  interval between sending ping packets (default: 10 ms)',
+    '   -p, --period=MSEC  interval between ping packets to one target (in ms)',
+    '                      (in loop and count modes, default: 1000 ms)',
+    '   -r, --retry=N      number of retries (default: 3)',
+    '   -t, --timeout=MSEC individual target initial timeout (default: 500 ms,',
+    "                      except with -l/-c/-C, where it's the -p period up to 2000 ms)", '',
+    'Output options:',
+    '   -a, --alive        show targets that are alive',
+    '   -A, --addr         show targets by address',
+    '   -d, --rdns         show targets by name (force reverse-DNS lookup)',
+    '   -e, --elapsed      show elapsed time on return packets',
+    '   -n, --name         show targets by name (reverse-DNS lookup for target IPs)',
+    "   -q, --quiet        quiet (don't show per-target/per-ping results)",
+    '   -s, --stats        print final stats',
+    '   -u, --unreach      show targets that are unreachable',
+    '   -v, --version      show version',
+  ].join('\n') + '\n';
+  const FPING_MAX_GENERATE = 131072;
+
+  /** fping's sprint_tm: three significant digits of a time in ms. */
+  function fpingTime(ms) {
+    return ms < 1 ? ms.toFixed(3) : ms < 10 ? ms.toFixed(2) : ms < 100 ? ms.toFixed(1) : ms.toFixed(0);
+  }
+
+  /** The address list of fping -g: a CIDR block without its network and broadcast address, or START END. */
+  function fpingGenerate(args) {
+    let lo; let hi;
+    if (args.length === 1) {
+      const m = /^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/.exec(args[0]);
+      const block = m && +m[2] >= 1 && +m[2] <= 32 ? U.parseCidr(args[0]) : null;
+      if (!block) return null;
+      const whole = block.bits >= 31;
+      lo = block.network + (whole ? 0 : 1); hi = block.broadcast - (whole ? 0 : 1);
+    } else if (args.length === 2 && U.isIPv4(args[0]) && U.isIPv4(args[1])) {
+      lo = U.ipToInt(args[0]); hi = U.ipToInt(args[1]);
+    } else return null;
+    return rangeSpec(args.join(' '), lo, hi);
+  }
+
+  /** Resolve fping's target words; returns { targets: [{ip, label}], unknown } after the scope guard. */
+  function fpingTargets(ctx, o, words) {
+    const machine = ctx.machine; const targets = []; let unknown = 0;
+    const label = (ip, given) => (o.byAddr ? ip : o.byName ? K.net.reverse(machine, ip) || given : given);
+    if (o.generate) {
+      for (const ip of guardedAddresses(ctx, o.generate, 'fping')) targets.push({ ip, label: label(ip, ip) });
+      return { targets, unknown };
+    }
+    for (const word of words) {
+      const res = K.net.resolve(machine, word);
+      if (!res) { ctx.err(word + ': Name or service not known\n'); unknown++; continue; }
+      if (K.net.guard(ctx, res.ip, 'fping')) targets.push({ ip: res.ip, label: label(res.ip, word) });
+    }
+    return { targets, unknown };
+  }
+
+  function fpingOptions(ctx) {
+    const g = ctx.getopt({
+      short: 'aAc:def:ghi:np:qr:st:uv',
+      long: ['alive', 'addr', 'count=', 'rdns', 'elapsed', 'file=', 'generate', 'help', 'interval=', 'name', 'period=', 'quiet', 'retry=', 'stats', 'timeout=', 'unreach', 'version'],
+      alias: { alive: 'a', addr: 'A', count: 'c', rdns: 'd', elapsed: 'e', file: 'f', generate: 'g', help: 'h', interval: 'i', name: 'n', period: 'p', quiet: 'q', retry: 'r', stats: 's', timeout: 't', unreach: 'u', version: 'v' },
+    });
+    if (g.err) return { fail: 'fping: ' + g.err + "\nsee 'fping -h' for usage information\n" };
+    const o = { opts: g.opts, words: g.rest, alive: g.opts.a, unreach: g.opts.u, quiet: g.opts.q, stats: g.opts.s, elapsed: g.opts.e, byAddr: g.opts.A, byName: g.opts.n || g.opts.d };
+    const number = (key, fallback, min) => {
+      if (g.opts[key] == null) return fallback;
+      const n = Number(g.opts[key]);
+      return /^\d+(\.\d+)?$/.test(g.opts[key]) && n >= min ? n : NaN;
+    };
+    Object.assign(o, { count: number('c', 0, 1), interval: number('i', 10, 1), period: number('p', 1000, 10), retry: number('r', 3, 0), timeout: number('t', 500, 1) });
+    if ([o.count, o.interval, o.period, o.retry, o.timeout].some(isNaN)) return { fail: FPING_USAGE };
+    if (o.alive && o.unreach) return { fail: 'fping: specify only one of a, u\n' };
+    return o;
+  }
+
+  /** The default mode: every target is asked until it answers or the retries run out. */
+  async function fpingOnce(ctx, o, targets, st) {
+    let pending = targets.slice(); let timeout = o.timeout;
+    for (let attempt = 0; attempt <= o.retry && pending.length; attempt++) {
+      if (attempt) { await st.wait(Math.max(0, timeout - pending.length * o.interval)); timeout *= 1.5; }
+      const waiting = [];
+      for (const t of pending) {
+        const r = K.net.ping(ctx.machine, t.ip, attempt, { id: ctx.pid & 0xffff });
+        st.sent++;
+        if (r.status === 'reply') {
+          st.replies.push(r.rtt); t.alive = true;
+          if (!o.unreach && !o.quiet) ctx.out(t.label + (o.alive ? '' : ' is alive') + (o.elapsed ? ' (' + fpingTime(r.rtt) + ' ms)' : '') + '\n');
+        } else {
+          waiting.push(t);
+          if (r.status === 'unreachable' && attempt < o.retry) {
+            st.other++;
+            if (!o.quiet) ctx.err('ICMP Host Unreachable from ' + r.from + ' for ICMP Echo sent to ' + t.ip + '\n');
+          }
+        }
+        await st.wait(o.interval);
+      }
+      pending = waiting;
+    }
+    if (pending.length) await st.wait(timeout);
+    st.timeouts += pending.length;
+    for (const t of pending) if (!o.alive && !o.quiet) ctx.out(t.label + (o.unreach ? '' : ' is unreachable') + '\n');
+  }
+
+  /** Count mode (-c): N pings per target, one line per ping and a summary per target on stderr. */
+  async function fpingCount(ctx, o, targets, st) {
+    const width = targets.reduce((w, t) => Math.max(w, t.label.length), 0);
+    for (const t of targets) Object.assign(t, { xmt: 0, times: [] });
+    const loss = (t) => Math.floor(((t.xmt - t.times.length) * 100) / t.xmt);
+    const avg = (t) => (t.times.length ? fpingTime(t.times.reduce((a, b) => a + b, 0) / t.times.length) : 'NaN');
+    try {
+      for (let seq = 0; seq < o.count; seq++) {
+        for (const t of targets) {
+          const r = K.net.ping(ctx.machine, t.ip, seq, { id: ctx.pid & 0xffff });
+          st.sent++; t.xmt++;
+          if (r.status === 'reply') { t.times.push(r.rtt); st.replies.push(r.rtt); t.alive = true; } else st.timeouts++;
+          const what = r.status === 'reply' ? '64 bytes, ' + fpingTime(r.rtt) + ' ms' : 'timed out';
+          if (!o.quiet) ctx.out(t.label.padEnd(width) + ' : [' + seq + '], ' + what + ' (' + avg(t) + ' avg, ' + loss(t) + '% loss)\n');
+          await st.wait(o.interval);
+        }
+        if (seq < o.count - 1) await st.wait(Math.max(0, o.period - targets.length * o.interval));
+      }
+    } finally {
+      ctx.err('\n');
+      for (const t of targets) {
+        const rtt = t.times.length ? ', min/avg/max = ' + [Math.min.apply(null, t.times), t.times.reduce((a, b) => a + b, 0) / t.times.length, Math.max.apply(null, t.times)].map(fpingTime).join('/') : '';
+        ctx.err(t.label.padEnd(width) + ' : xmt/rcv/%loss = ' + t.xmt + '/' + t.times.length + '/' + (t.xmt ? loss(t) : 0) + '%' + rtt + '\n');
+      }
+    }
+  }
+
+  function fpingStats(ctx, targets, unknown, st) {
+    const n = (v) => String(v).padStart(8);
+    const alive = targets.filter((t) => t.alive).length;
+    const rtt = (v) => ' ' + (st.replies.length ? fpingTime(v) : '0.00') + ' ms';
+    const sum = st.replies.reduce((a, b) => a + b, 0);
+    ctx.err(['', n(targets.length) + ' targets', n(alive) + ' alive', n(targets.length - alive) + ' unreachable', n(unknown) + ' unknown addresses', '',
+      n(st.timeouts) + ' timeouts (waiting for response)', n(st.sent) + ' ICMP Echos sent', n(st.replies.length) + ' ICMP Echo Replies received', n(st.other) + ' other ICMP received', '',
+      rtt(Math.min.apply(null, st.replies)) + ' (min round trip time)', rtt(sum / st.replies.length) + ' (avg round trip time)', rtt(Math.max.apply(null, st.replies)) + ' (max round trip time)',
+      (st.elapsed / 1000).toFixed(3).padStart(12) + ' sec (elapsed real time)', '', ''].join('\n'));
+  }
+
+  async function fpingRun(ctx) {
+    const o = fpingOptions(ctx);
+    if (o.fail) { ctx.err(o.fail); return 1; }
+    if (o.opts.h) { ctx.out(FPING_USAGE); return 0; }
+    if (o.opts.v) { ctx.out('fping: Version 5.4\n'); return 0; }
+    let words = o.words;
+    if (o.opts.g) {
+      o.generate = fpingGenerate(words);
+      if (!o.generate) { ctx.err(FPING_USAGE); return 1; }
+      if (o.generate.count > FPING_MAX_GENERATE) { ctx.err('fping: -g parameter generates too many addresses\n'); return 1; }
+    } else if (o.opts.f != null || (!words.length && ctx.stdin != null)) {
+      let text = ctx.stdin || '';
+      if (o.opts.f != null && o.opts.f !== '-') {
+        try { text = ctx.fs.read(o.opts.f); } catch (e) { ctx.err('fping: fopen: ' + e.message + '\n'); return 4; }
+      }
+      words = text.split('\n').map((line) => line.replace(/#.*/, '').trim().split(/\s+/)[0]).filter(Boolean);
+    } else if (!words.length) { ctx.err(FPING_USAGE); return 1; }
+    const found = fpingTargets(ctx, o, words);
+    const st = { sent: 0, replies: [], timeouts: 0, other: 0, elapsed: 0, wait(ms) { st.elapsed += ms; return ctx.sleep(ms); } };
+    let interrupted = false;
+    try {
+      if (o.count) await fpingCount(ctx, o, found.targets, st);
+      else await fpingOnce(ctx, o, found.targets, st);
+    } catch (e) {
+      if (!(e instanceof K.Interrupt)) throw e;
+      interrupted = true;
+    }
+    if (o.stats) fpingStats(ctx, found.targets, found.unknown, st);
+    if (interrupted) return 130;
+    return found.unknown ? 2 : found.targets.every((t) => t.alive) ? 0 : 1;
+  }
+
+  K.cmd.register({
+    name: 'fping', pkg: 'fping', section: 8, only: 'kali',
+    summary: 'send ICMP ECHO_REQUEST packets to network hosts',
+    synopsis: 'fping [ options ] [ systems... ]',
+    man: 'DESCRIPTION\n' +
+      '       fping is a program like ping which uses the Internet Control Message Protocol (ICMP) echo request to determine if a target host is ' +
+      'responding. fping differs from ping in that you can specify any number of targets on the command line, or specify a file containing the ' +
+      'lists of targets to ping. Instead of sending to one target until it times out or replies, fping will send out a ping packet and move on ' +
+      'to the next target in a round-robin fashion. A target that replies is noted as alive; one that does not answer within the retry limit ' +
+      'is reported as unreachable. Hosts that drop ICMP look unreachable even though they are up.\n\n' +
+      'OPTIONS\n' +
+      '       -a, --alive\n              Show systems that are alive.\n' +
+      '       -u, --unreach\n              Show targets that are unreachable.\n' +
+      '       -g, --generate ADDR/MASK | START END\n              Generate the target list from a CIDR block (without its network and broadcast address) or a range.\n' +
+      '       -c N, --count=N\n              Send N pings to each target and report statistics for each.\n' +
+      '       -q, --quiet\n              Do not show per-probe results and ICMP error messages, only the final summary.\n' +
+      '       -s, --stats\n              Print cumulative statistics upon exit.\n' +
+      '       -e, --elapsed\n              Show elapsed (round-trip) time of packets.\n' +
+      '       -A, --addr; -n, --name\n              Display targets by address, or by their reverse DNS name.\n' +
+      '       -f FILE, --file=FILE\n              Read the list of targets from FILE (- means standard input).\n' +
+      '       -r N, -t MSEC, -i MSEC, -p MSEC\n              Retry limit (3), initial timeout (500), interval between packets (10) and per-target period in count mode (1000).\n\n' +
+      'EXIT STATUS\n       0 if all the hosts are reachable, 1 if some hosts were unreachable, 2 if any IP addresses were not found.\n\n' +
+      'EXAMPLES\n' +
+      '       fping -a -g 10.10.10.0/24 2>/dev/null\n              List the addresses of the lab network that answer a ping.\n' +
+      '       fping -c 3 web01.halcyon.lab db01.halcyon.lab\n              Three pings to each host, with loss and round-trip statistics.',
+    run: fpingRun,
+    complete: (info) => (info.cur[0] === '-' ? [] : labTargets()),
+  });
+
+  /* -------------------------------------------------------------------- arping */
+
+  const ARPING_USAGE = 'ARPing 2.26, by Thomas Habets <thomas@habets.se>\n' +
+    'usage: arping [ -qr ] [ -c <count> ] [ -i <interface> ] <host/ip>\nFor complete usage info, use --help or check the manpage.\n';
+
+  const arpingTime = (ms) => (ms < 1 ? (ms * 1000).toFixed(3) + ' usec' : ms < 1000 ? ms.toFixed(3) + ' msec' : (ms / 1000).toFixed(3) + ' sec');
+
+  function arpingStats(ctx, ip, sent, times) {
+    const lost = sent ? ((sent - times.length) * 100) / sent : 0;
+    ctx.out('\n--- ' + ip + ' statistics ---\n' + sent + ' packets transmitted, ' + times.length + ' packets received, ' + lost.toFixed(0).padStart(3) + '% unanswered (0 extra)\n');
+    if (!times.length) { ctx.out('\n'); return; }
+    const avg = times.reduce((a, b) => a + b, 0) / times.length;
+    const dev = Math.sqrt(times.reduce((a, b) => a + (b - avg) * (b - avg), 0) / times.length);
+    ctx.out('rtt min/avg/max/std-dev = ' + [Math.min.apply(null, times), avg, Math.max.apply(null, times), dev].map((v) => v.toFixed(3)).join('/') + ' ms\n');
+  }
+
+  async function arpingRun(ctx) {
+    const g = ctx.getopt({ short: 'c:i:I:qrh', long: ['help'], alias: { I: 'i', help: 'h' } });
+    if (g.err) { ctx.err('arping: ' + g.err + '\n' + ARPING_USAGE); return 1; }
+    if (g.opts.h) { ctx.out(ARPING_USAGE); return 0; }
+    if (g.rest.length !== 1) { ctx.err(ARPING_USAGE); return 1; }
+    const count = g.opts.c == null ? Infinity : parseInt(g.opts.c, 10);
+    if (!(count > 0)) { ctx.err('arping: invalid count: ' + g.opts.c + '\n'); return 1; }
+    if (!ctx.isRoot) {
+      ctx.err('arping: libnet_init(LIBNET_LINK, ' + (g.opts.i || '<null>') + '): libnet_open_link(): UID/EUID 0 or capability CAP_NET_RAW required\n');
+      return 1;
+    }
+    if (g.opts.i && !etherIface(ctx.machine, g.opts.i)) {
+      ctx.err('arping: libnet_init(LIBNET_LINK, ' + g.opts.i + '): libnet_check_iface() ioctl: No such device\n');
+      return 1;
+    }
+    const res = K.net.resolve(ctx.machine, g.rest[0]);
+    if (!res) { ctx.err("arping: Can't resolve " + g.rest[0] + ', or ' + g.rest[0] + ' is broadcast: libnet_name2addr4(): hostname must be specified\n'); return 1; }
+    if (!K.net.guard(ctx, res.ip, 'arping')) return 1;
+    const local = ctx.machine.ifaces.find((i) => i.kind !== 'loopback' && i.ip && U.inCidr(res.ip, i.ip + '/' + i.bits));
+    const iface = g.opts.i ? etherIface(ctx.machine, g.opts.i) : local || ctx.machine.primaryIface();
+    if (!g.opts.i && !local) {
+      ctx.err('arping: Unable to automatically find interface to use. Is it on the local LAN?\narping: Use -i to manually specify interface. Guessing interface ' + iface.name + '.\n');
+    }
+    const say = (line) => { if (!g.opts.q) ctx.out(line + '\n'); };
+    const host = arpNeighbour(iface, res.ip);
+    const times = []; let sent = 0; let interrupted = false;
+    if (!g.opts.r) say('ARPING ' + res.ip);
+    try {
+      for (; sent < count; sent++) {
+        if (sent) await ctx.sleep(1000);
+        if (!host) { if (!g.opts.r) say('Timeout'); continue; }
+        const rtt = K.net.jitter(host.latency.base, host.latency.jitter);
+        times.push(rtt);
+        say(g.opts.r ? host.mac : '60 bytes from ' + host.mac + ' (' + res.ip + '): index=' + sent + ' time=' + arpingTime(rtt));
+      }
+      if (!host) await ctx.sleep(1000);
+    } catch (e) {
+      if (!(e instanceof K.Interrupt)) throw e;
+      interrupted = true; sent++;
+    }
+    if (!g.opts.q && !g.opts.r) arpingStats(ctx, res.ip, sent, times);
+    return interrupted ? 130 : times.length ? 0 : 1;
+  }
+
+  K.cmd.register({
+    name: 'arping', path: '/usr/sbin/arping', pkg: 'arping', section: 8, only: 'kali',
+    summary: 'sends arp and/or ip pings to a given host',
+    synopsis: 'arping [-qr] [-c count] [-i interface] <host | ip>',
+    man: 'DESCRIPTION\n' +
+      '       The arping utility sends ARP requests to the given host and shows the replies with the MAC address that answered and the ' +
+      'round-trip time, much as ping does with ICMP. Because every host on an Ethernet segment has to answer ARP, arping reaches machines ' +
+      'that drop pings, but only on the local network. It needs raw access to the interface and must be run as root.\n\n' +
+      'OPTIONS\n' +
+      '       -c count\n              Only send count requests. Without it arping continues until interrupted.\n' +
+      '       -i interface\n              Use the specified interface (-I is accepted as well).\n' +
+      '       -q     Does not display messages, except error messages.\n' +
+      '       -r     Raw output: only the MAC address is displayed for each reply.\n' +
+      '       -h, --help\n              Displays a help message and exits.\n\n' +
+      'EXIT STATUS\n       0 when at least one reply was received, 1 otherwise.\n\n' +
+      'EXAMPLES\n' +
+      '       sudo arping -c 3 10.10.10.50\n              Is the domain controller there, even though it ignores ping?\n' +
+      '       sudo arping -r -c 1 gw.halcyon.lab\n              Print just the MAC address of the gateway.',
+    run: arpingRun,
+    complete: (info) => (/^-[iI]$/.test(info.words[info.index - 1]) ? info.machine.ifaces.map((i) => i.name) : info.cur[0] === '-' ? [] : labTargets()),
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
