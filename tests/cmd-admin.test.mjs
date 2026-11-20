@@ -47,10 +47,10 @@ test('apt install -y, dependencies, unknown packages and aborting', async () => 
   assert.equal(bad.code, 100);
   assert.match(bad.err, /Error: Unable to locate package no-such-pkg/);
   s.term.feed('n');
-  const no = await s.run('sudo apt install htop');
+  const no = await s.run('sudo apt install ncdu');
   assert.equal(no.code, 1);
   assert.match(no.out, /Abort\./);
-  assert.equal(s.machine.packages.has('htop'), false);
+  assert.equal(s.machine.packages.has('ncdu'), false);
 });
 
 test('apt install creates command stubs and remove deletes them', async () => {

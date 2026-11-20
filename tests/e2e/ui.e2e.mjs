@@ -40,6 +40,10 @@ function watch(page) {
 let withLessons = false;      // the lesson groups switch this on; earlier groups see an app without lessons
 async function ready(page) {
   await page.waitForFunction(() => window.K && K.app && K.app.booted);
+  // This script brings its own curriculum, so the real lesson packs are removed first.
+  await page.evaluate(() => {
+    if (K.lessons.modules.some((m) => !/^fx-/.test(m.id))) { K.lessons.modules.length = 0; K.app.renderLesson(); }
+  });
   await page.evaluate(installFixtures);
   if (withLessons) await page.evaluate(installLessons);
 }
@@ -195,7 +199,7 @@ group(WELCOME, async ({ page }) => {
   assert.match(words, /only be used on systems you own or have written permission to test/i, 'says that real use needs authorization');
   await page.keyboard.type('blocked');
   assert.doesNotMatch(await text(page), /blocked/, 'the terminal does not take keys while the dialog is open');
-  await dlg.getByRole('button', { name: 'Start' }).click();
+  await dlg.getByRole('button', { name: 'Start', exact: true }).click();
   await dialogGone(page);
   assert.equal(await termFocused(page), true, 'closing the welcome puts the keyboard in the terminal');
   await page.reload();
@@ -917,7 +921,7 @@ group('phone viewport: one view at a time, touch keys, usable terminal', async (
   try {
     const dlg = await box(page, 'dialog[open]');
     assert.ok(dlg.x >= 0 && dlg.x + dlg.width <= 360 && dlg.y >= 0 && dlg.y + dlg.height <= 740, 'the welcome fits the screen');
-    await page.getByRole('button', { name: 'Start' }).tap();
+    await page.getByRole('button', { name: 'Start', exact: true }).tap();
     await dialogGone(page);
 
     const tabs = page.locator('.k-views');
