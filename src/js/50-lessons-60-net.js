@@ -473,7 +473,7 @@
       {
         id: 'silence',
         prompt: T(
-          'Send three requests to `10.10.10.50`, which the lab\'s paperwork lists as a Windows server.',
+          'Send three requests to `10.10.10.50`. In this lab that is the address of `dc01`, a Windows server.',
           '',
           'This failure looks different. Between the first line and the summary there is nothing at all, and the summary says `0 received, 100% packet loss` without counting any errors. The requests went out and no reply came back.',
           '',
@@ -595,12 +595,218 @@
     refs: ['ping(8)', 'ip-neighbour(8)', 'RFC 792 (ICMP)', 'RFC 1122, section 3.2.2.6 (echo request and reply)'],
   };
 
+  /* ------------------------------------------------------------------ path */
+  /** A traceroute hop line for this hop number and address, with or without a name in front. */
+  const hopLine = (n, ip) => new RegExp('^\\s*' + n + '\\s+(\\S+ \\()?' + ip.replace(/\./g, '\\.') + '\\)?\\s+[\\d.]+ ms', 'm');
+
+  const pathLesson = {
+    id: 'net-path',
+    title: 'Following the path: traceroute and mtr',
+    minutes: 12,
+    objectives: [
+      'Trace the route to a host with `traceroute` and read hops, names and times',
+      'Explain how expiring TTLs make each router on a path reveal itself',
+      'Interpret a silent `* * *` hop correctly',
+      'Measure loss and delay at every hop with `mtr -r`',
+    ],
+    intro: T(
+      '`ping` answers one question: did a reply come back? When it did not, or the replies are slow, the next question is where along the way the trouble lies. Between your workstation and a distant host there is a chain of routers, and each one hands your packet to the next. `traceroute` makes that chain visible, one router per line, and `mtr` measures every link in it.',
+      '',
+      'On an assessment a trace also shows where networks begin and end: which hop is your own gateway, and which machines along the way belong to third parties. Those are not yours to test.'
+    ),
+    steps: [
+      {
+        id: 'local',
+        prompt: T(
+          'Start close to home. Trace the path to the web server of the lab:',
+          '',
+          '```',
+          'traceroute 10.10.10.10',
+          '```',
+          '',
+          'The first line repeats the destination and states two limits: the trace gives up after 30 hops, and every probe packet is 60 bytes long.',
+          '',
+          'Each line after that is one *hop*, a machine on the way, in order. A hop line holds the hop number, the name and address of the machine, and three times in milliseconds. `traceroute` sends three probes to every hop and reports the round trip of each.',
+          '',
+          'Here there is a single hop, and it is the destination itself. `10.10.10.10` is on your own segment, so no router is involved.'
+        ),
+        hint: 'Type `traceroute 10.10.10.10`.' + IF_DOWN,
+        solution: 'traceroute 10.10.10.10',
+        check: { cmd: 'traceroute', out: hopLine(1, '10.10.10.10') },
+      },
+      {
+        id: 'remote',
+        prompt: T(
+          'Now a destination on the internet. This trace takes longer and pauses for some seconds at one of its lines, which a later step explains.',
+          '',
+          '```',
+          'traceroute 8.8.8.8',
+          '```',
+          '',
+          'Every packet carries a counter called TTL, *time to live*. Each router that passes a packet on lowers the counter by one. A router that lowers it to zero throws the packet away and reports that to the sender with a message called ICMP *time exceeded*.',
+          '',
+          '`traceroute` turns this safety mechanism into a measuring tool. Its first probes start with a TTL of 1, so the first router discards them and, by reporting it, reveals its address. The next probes start with 2 and get one router further, and so on until the destination itself answers.',
+          '',
+          'Read the result from the top. Hop 1 is `gw.halcyon.lab (10.10.10.1)`, your default gateway. The last line is the destination, `dns.google (8.8.8.8)`. Everything between them is a router that passed your packets along, and the times grow as the hops get further away.'
+        ),
+        hint: 'Type `traceroute 8.8.8.8` and wait until the prompt returns. One line takes several seconds.',
+        solution: 'traceroute 8.8.8.8',
+        check: { cmd: 'traceroute', fn: prints(hopLine(1, '10.10.10.1'), hopLine(10, '8.8.8.8')) },
+      },
+      {
+        id: 'length',
+        prompt: T(
+          'The hop number of the destination tells you how long the path is: the destination itself, plus one router for every hop before it.',
+          '',
+          'At which hop number does `8.8.8.8` appear in your trace?'
+        ),
+        hint: 'The hop number is the first thing on each line. Look at the last line.',
+        solution: '10',
+        answer: /^(hop\s*)?(10|ten)\.?$/i,
+      },
+      {
+        id: 'stars',
+        prompt: T(
+          'One line of the trace shows `* * *` where the name and the times should be. Each star is a probe that received no answer within the time limit, which is why the trace paused there.',
+          '',
+          'The router at that position did its job. The probes for the later hops passed through it, or those hops could not have answered. It only declines to send the *time exceeded* message. Many routers are set up that way, or send only a limited number of such messages per second.',
+          '',
+          'So stars in the middle of a trace that carries on are normal. Stars that run on to hop 30 are a different matter: the trace never arrived, because the destination or a firewall in front of it ignores the probes.',
+          '',
+          'Which hop number shows `* * *` in your trace to `8.8.8.8`?'
+        ),
+        hint: 'Look for the line with three stars and read the number in front of it.',
+        solution: '3',
+        answer: /^(hop\s*)?(3|three)\.?$/i,
+      },
+      {
+        id: 'numeric',
+        prompt: T(
+          'By default `traceroute` looks up a name for every address it finds. The option `-n` leaves that out and prints addresses only. That is quicker, and it shows you exactly what answered.',
+          '',
+          'Trace the path to `1.1.1.1`, another public DNS server, with addresses only.',
+          '',
+          'This path has 8 hops and every one of them answers.'
+        ),
+        hint: 'Put `-n` between `traceroute` and the address.',
+        solution: 'traceroute -n 1.1.1.1',
+        check: { cmd: 'traceroute', out: /^\s*8\s+1\.1\.1\.1\s+[\d.]+ ms/m },
+      },
+      {
+        id: 'first-hop',
+        prompt: T(
+          'Every packet that leaves your network goes to your default gateway first, so the gateway is hop 1 of every trace to the outside. If you ever see a different address there, your traffic is leaving by another way than you think, for example through a VPN.',
+          '',
+          'Compare this trace with the one to `8.8.8.8` further up in your terminal. The two paths end in different places. Which address is hop 1 in both?'
+        ),
+        hint: 'Read the first hop line of each trace. In the trace made with `-n` it is printed as a bare address.',
+        solution: '10.10.10.1',
+        answer: /^(gw(\.halcyon\.lab)?\s*\(?)?10\.10\.10\.1\)?$/i,
+      },
+      {
+        id: 'mtr',
+        prompt: T(
+          '`traceroute` gives every hop three probes, once. `mtr` combines it with `ping`: it finds the hops and then keeps probing each of them, so that you get loss and timing figures for every hop.',
+          '',
+          '```',
+          'mtr -r -c 5 8.8.8.8',
+          '```',
+          '',
+          '`-r` asks for a report: run, print a table and stop. `-c 5` sets the number of rounds to five, so the command takes about five seconds. Without `-r`, `mtr` opens a display that keeps updating until you press `q`.',
+          '',
+          'The table has one row per hop. `Loss%` is the share of probes that received no answer and `Snt` is the number sent. The other columns are round-trip times in milliseconds: the last one measured, the average, the best, the worst, and how much they varied. Long names are cut short in a report.'
+        ),
+        hint: 'Type `mtr -r -c 5 8.8.8.8` and wait about five seconds for the table.',
+        solution: 'mtr -r -c 5 8.8.8.8',
+        check: { cmd: 'mtr', fn: prints(/Loss%\s+Snt/, /^\s*10\.\|-- (dns\.google|8\.8\.8\.8)\s/m) },
+      },
+      {
+        id: 'loss',
+        prompt: T(
+          'Row 3 is the silent router again. `mtr` shows it as `???` with a loss of 100%. That looks alarming and is not.',
+          '',
+          'The rule for reading the `Loss%` column: loss matters when it carries through to the last row. A hop that shows loss while the hops after it show none is only declining to answer probes addressed to itself. It still passes your traffic on.',
+          '',
+          'What `Loss%` does the last row, the destination, show?'
+        ),
+        hint: 'Find row 10 and read the first number after the name.',
+        solution: '0.0%',
+        answer: /^(0(\.0+)?|zero)\s*(%|percent)?$/i,
+      },
+      {
+        id: 'far',
+        prompt: T(
+          'Produce the same kind of report, five rounds, for `example.com`.',
+          '',
+          'When it has printed, read the `Avg` column from top to bottom. Delay adds up along a path: well under a millisecond at your gateway, and many times that at the far end.'
+        ),
+        hint: 'Use the `mtr` command from two steps back and change the destination.',
+        solution: 'mtr -r -c 5 example.com',
+        check: { cmd: 'mtr', fn: prints(/Loss%\s+Snt/, /^\s*14\.\|-- (example\.com|93\.184\.215\.14)\s/m) },
+      },
+      {
+        id: 'further',
+        prompt: 'You now have a report for `8.8.8.8` and one for `example.com`. Measured in hops, which of the two destinations is further away from you?',
+        hint: 'Compare the number of the last row in each report.',
+        solution: 'example.com',
+        answer: /^(the\s+)?(second(\s+one)?|example\.com|93\.184\.215\.14)\.?$/i,
+      },
+    ],
+    quiz: [
+      {
+        q: 'A trace shows `* * *` at hop 4. Hops 5 to 9 answer normally, and hop 9 is the destination. What does hop 4 tell you?',
+        choices: [
+          'The connection is broken at hop 4',
+          'The router at hop 4 is switched off',
+          'The router at hop 4 passes traffic on but does not send *time exceeded* messages back',
+          'Hop 4 is a firewall that blocks the destination',
+        ],
+        answer: 2,
+        why: 'The later hops could only answer because their probes passed through hop 4. A router that stays silent about expired packets is common and harmless. Only stars that continue to the end mean the trace did not arrive.',
+      },
+      {
+        q: 'How does `traceroute` find out which routers lie on the path?',
+        choices: [
+          'It sends probes with a TTL of 1, 2, 3 and so on, and each router at which a probe expires reports back',
+          'It asks the default gateway for its routing table',
+          'It asks the destination for a list of the routers its packets came through',
+          'It looks the path up on the DNS server',
+        ],
+        answer: 0,
+        why: 'No router is asked for anything. Each one simply does what it does with any packet whose TTL runs out: it discards the packet and tells the sender, and that message carries the router\'s address.',
+      },
+      {
+        q: 'Your default gateway is `10.10.10.1`. A trace to an internet address shows `10.8.0.1` at hop 1. What is the most likely explanation?',
+        choices: [
+          'The gateway has changed its address',
+          '`traceroute` picks a different first hop at random for each run',
+          'The destination is on your own segment',
+          'Your traffic is leaving by a different route, for example through a VPN, and you should read `ip route` before you go on',
+        ],
+        answer: 3,
+        why: 'Hop 1 is the router your machine really handed the packets to. If that is not the gateway you expect, the routing table has a more specific or a different default route. Know which path your traffic takes before you send any more.',
+      },
+      {
+        q: 'A trace to the client\'s public website passes through eleven routers that belong to internet providers. The scope of your engagement lists the client\'s lab network only. What may you do with those routers?',
+        choices: [
+          'Test them, because your traffic passes through them anyway',
+          'Nothing beyond letting your ordinary traffic pass. They belong to third parties and are out of scope',
+          'Test them, but only the ones that answered the trace',
+          'Test them after telling the client',
+        ],
+        answer: 1,
+        why: 'Scope is a list of what the owner has allowed you to test. Routers on the way belong to other organizations, and neither you nor the client can give permission for them. Seeing a machine in a trace does not put it in scope.',
+      },
+    ],
+    refs: ['traceroute(8)', 'mtr(8)', 'RFC 792 (ICMP)', 'RFC 1812, section 5.3.1 (time to live)'],
+  };
+
   K.lessons.register({
     id: 'net',
     title: 'Networking fundamentals',
     order: 60,
     summary: 'Read your own addresses and routes, test reachability with ping, follow the path a packet takes, see which ports are listening, and find a network fault by working upward from the cable.',
-    lessons: [addressesLesson, routesLesson, pingLesson],
+    lessons: [addressesLesson, routesLesson, pingLesson, pathLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
