@@ -258,12 +258,224 @@
     refs: ['ps(1)', 'pgrep(1)', 'top(1)', 'Kali Linux Revealed, ch. 3 (Managing Processes)'],
   };
 
+  /* ------------------------------------------------------------------ jobs */
+  /** Did this line's `kill` name, by PID, a background job of the shell that ran it? */
+  const killedJobByPid = (ev) => {
+    const jobs = (ev.shell && ev.shell.jobs) || [];
+    return (ev.commands || []).some((c) => c.argv[0] === 'kill' &&
+      c.argv.slice(1).some((a) => /^\d+$/.test(a) && jobs.some((j) => j.pid === +a)));
+  };
+  const KILL_SIGNAL = /(^|\s)-(9|KILL|SIGKILL|s\s*(9|KILL|SIGKILL))(\s|$)/i;
+
+  const jobsLesson = {
+    id: 'proc-jobs',
+    title: 'Foreground, background and signals',
+    minutes: 10,
+    objectives: [
+      'Stop a foreground command with `Ctrl-C` and say which signal that sends',
+      'Start a command in the background with `&` and list background jobs with `jobs`',
+      'End a job with `kill`, by job number and by PID',
+      'Explain the difference between the signals `TERM` and `KILL`, and when each is appropriate',
+    ],
+    intro: T(
+      'Some commands finish before you have let go of the Enter key. Others, such as a scan of a network range or a large download, run for minutes or hours. You need to be able to stop a command that is going wrong, and to keep working while a slow one runs.',
+      '',
+      'The tools are the same on every Linux system: the foreground and the background of a terminal, and *signals*, the short messages by which the system tells a process to stop. This lesson uses `sleep`, a command that only waits, so nothing can go wrong while you practice.'
+    ),
+    steps: [
+      {
+        id: 'foreground',
+        prompt: T(
+          '`sleep` does nothing for the number of seconds you give it. That makes it a harmless stand-in for any slow tool:',
+          '',
+          '```',
+          'sleep 5',
+          '```',
+          '',
+          'For five seconds there is no prompt, and anything you type has to wait. The command is running in the *foreground*: the shell has handed the terminal to it and waits until it ends.'
+        ),
+        hint: 'Type `sleep 5`, press Enter and wait for the prompt to come back.',
+        solution: 'sleep 5',
+        check: { cmd: 'sleep', exit: 0, not: { line: /&/ } },
+      },
+      {
+        id: 'interrupt',
+        prompt: T(
+          'A command can run for much longer than you meant it to. Start a sleep of five minutes, and once you have seen that the prompt is gone, press `Ctrl-C`:',
+          '',
+          '```',
+          'sleep 300',
+          '```',
+          '',
+          'The prompt comes back at once. `Ctrl-C` makes the terminal send a *signal* called `INT`, for interrupt, to the process in the foreground. A signal is a short message that the system delivers to a process, and most programs respond to `INT` by ending.',
+          '',
+          '`Ctrl-C` is the normal way to stop a foreground command. It reaches only the command that holds the terminal at that moment.'
+        ),
+        hint: 'Type `sleep 300` and press Enter. Then hold `Ctrl` and press `C`. The step completes when the command has been interrupted.',
+        solution: 'sleep 300',
+        // Ctrl-C cannot be pressed in the replay: the test line ends with the status an interrupted command leaves
+        testSolution: 'sleep 300; (exit 130)',
+        check: { line: /^\s*sleep\s+\S/, exit: 130 },
+      },
+      {
+        id: 'background',
+        prompt: T(
+          'You do not have to wait for a slow command. An `&` at the end of the line starts it in the *background*:',
+          '',
+          '```',
+          'sleep 300 &',
+          '```',
+          '',
+          'The prompt returns immediately and the command keeps running. The shell answers with one line, for example `[1] 1290`. The number in brackets is the *job number*, which is the shell\'s own short name for this background command. The second number is its PID, the same number that `ps` would show.'
+        ),
+        hint: 'Type `sleep 300`, a space and `&`, then press Enter.',
+        solution: 'sleep 300 &',
+        check: { line: /^\s*sleep\s+\S+\s*&\s*$/, out: /^\[\d+\] \d+/m },
+      },
+      {
+        id: 'jobs',
+        prompt: T(
+          'The shell keeps a list of the commands it has running in the background. Ask for it:',
+          '',
+          '```',
+          'jobs',
+          '```',
+          '',
+          'Each line shows a job number in brackets, a state, and the command. Your sleep is `running`. The `+` marks the current job, the one most recently started.',
+          '',
+          'The job list belongs to this shell. Another terminal window has its own list and does not see these jobs, although `ps aux` there would show the process.'
+        ),
+        hint: 'Type `jobs`. If the list is empty, the five minutes are over: start `sleep 300 &` again first.',
+        solution: 'jobs',
+        testSolution: 'sleep 300 & jobs',
+        check: { cmd: 'jobs', out: /^\[\d+\]\s+[+-]?\s*running\s+sleep\b/m },
+      },
+      {
+        id: 'kill-job',
+        prompt: T(
+          'To end a background job, send it a signal with `kill`. A percent sign followed by a job number tells `kill` which job you mean:',
+          '',
+          '```',
+          'kill %1',
+          '```',
+          '',
+          'If `jobs` showed a different number in the brackets, use that number. Then run `jobs` once more: the shell reports the job as `terminated`, and after that the list is empty.',
+          '',
+          'Despite its name, `kill` only delivers a message. Unless you say otherwise the message is the signal `TERM`, for terminate: a request to finish. A program may react to `TERM` by saving its work and removing its temporary files before it ends, and well-written programs do.'
+        ),
+        hint: '`kill`, a space, then `%` and the job number that `jobs` shows.',
+        solution: 'kill %1',
+        testSolution: 'sleep 300 & kill %1',
+        check: { cmd: 'kill', argsRe: /%\d+/, exit: 0, not: { cmd: 'kill', argsRe: KILL_SIGNAL } },
+      },
+      {
+        id: 'kill-pid',
+        prompt: T(
+          'Job numbers exist only inside the shell that started the job. Everywhere else a process is known by its PID, and `kill` accepts a PID as well.',
+          '',
+          'Start another sleep in the background, read the PID from the line the shell prints, and end the process with `kill` followed by that PID:',
+          '',
+          '```',
+          'sleep 600 &',
+          '```',
+          '',
+          'The step completes when the `kill` has been delivered. This is the form you will use most, because it works on any process that belongs to you, whichever shell or program started it. Processes of other users are out of reach unless you use `sudo`.'
+        ),
+        hint: 'After `sleep 600 &` the shell prints something like `[1] 1304`. The second number is the PID: type `kill 1304` with your own number. The shell also keeps the PID of its latest background job in `$!`, so `kill $!` does the same.',
+        solution: 'kill $!',
+        testSolution: 'sleep 600 & kill $!',
+        check: { cmd: 'kill', exit: 0, fn: killedJobByPid, not: { cmd: 'kill', argsRe: KILL_SIGNAL } },
+      },
+      {
+        id: 'signals',
+        prompt: T(
+          '`TERM` and `INT` are two of many signals. Print their names:',
+          '',
+          '```',
+          'kill -l',
+          '```',
+          '',
+          'The names are listed in order of their numbers, starting at 1. `INT`, the signal behind `Ctrl-C`, is second, so it is signal 2. `TERM` is in fifteenth place.',
+          '',
+          'Count along the list. Which signal is number 9?'
+        ),
+        hint: 'The list begins `HUP INT QUIT`, which are 1, 2 and 3. Keep counting to the ninth name.',
+        solution: 'KILL',
+        answer: /^(sig)?kill$/i,
+      },
+      {
+        id: 'kill-9',
+        prompt: T(
+          '`KILL` is different from every signal you have used so far. It is never delivered to the program at all: the kernel removes the process on the spot. Nothing can ignore it, and nothing gets the chance to tidy up, so files may be left half-written and temporary files left behind.',
+          '',
+          'That makes it the last resort. Send `TERM` first and give the program a few seconds. Use `KILL` only on a process that does not respond.',
+          '',
+          'Practice the form once. Start `sleep 900 &`, then end that job with the signal `KILL`. The signal goes between `kill` and the target, as a name or as a number: `-KILL` or `-9`.'
+        ),
+        hint: 'Start the job with `sleep 900 &`. Then type `kill -KILL %1`, with the job number the shell printed in brackets.',
+        solution: 'kill -KILL %1',
+        testSolution: 'sleep 900 & kill -KILL %1',
+        check: { any: [
+          { cmd: 'kill', argsRe: KILL_SIGNAL, exit: 0, all: [{ cmd: 'kill', argsRe: /%\d+\s*$/ }] },
+          { cmd: 'kill', argsRe: KILL_SIGNAL, exit: 0, fn: killedJobByPid },
+        ] },
+      },
+    ],
+    quiz: [
+      {
+        q: '`sleep 300 &` is running in the background and you are at an empty prompt. You press `Ctrl-C`. What happens to the sleep?',
+        choices: [
+          'It ends, because `Ctrl-C` stops every command started from this terminal',
+          'Nothing: `Ctrl-C` goes to the foreground, and the job is in the background',
+          'It moves to the foreground',
+          'It is paused until you press `Ctrl-C` again',
+        ],
+        answer: 1,
+        why: '`Ctrl-C` sends `INT` to the process that holds the terminal. A background job does not, so it keeps running. To end it, use `kill` with its job number or PID.',
+      },
+      {
+        q: 'You sent `kill 4321` to a program of yours a minute ago, and `ps` still shows PID 4321. What is the sensible next step?',
+        choices: [
+          'Send `kill -KILL 4321`, accepting that the program gets no chance to clean up',
+          'Run `kill 4321` again and again until it works',
+          'Close the terminal window',
+          'Restart the machine',
+        ],
+        answer: 0,
+        why: 'A program may ignore `TERM` or hang while handling it. `KILL` cannot be ignored, because the kernel acts on it directly. It comes second because the program can no longer save its work or remove its temporary files.',
+      },
+      {
+        q: 'Why can a program not protect itself against the signal `KILL`?',
+        choices: [
+          'Because only root is allowed to send it',
+          'Because it is sent many times in quick succession',
+          'Because it is handled by the kernel and never reaches the code of the program',
+          'It can: a carefully written program catches `KILL` like any other signal',
+        ],
+        answer: 2,
+        why: 'A program can install its own handler for most signals, `TERM` and `INT` included. `KILL` has no handler: the kernel ends the process without asking it. Any user may send it to processes of their own.',
+      },
+      {
+        q: 'In one terminal you start `sleep 600 &`. In a second terminal window you type `kill %1`. What happens?',
+        choices: [
+          'The sleep ends, because it is job 1',
+          'Both shells end',
+          'The sleep is moved into the second terminal',
+          'The second shell reports that it has no such job: job numbers belong to the shell that started the job',
+        ],
+        answer: 3,
+        why: 'Each shell keeps its own job list. From anywhere else, find the PID with `pgrep` or `ps` and use `kill` with the PID.',
+      },
+    ],
+    refs: ['zshbuiltins(1), for `jobs` and `kill`', 'zshmisc(1), section JOBS', 'kill(1)', 'signal(7)', 'sleep(1)'],
+  };
+
   K.lessons.register({
     id: 'proc',
     title: 'Processes, services and logs',
     order: 40,
     summary: 'See what is running on a system and what started it, control jobs and services, and read the logs that record what happened.',
-    lessons: [psLesson],
+    lessons: [psLesson, jobsLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
