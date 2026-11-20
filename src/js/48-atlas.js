@@ -44,6 +44,22 @@
     return out;
   }
 
+  /**
+   * Aligned columns under a header row. The last column takes what is left of the
+   * line and wraps; `paints` may give a colour function for each column.
+   */
+  function table(ctx, head, body, paints) {
+    const last = head.length - 1;
+    const widths = head.map((h, i) => Math.max.apply(null, [h].concat(body.map((r) => r[i])).map((cell) => cell.length)));
+    const indent = 2 + widths.slice(0, last).reduce((sum, w) => sum + w + 2, 0);
+    const room = Math.max(20, textWidth(ctx) - indent);
+    const line = (cells, paint) => {
+      const fixed = cells.slice(0, last).map((cell, i) => paint(i)(cell.padEnd(widths[i])) + '  ').join('');
+      return wrap(cells[last], room).map((l, n) => (n ? ' '.repeat(indent) : '  ' + fixed) + paint(last)(l) + '\n').join('');
+    };
+    return line(head, () => pen(ctx).head) + body.map((r) => line(r, (i) => (paints && paints[i]) || identity)).join('');
+  }
+
   const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
 
   /* ------------------------------------------------------------- time speed */
@@ -95,9 +111,14 @@
   const SUBCOMMANDS = [
     ['help', '', 'this overview'],
     ['status', '', 'the release being simulated, time speed and lesson progress'],
+    ['scope', '', 'the engagement scope, the rules in brief and the scope guard'],
+    ['hosts', '[--all]', 'lab hosts that have answered you so far'],
+    ['lessons', '', 'modules and lessons with completion marks'],
     ['speed', '[MODE]', 'show or set how fast simulated time passes'],
+    ['reset', '[--yes]', 'restart the simulated machine and the lab'],
     ['about', '', 'version, and what is and is not simulated'],
   ];
+  const usageOf = ([name, arg]) => name + (arg ? ' ' + arg : '');
 
   const KEYS = [
     ['Tab', 'complete a command, an option or a file name'],
@@ -124,7 +145,7 @@
 
   function cmdHelp(ctx) {
     const p = pen(ctx); const e = K.net.world.engagement;
-    const usage = SUBCOMMANDS.map(([name, arg, text]) => ['kalima ' + name + (arg ? ' ' + arg : ''), text]);
+    const usage = SUBCOMMANDS.map((sub) => ['kalima ' + usageOf(sub), sub[2]]);
     ctx.out(
       banner(ctx) +
       para(ctx, 'This terminal, its filesystem, the lab network and the "internet" behind it are all simulated. Nothing you type leaves this page, so you can experiment freely.', 0) + '\n' +
