@@ -102,7 +102,7 @@
   }
 
   // nmap-services subset: the name Nmap prints for a port when it has not asked the service itself.
-  const TCP_NAMES = table('1 tcpmux,3 compressnet,7 echo,9 discard,13 daytime,17 qotd,19 chargen,20 ftp-data,21 ftp,22 ssh,23 telnet,24 priv-mail,' +
+  const TCP_NAMES = table('1 tcpmux,2 compressnet,3 compressnet,5 rje,7 echo,9 discard,11 systat,13 daytime,15 netstat,17 qotd,18 msp,19 chargen,20 ftp-data,21 ftp,22 ssh,23 telnet,24 priv-mail,' +
     '25 smtp,26 rsftp,33 dsp,37 time,42 nameserver,43 whois,49 tacacs,53 domain,70 gopher,79 finger,80 http,81 hosts2-ns,82 xfer,83 mit-ml-dev,' +
     '84 ctf,85 mit-ml-dev,88 kerberos-sec,89 su-mit-tg,90 dnsix,99 metagram,100 newacct,106 pop3pw,109 pop2,110 pop3,111 rpcbind,113 ident,' +
     '119 nntp,125 locus-map,135 msrpc,139 netbios-ssn,143 imap,144 news,146 iso-tp0,161 snmp,163 cmip-man,179 bgp,199 smux,211 914c-g,212 anet,' +
@@ -157,6 +157,14 @@
   function alignRows(rows) {
     const widths = rows[0].map((h, i) => Math.max.apply(null, rows.map((r) => r[i].length)));
     return rows.map((r) => r.map((cell, i) => cell.padEnd(widths[i])).join(' ').replace(/ +$/, ''));
+  }
+
+  /** Everything on standard input: the pipe, or lines typed at the terminal until Ctrl-D. */
+  async function stdinText(ctx) {
+    if (ctx.stdin != null) return ctx.stdin;
+    let text = '';
+    for (let line = await ctx.readLine(''); line != null; line = await ctx.readLine('')) text += line + '\n';
+    return text;
   }
 
   /* ---------------------------------------------------- target specifications */
@@ -260,20 +268,29 @@
   const SPEED = [1, 1, 1, 1, 0.6, 0.4];
 
   class Fatal extends Error {
-    constructor(text, code) { super(text); this.text = text; this.code = code; }
+    constructor(text, code, usage) { super(text); this.text = text; this.code = code; this.usage = !!usage; }
   }
   const quit = (text) => new Fatal(text + '\nQUITTING!\n', 1);
   const badOption = (text) => new Fatal('nmap: ' + text + '\nSee the output of nmap -h for a summary of options.\n', 255);
+  /** A scan type Nmap does not know: it prints the whole usage summary first, then the complaint. */
+  const badScanType = (text) => new Fatal(text + '\n', 255, true);
 
   // Long options: 1 = takes an argument.
-  const NMAP_LONG = { help: 0, version: 0, open: 0, reason: 0, 'top-ports': 1, exclude: 1, unprivileged: 0, traceroute: 0, script: 1 };
+  const NMAP_LONG = {
+    help: 0, version: 0, open: 0, reason: 0, 'top-ports': 1, exclude: 1, unprivileged: 0, traceroute: 0, script: 1,
+    'disable-arp-ping': 0, 'min-rate': 1,
+  };
   const NMAP_FLAGS = { n: 'noDns', R: 'alwaysDns', F: 'fast', r: 'sequential', h: 'help', V: 'version', O: 'os', A: 'aggressive' };
-  const SCAN_LETTERS = { S: 'syn', T: 'connect', U: 'udp', V: 'detect', C: 'scripts', n: 'pingOnly', P: 'pingOnly' };
+  const SCAN_LETTERS = { S: 'syn', T: 'connect', U: 'udp', V: 'detect', C: 'scripts', n: 'pingOnly', P: 'pingOnly', L: 'list' };
+  // -P letters: the kind of discovery probe each one asks for (B is the old spelling of "echo and ACK").
+  const PING_LETTERS = { E: ['icmp'], I: ['icmp'], P: ['icmp'], M: ['icmp'], S: ['syn'], A: ['ack'], T: ['ack'], B: ['icmp', 'ack'], U: ['udp'] };
+  const PING_DEFAULT_PORT = { syn: 80, ack: 80, udp: 40125 };
+  const PING_ONCE = { syn: '-PS', ack: '-PB, -PA, or -PT', udp: '-PU' };
   const OUTPUT_KINDS = { N: ['normal'], G: ['grepable'], X: ['xml'], A: ['normal', 'grepable', 'xml'] };
   const OUTPUT_SUFFIX = { normal: '.nmap', grepable: '.gnmap', xml: '.xml' };
 
   function nmapOptions(args) {
-    const o = { targets: [], verbose: 0, timing: 3, scans: {}, files: {} };
+    const o = { targets: [], verbose: 0, timing: 3, scans: {}, files: {}, notices: [] }; // notices: what -v adds about the options themselves
     const value = (i, attached, letter) => {
       if (attached) return [attached, i];
       if (i + 1 >= args.length) throw badOption("option requires an argument -- '" + letter + "'");
@@ -287,16 +304,13 @@
       const rest = a.slice(2); let v;
       switch (a[1]) {
         case 's':
-          if (!rest) throw quit('An option is required for -s, most common are -sT (tcp scan), -sS (SYN scan), -sF (FIN scan), -sU (UDP scan) and -sn (Ping scan)');
+          if (!rest) throw badScanType('An option is required for -s, most common are -sT (tcp scan), -sS (SYN scan), -sF (FIN scan), -sU (UDP scan) and -sn (Ping scan)');
           for (const ch of rest) {
-            if (!SCAN_LETTERS[ch]) throw quit('Scantype ' + ch + ' not supported');
+            if (!SCAN_LETTERS[ch]) throw badScanType('Scantype ' + ch + ' not supported\n');
             o.scans[SCAN_LETTERS[ch]] = true;
           }
           break;
-        case 'P':
-          if (!/^[n0N]$/.test(rest)) throw quit('Illegal Argument to -P, use -Pn, -PE, -PS, -PA, -PP, -PM, -PU, -PY, or -PO');
-          o.skipPing = true;
-          break;
+        case 'P': [v, i] = value(i, rest, 'P'); pingOption(o, v); break;
         case 'p': [v, i] = value(i, rest, 'p'); o.portSpec = v; break;
         case 'T': [v, i] = value(i, rest, 'T'); o.timing = timingLevel(v); break;
         case 'i':
@@ -317,6 +331,25 @@
       }
     }
     return o;
+  }
+
+  /** One -P option: -Pn, or a kind of discovery probe with an optional port list (-PS22,445). */
+  function pingOption(o, arg) {
+    if (/^[n0ND]/.test(arg)) {
+      o.skipPing = true;
+      o.notices.push("Host discovery disabled (-Pn). All addresses will be marked 'up' and scan times may be slower.");
+    } else if (arg[0] === 'R') {
+      o.notices.push('The -PR option is deprecated. ARP scan is always done when possible.');
+    } else if (PING_LETTERS[arg[0]]) {
+      o.pings = o.pings || {};
+      for (const kind of PING_LETTERS[arg[0]]) {
+        if (kind === 'icmp') { o.pings.icmp = true; continue; }
+        if (o.pings[kind]) throw quit('Only one ' + PING_ONCE[kind] + ' option is allowed. Combine port ranges with commas.');
+        const ports = arg.length > 1 && /^[\d,-]+$/.test(arg.slice(1)) ? parseRanges(arg.slice(1)).filter((p) => p >= 1 && p <= 65535) : [];
+        if (arg.length > 1 && !ports.length) throw quit('Bogus argument to -P' + arg[0] + ': ' + arg.slice(1));
+        o.pings[kind] = ports.length ? ports : [PING_DEFAULT_PORT[kind]];
+      }
+    } else throw quit('Illegal Argument to -P, use -Pn, -PE, -PS, -PA, -PP, -PM, -PU, -PY, or -PO');
   }
 
   function longOption(o, args, i) {
@@ -345,9 +378,9 @@
 
   const ILLEGAL_PORTS = 'Your port specifications are illegal.  Example of proper form: "-100,200-1024,T:3000-4000,U:60000-"';
 
-  /** -p argument -> { tcp: [...], udp: [...], named: {T, U}, duplicates } with sorted, unique ports. */
+  /** -p argument -> { tcp: [...], udp: [...], named: {T, U}, duplicates, zero } with sorted, unique ports. */
   function parsePortSpec(text) {
-    const lists = { tcp: [], udp: [] }; const named = {}; let into = ['tcp', 'udp']; let duplicates = false;
+    const lists = { tcp: [], udp: [] }; const named = {}; let into = ['tcp', 'udp']; let duplicates = false; let zero = false;
     for (let item of text.split(',')) {
       const pre = /^([TU]):/.exec(item);
       if (pre) { into = [pre[1] === 'T' ? 'tcp' : 'udp']; named[pre[1]] = true; item = item.slice(2); }
@@ -357,7 +390,8 @@
         const lo = m[1] === '' ? 1 : +m[1];
         const hi = !m[2] ? lo : m[3] === '' ? 65535 : +m[3];
         if (lo > 65535 || hi > 65535) throw quit('Ports specified must be between 0 and 65535 inclusive');
-        if (lo > hi) throw quit(ILLEGAL_PORTS);
+        if (lo > hi) throw quit('Your port range ' + lo + '-' + hi + ' is backwards. Did you mean ' + hi + '-' + lo + '?');
+        if (lo === 0) zero = true;
         ports = []; for (let p = lo; p <= hi; p++) ports.push(p);
       } else if (/^[a-z][\w*.-]*$/i.test(item)) {
         const want = U.globToRe(item);
@@ -371,40 +405,66 @@
       if (unique.length !== lists[proto].length) duplicates = true;
       lists[proto] = unique;
     }
-    return { tcp: lists.tcp, udp: lists.udp, named, duplicates };
+    return { tcp: lists.tcp, udp: lists.udp, named, duplicates, zero };
   }
 
-  /** Turn the parsed command line into a scan plan; throws Fatal for combinations Nmap refuses. */
-  function nmapPlan(ctx, o) {
+  /**
+   * The host discovery probes of a run. By default a privileged Nmap sends an ICMP echo, a SYN to 443 and
+   * an ACK to 80; without raw sockets every probe becomes a plain connect(), by default to 80 and 443.
+   */
+  function pingProbes(o) {
+    const asked = o.pings;
+    if (o.root) return asked ? { icmp: !!asked.icmp, syn: asked.syn || [], ack: asked.ack || [], udp: asked.udp || [] } : { icmp: true, syn: [443], ack: [80], udp: [] };
+    if (!asked) return { connect: [80, 443] };
+    if (asked.udp) throw quit('Sorry, UDP Ping (-PU) only works if you are root (because we need to read raw responses off the wire)');
+    if (asked.icmp) o.warnings.push('Warning:  You are not root -- using TCP pingscan rather than ICMP');
+    const ports = Array.from(new Set((asked.syn || []).concat(asked.ack || [])));
+    return { connect: ports.length ? ports : [PING_DEFAULT_PORT.syn] };
+  }
+
+  /** What Nmap checks while it reads its options, before it prints anything. Throws Fatal. */
+  function checkOptions(ctx, o) {
     o.root = ctx.isRoot && !o.unprivileged;
+    if (o.topPorts != null && !/^[1-9]\d*$/.test(o.topPorts)) throw quit('--top-ports should be an integer 1 or greater');
+    if (o.minRate != null && !(/^\d+(\.\d+)?$/.test(o.minRate) && +o.minRate > 0)) throw quit('Argument to --min-rate must be a positive floating-point number');
     if (o.scans.syn && o.scans.connect) {
       throw quit('You specified more than one type of TCP scan.  Please choose only one of -sA, -b, -sT, -sF, -sI, -sM, -sN, -sS, -sW, and -sX');
     }
-    if (o.scans.pingOnly && (o.scans.syn || o.scans.connect || o.scans.udp)) throw quit('-sL and -sn (skip port scan) are not valid with any other scan types');
+    o.noPorts = !!(o.scans.pingOnly || o.scans.list);
+    if (o.noPorts && (o.scans.syn || o.scans.connect || o.scans.udp)) throw quit('-sL and -sn (skip port scan) are not valid with any other scan types');
     if ((o.scans.syn || o.scans.udp) && !o.root) throw quit('You requested a scan type which requires root privileges.');
     if (o.os && !o.root) throw quit('TCP/IP fingerprinting (for OS scan) requires root privileges.');
-    if (o.traceroute && !o.root) throw quit('Traceroute has to be run as root');
     if (o.aggressive) Object.assign(o, { os: o.root, traceroute: o.root }); // -A quietly leaves out what needs root
     o.detect = !!(o.scans.detect || o.aggressive);
-    o.scripts = o.scans.pingOnly ? [] : chosenScripts(ctx, o);
+    o.reason = !!o.reason || o.verbose > 1;
+    o.arp = o.root && !o.disableArpPing;
+  }
+
+  /**
+   * The rest of the plan: ports and discovery probes. Nmap works these out after its opening
+   * line, so a Fatal thrown here follows "Starting Nmap". Warnings are collected in o.warnings.
+   */
+  function planScan(o) {
+    o.warnings = [];
+    if (o.traceroute && !o.root) throw quit('Traceroute has to be run as root');
+    if (o.noPorts && (o.portSpec || o.fast)) throw quit('You cannot use -F (fast scan) or -p (explicit port selection) when not doing a port scan');
     if (o.fast && o.portSpec) {
       throw quit('You cannot use -F (fast scan) with -p (explicit port selection) but see --top-ports and --port-ratio to fast scan a range of ports');
     }
-    if (o.topPorts != null && !/^[1-9]\d*$/.test(o.topPorts)) throw quit('--top-ports should be an integer 1 or greater');
-    o.reason = !!o.reason || o.verbose > 1;
-    o.warnings = [];
-    if (o.scans.pingOnly) return o;
-    o.tcp = o.scans.connect ? 'connect' : o.scans.syn ? 'syn' : o.scans.udp ? null : o.root ? 'syn' : 'connect';
-    o.udp = !!o.scans.udp;
-    const spec = o.portSpec ? parsePortSpec(o.portSpec) : null;
-    const amount = o.fast ? 100 : o.topPorts ? Math.min(65535, +o.topPorts) : 1000;
-    if (spec && spec.duplicates) o.warnings.push('WARNING: Duplicate port number(s) specified.  Are you alert enough to be using Nmap?  Have some coffee or Jolt(tm).');
-    if (spec && spec.named.U && !o.udp) o.warnings.push('WARNING: Your ports include "U:" but you haven\'t specified UDP scan with -sU.');
-    o.tcpPorts = spec ? spec.tcp : topPorts('tcp', amount);
-    o.udpPorts = spec ? spec.udp : topPorts('udp', amount);
-    if (o.tcp && !o.tcpPorts.length) { o.warnings.push('WARNING: a TCP scan type was requested, but no tcp ports were specified.  Skipping this scan type.'); o.tcp = null; }
-    if (o.udp && !o.udpPorts.length) { o.warnings.push('WARNING: UDP scan was requested, but no udp ports were specified.  Skipping this scan type.'); o.udp = false; }
-    return o;
+    if (!o.noPorts) {
+      o.tcp = o.scans.connect ? 'connect' : o.scans.syn ? 'syn' : o.scans.udp ? null : o.root ? 'syn' : 'connect';
+      o.udp = !!o.scans.udp;
+      const spec = o.portSpec ? parsePortSpec(o.portSpec) : null;
+      const amount = o.fast ? 100 : o.topPorts ? Math.min(65535, +o.topPorts) : 1000;
+      if (spec && spec.zero) o.warnings.push('WARNING: Scanning "port 0" is supported, but unusual.');
+      if (spec && spec.duplicates) o.warnings.push('WARNING: Duplicate port number(s) specified.  Are you alert enough to be using Nmap?  Have some coffee or Jolt(tm).');
+      if (spec && spec.named.U && !o.udp) o.warnings.push('WARNING: Your ports include "U:" but you haven\'t specified UDP scan with -sU.');
+      o.tcpPorts = spec ? spec.tcp : topPorts('tcp', amount);
+      o.udpPorts = spec ? spec.udp : topPorts('udp', amount);
+      if (o.tcp && !o.tcpPorts.length) { o.warnings.push('WARNING: a TCP scan type was requested, but no tcp ports were specified.  Skipping this scan type.'); o.tcp = null; }
+      if (o.udp && !o.udpPorts.length) { o.warnings.push('WARNING: UDP scan was requested, but no udp ports were specified.  Skipping this scan type.'); o.udp = false; }
+    }
+    o.probes = pingProbes(o);
   }
 
   /* ---------------------------------------------------------- nmap: discovery */
@@ -422,7 +482,7 @@
       // A privileged Nmap recognises its own address and does not ping it, so a ping scan has no latency to show.
       const measured = !(o.root && o.scans.pingOnly);
       Object.assign(t, { method: 'self', up: true, reason: 'localhost-response', rtt: measured ? K.net.jitter(0.04, 0.03) : null });
-    } else if (o.root && rt.direct) {
+    } else if (o.arp && rt.direct) {
       // On the local Ethernet segment a privileged Nmap asks with ARP, which no host firewall can refuse.
       Object.assign(t, { method: 'arp', up: rt.ok, reason: rt.ok ? 'arp-response' : 'no-response' });
       run.sent(rt.ok ? 1 : 2, 28);
@@ -435,34 +495,51 @@
     } else if (o.root) {
       rawPing(run, t);
     } else {
-      // Without raw sockets all Nmap can do is try to connect to the web ports.
-      const hit = [80, 443].map((port) => K.net.tcp(machine, t.ip, port)).find((r) => r.state !== 'filtered');
+      // Without raw sockets all Nmap can do is try to connect.
+      const hit = o.probes.connect.map((port) => K.net.tcp(machine, t.ip, port)).find((r) => r.state !== 'filtered');
       Object.assign(t, { method: 'connect', up: !!hit, reason: !hit ? 'no-response' : hit.state === 'open' ? 'syn-ack' : 'conn-refused', rtt: hit && hit.rtt });
     }
   }
 
-  /** Privileged discovery beyond the local segment: ICMP echo, SYN to 443, ACK to 80. */
+  /** Privileged discovery without ARP: the first probe that draws any answer shows the host is there. */
   function rawPing(run, t) {
-    const machine = run.ctx.machine;
-    const echo = K.net.ping(machine, t.ip, 0, { id: run.ctx.pid & 0xffff });
-    const syn = K.net.tcp(machine, t.ip, 443);
-    const ack = K.net.tcp(machine, t.ip, 80);
-    run.sent(4, 38);
-    let reason = 'no-response'; let rtt;
-    if (echo.status === 'reply') { reason = 'echo-reply'; rtt = echo.rtt; }
-    else if (syn.state !== 'filtered') { reason = syn.state === 'open' ? 'syn-ack' : 'reset'; rtt = syn.rtt; }
-    else if (ack.state !== 'filtered') { reason = 'reset'; rtt = ack.rtt; }
-    const up = reason !== 'no-response';
+    const machine = run.ctx.machine; const probes = run.o.probes;
+    const answers = [];
+    if (probes.icmp) {
+      const echo = K.net.ping(machine, t.ip, 0, { id: run.ctx.pid & 0xffff });
+      if (echo.status === 'reply') answers.push({ reason: 'echo-reply', rtt: echo.rtt });
+    }
+    for (const port of probes.syn) {
+      const r = K.net.tcp(machine, t.ip, port);
+      if (r.state !== 'filtered') answers.push({ reason: r.state === 'open' ? 'syn-ack' : 'reset', rtt: r.rtt });
+    }
+    for (const port of probes.ack) {
+      const r = K.net.tcp(machine, t.ip, port);
+      if (r.state !== 'filtered') answers.push({ reason: 'reset', rtt: r.rtt });
+    }
+    for (const port of probes.udp) {
+      const r = K.net.udp(machine, t.ip, port);
+      if (r.state === 'open' || r.state === 'closed') answers.push({ reason: r.reason, rtt: r.rtt });
+    }
+    run.sent(pingProbeCount(run.o, 'raw'), 38);
+    const up = answers.length > 0;
     if (up) run.received(1, 40);
-    Object.assign(t, { method: 'raw', up, reason, rtt, showTtl: up });
+    Object.assign(t, { method: 'raw', up, reason: up ? answers[0].reason : 'no-response', rtt: up ? answers[0].rtt : undefined, showTtl: up });
   }
 
   const PING_NAMES = { arp: 'ARP Ping Scan', raw: 'Ping Scan', connect: 'Ping Scan' };
-  const PING_PROBES = { arp: 1, raw: 4, connect: 2 };
+
+  /** How many probes one host gets in a discovery round (the default privileged set includes an ICMP timestamp request). */
+  function pingProbeCount(o, method) {
+    if (method === 'arp') return 1;
+    if (method === 'connect') return o.probes.connect.length;
+    const p = o.probes;
+    return (p.icmp ? (o.pings ? 1 : 2) : 0) + p.syn.length + p.ack.length + p.udp.length;
+  }
 
   /** Simulated duration of one discovery round: answers arrive together, silence is retried once. */
   function discoveryCost(o, hosts, method) {
-    if (o.timing <= 2) return hosts.length * PING_PROBES[method] * SERIAL_DELAY[o.timing];
+    if (o.timing <= 2) return hosts.length * pingProbeCount(o, method) * SERIAL_DELAY[o.timing];
     const down = hosts.filter((t) => !t.up).length;
     const slowest = hosts.reduce((ms, t) => Math.max(ms, t.up ? t.rtt : 0), 0);
     let ms = 25 + slowest * 2 + hosts.length * 0.4;
@@ -475,8 +552,8 @@
     for (const method of ['arp', 'raw', 'connect']) {
       const hosts = group.filter((t) => t.method === method);
       if (!hosts.length) continue;
-      const per = PING_PROBES[method] === 1 ? 'port' : 'ports';
-      const what = hosts.length === 1 ? hosts[0].ip + ' [' + PING_PROBES[method] + ' ' + per + ']' : hosts.length + ' hosts [' + PING_PROBES[method] + ' ' + per + '/host]';
+      const probes = plural(pingProbeCount(run.o, method), 'port', 'ports');
+      const what = hosts.length === 1 ? hosts[0].ip + ' [' + probes + ']' : hosts.length + ' hosts [' + probes + '/host]';
       await phase(run, PING_NAMES[method], what, () => run.wait(discoveryCost(run.o, hosts, method)), () => plural(hosts.length, 'total hosts', 'total hosts'));
     }
   }
@@ -533,10 +610,12 @@
 
   /** Simulated duration of probing some ports: answers come back at LAN speed, silence costs retransmissions. */
   function portScanCost(o, answered, silent, total) {
-    if (o.timing <= 2) return (answered + silent * 2) * SERIAL_DELAY[o.timing];
+    const packets = answered + silent * 2;
     const quick = total <= 1000 ? 0.55 : (550 + 0.28 * (total - 1000)) / total;
     const slow = total <= 1000 ? 4.2 : (4200 + 2 * (total - 1000)) / total;
-    return (answered * quick + silent * slow) * SPEED[o.timing];
+    const cost = o.timing <= 2 ? packets * SERIAL_DELAY[o.timing] : (answered * quick + silent * slow) * SPEED[o.timing];
+    // --min-rate keeps Nmap sending at least that many packets a second, whatever the template says.
+    return o.minRate ? Math.min(cost, (packets / +o.minRate) * 1000) : cost;
   }
 
   async function scanHostPorts(run, t, kind, ports, share) {
@@ -887,6 +966,14 @@
     return 'Host is up' + why + (t.rtt == null ? '' : ' (' + sigDigits(t.rtt / 1000, 2) + 's latency)') + '.';
   }
 
+  /** The IPv6 addresses /etc/hosts gives a name: Nmap scans one address and mentions the rest. */
+  function otherAddresses(machine, name) {
+    let hosts = '';
+    try { hosts = machine.vfs.read('/etc/hosts'); } catch (e) { /* no hosts file, no other addresses */ }
+    return hosts.split('\n').map((line) => line.replace(/#.*/, '').trim().split(/\s+/))
+      .filter((words) => words[0].indexOf(':') >= 0 && words.slice(1).some((w) => w.toLowerCase() === name.toLowerCase())).map((words) => words[0]);
+  }
+
   const isOpenish = (state) => state === 'open' || state === 'open|filtered';
 
   /** Split a host's results into the rows Nmap prints and the states it only counts ("Not shown"). */
@@ -941,6 +1028,8 @@
     const o = run.o; const label = hostLabel(o, t);
     if (!t.up) return o.verbose ? ['Nmap scan report for ' + label + ' [host down' + (o.reason ? ', received ' + t.reason : '') + ']'] : [];
     const lines = ['Nmap scan report for ' + label, hostUpLine(o, t)];
+    const others = t.given ? otherAddresses(run.ctx.machine, t.given) : [];
+    if (others.length) lines.push('Other addresses for ' + t.given + ' (not scanned): ' + others.join(' '));
     if (t.given && t.ptr && t.ptr !== t.given && !o.noDns) lines.push('rDNS record for ' + t.ip + ': ' + t.ptr);
     if (t.scans.length) {
       const sum = portSummary(o, t);
@@ -992,7 +1081,7 @@
     }
     for (const t of run.hosts) {
       const host = 'Host: ' + t.ip + ' (' + (t.given || t.ptr || '') + ')';
-      lines.push(host + '\tStatus: ' + (t.up ? 'Up' : 'Down'));
+      lines.push(host + '\tStatus: ' + (t.listed ? 'Unknown' : t.up ? 'Up' : 'Down'));
       if (!t.up || !t.scans.length) continue;
       const sum = portSummary(o, t);
       if (o.open && !sum.rows.length) continue;
@@ -1039,7 +1128,7 @@
   }
 
   function xmlHost(run, t) {
-    const status = '<status' + attrs({ state: t.up ? 'up' : 'down', reason: t.reason, reason_ttl: t.showTtl ? t.ttl : 0 }) + '/>';
+    const status = '<status' + attrs({ state: t.listed ? 'unknown' : t.up ? 'up' : 'down', reason: t.listed ? 'user-set' : t.reason, reason_ttl: t.showTtl ? t.ttl : 0 }) + '/>';
     const out = [(t.up ? '<host' + attrs({ starttime: Math.floor(run.started / 1000), endtime: Math.floor(t.finished / 1000) }) + '>' : '<host>') + status,
       '<address' + attrs({ addr: t.ip, addrtype: 'ipv4' }) + '/>'];
     if (t.mac) out.push('<address' + attrs({ addr: t.mac, addrtype: 'mac', vendor: t.vendor === 'Unknown' ? null : t.vendor }) + '/>');
@@ -1098,19 +1187,16 @@
 
   /* --------------------------------------------------------------- nmap: main */
 
-  function nmapTargets(run) {
-    const ctx = run.ctx; const o = run.o; const specs = [];
-    let words = o.targets;
-    if (o.inputFile != null) {
-      let text;
-      if (o.inputFile === '-') text = ctx.stdin || '';
-      else {
-        try { text = ctx.fs.read(o.inputFile); } catch (e) {
-          throw quit('Failed to open input file ' + o.inputFile + ' for reading: ' + e.message + ' (2)');
-        }
-      }
-      words = text.replace(/#.*/g, '').split(/\s+/).filter(Boolean).concat(words);
+  /** The text of the -iL file. Nmap opens it while it reads its options; "-" (standard input) is read later. */
+  function inputFileText(ctx, o) {
+    if (o.inputFile == null || o.inputFile === '-') return '';
+    try { return ctx.fs.read(o.inputFile); } catch (e) {
+      throw quit('Failed to open input file ' + o.inputFile + ' for reading: ' + e.message + ' (' + (e.code === 'EACCES' ? 13 : 2) + ')');
     }
+  }
+
+  function nmapTargets(run, words) {
+    const ctx = run.ctx; const o = run.o; const specs = [];
     for (const word of words) {
       const spec = parseTarget(ctx.machine, word);
       if (spec) specs.push(spec);
@@ -1127,8 +1213,20 @@
     })();
   }
 
+  /** -sL: name the targets and send them nothing. */
+  async function listGroup(run, group) {
+    await resolveNames(run, group);
+    for (const t of group) {
+      t.listed = true;
+      run.report('Nmap scan report for ' + hostLabel(run.o, t));
+      run.hosts.push(t);
+    }
+    run.total += group.length;
+  }
+
   async function scanGroup(run, group) {
     const o = run.o;
+    if (o.scans.list) return listGroup(run, group);
     await discover(run, group);
     const up = group.filter((t) => t.up);
     await resolveNames(run, o.alwaysDns ? group : up);
@@ -1150,11 +1248,20 @@
 
   const GROUP_SIZE = 256;
 
+  /** Nmap's format_bytecount: 28B, 44.000KB, 2.880MB. */
+  const byteCount = (n) => (n < 1000 ? n + 'B' : n < 1e6 ? (n / 1000).toFixed(3) + 'KB' : (n / 1e6).toFixed(3) + 'MB');
+
   async function nmapScan(run) {
-    const o = run.o; const targets = nmapTargets(run);
-    openOutputs(run.ctx, o);
+    const o = run.o; const ctx = run.ctx;
+    let listed = inputFileText(ctx, o);
+    openOutputs(ctx, o);
+    if (o.verbose) for (const notice of o.notices) ctx.err(notice + '\n');
     run.say('Starting Nmap ' + NMAP_VERSION + ' ( https://nmap.org ) at ' + ymd(run.started) + ' ' + hhmm(run.started) + ' UTC');
-    for (const w of o.warnings) run.ctx.err(w + '\n');
+    planScan(o);
+    for (const w of o.warnings) ctx.err(w + '\n');
+    o.scripts = o.noPorts ? [] : chosenScripts(ctx, o);
+    if (o.inputFile === '-') listed = await stdinText(ctx);
+    const targets = nmapTargets(run, listed.replace(/#.*/g, '').split(/\s+/).filter(Boolean).concat(o.targets));
     if (o.scripts.length) run.verbose('NSE: Loaded ' + plural(o.scripts.length, 'script', 'scripts') + ' for scanning.');
     await run.wait(K.net.jitter(25, 20));
     let group = [];
@@ -1163,16 +1270,16 @@
       if (group.length === GROUP_SIZE) { await scanGroup(run, group); group = []; }
     }
     if (group.length) await scanGroup(run, group);
+    if (o.verbose) run.report('Read data files from: /usr/share/nmap');
     if (!run.total) run.ctx.err('WARNING: No targets were specified, so 0 hosts scanned.\n');
-    if (run.total === 1 && !run.up && !o.skipPing) run.report('Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn');
-    if (o.verbose) run.say('Read data files from: /usr/share/nmap');
     const detected = [o.os && 'OS', o.detect && 'Service'].filter(Boolean).join(' and ');
-    if (detected) run.report(detected + ' detection performed. Please report any incorrect results at https://nmap.org/submit/ .');
+    // The hint is for the screen only; Nmap leaves it out of the -oN file.
+    if (run.total === 1 && !run.up && !o.skipPing && !o.scans.list) run.say('Note: Host seems down. If it is really up, but blocking our ping probes, try -Pn');
+    else if (detected && run.up) run.report(detected + ' detection performed. Please report any incorrect results at https://nmap.org/submit/ .');
     run.say('Nmap done: ' + scanStats(run));
     writeOutputs(run);
     if (o.verbose && o.root) {
-      const kb = (bytes) => (bytes / 1000).toFixed(3) + 'KB';
-      run.say('           Raw packets sent: ' + run.raw.sent + ' (' + kb(run.raw.sentBytes) + ') | Rcvd: ' + run.raw.rcvd + ' (' + kb(run.raw.rcvdBytes) + ')');
+      run.say('           Raw packets sent: ' + run.raw.sent + ' (' + byteCount(run.raw.sentBytes) + ') | Rcvd: ' + run.raw.rcvd + ' (' + byteCount(run.raw.rcvdBytes) + ')');
     }
   }
 
@@ -1203,8 +1310,11 @@
     '  -iL <inputfilename>: Input from list of hosts/networks',
     '  --exclude <host1[,host2][,host3],...>: Exclude hosts/networks',
     'HOST DISCOVERY:',
+    '  -sL: List Scan - simply list targets to scan',
     '  -sn: Ping Scan - disable port scan',
     '  -Pn: Treat all hosts as online -- skip host discovery',
+    '  -PS/PA/PU[portlist]: TCP SYN, TCP ACK or UDP discovery to given ports',
+    '  -PE/PP/PM: ICMP echo, timestamp, and netmask request discovery probes',
     '  -n/-R: Never do DNS resolution/Always resolve [default: sometimes]',
     '  --traceroute: Trace hop path to each host',
     'SCAN TECHNIQUES:',
@@ -1226,6 +1336,7 @@
     '  -O: Enable OS detection',
     'TIMING AND PERFORMANCE:',
     '  -T<0-5>: Set timing template (higher is faster)',
+    '  --min-rate <number>: Send packets no slower than <number> per second',
     'OUTPUT:',
     '  -oN/-oX/-oG <file>: Output scan in normal, XML,',
     '     and Grepable format, respectively, to the given filename.',
@@ -1250,18 +1361,17 @@
     'Compiled without:\nAvailable nsock engines: epoll poll select\n';
 
   async function nmapRun(ctx) {
-    let run;
     try {
       if (!ctx.args.length) { ctx.out(NMAP_USAGE); return 255; }
       const o = nmapOptions(ctx.args);
       if (o.help) { ctx.out(NMAP_USAGE); return 0; }
       if (o.version) { ctx.out(NMAP_VERSION_TEXT); return 0; }
-      run = newRun(ctx, nmapPlan(ctx, o));
-      await nmapScan(run);
+      checkOptions(ctx, o);
+      await nmapScan(newRun(ctx, o));
       return 0;
     } catch (e) {
-      if (e instanceof Fatal) { ctx.err(e.text); return e.code; }
-      if (e instanceof K.Interrupt) { ctx.err('caught SIGINT signal, cleaning up\n'); return 130; }
+      if (e instanceof Fatal) { if (e.usage) ctx.out(NMAP_USAGE); ctx.err(e.text); return e.code; }
+      if (e instanceof K.Interrupt) { ctx.err('caught SIGINT signal, cleaning up\n'); return 1; }
       throw e;
     }
   }
@@ -1270,6 +1380,14 @@
   function labTargets() {
     const world = K.net.world;
     return world.hosts.filter((h) => h.fqdn).map((h) => h.fqdn).concat(world.engagement.scope).sort();
+  }
+
+  function nmapComplete(info) {
+    const before = info.words[info.index - 1] || '';
+    if (before === '--script') return Object.keys(NSE_SCRIPTS).concat('default');
+    if (/^-(iL|o[NGXA])$/.test(before)) return []; // a file name: leave it to path completion
+    if (info.cur.startsWith('--')) return Object.keys(NMAP_LONG).map((name) => '--' + name);
+    return info.cur[0] === '-' ? [] : labTargets();
   }
 
   K.cmd.register({
@@ -1290,25 +1408,46 @@
       '       Targets are host names, addresses, CIDR blocks (10.10.10.0/24) or octet ranges (10.10.10.1-20, 10.10.10.1,10,20).\n' +
       '       -iL FILE\n              Read targets from FILE (- for standard input).\n' +
       '       --exclude HOST[,HOST...]\n              Leave these hosts or networks out.\n\n' +
-      'OPTIONS\n' +
+      'HOST DISCOVERY\n' +
+      '       -sL    List scan: name the targets and send them nothing.\n' +
       '       -sn    Ping scan: discover hosts, do not scan ports.\n' +
       '       -Pn    Skip host discovery and treat every target as up.\n' +
+      '       -PS[PORTS], -PA[PORTS], -PU[PORTS], -PE\n' +
+      '              Discover hosts with TCP SYN, TCP ACK, UDP or ICMP echo probes instead of the default set. Without root every TCP ' +
+      'probe is a connect() and the others are not available.\n' +
+      '       --disable-arp-ping\n              Do not use ARP on the local network; use the IP-level probes there too.\n' +
+      '       -n, -R Never, or always, look up reverse DNS names.\n' +
+      '       --traceroute\n              Show the hops to each host (root).\n\n' +
+      'SCAN TECHNIQUES AND PORTS\n' +
       '       -sS    TCP SYN scan (default for root). Requires root privileges.\n' +
       '       -sT    TCP connect scan (default without root).\n' +
-      '       -p RANGES\n              Scan only these ports: -p22, -p1-1024, -p22,80,443, -p- for all 65535.\n' +
+      '       -sU\n              UDP scan. Requires root privileges. Slow, because hosts limit how fast they report closed ports.\n' +
+      '       -p RANGES\n              Scan only these ports: -p22, -p1-1024, -p22,80,443, -p- for all 65535, -p U:53,T:22 per protocol.\n' +
       '       -F     Fast: scan the 100 most common ports.\n' +
-      '       --top-ports N\n              Scan the N most common ports.\n' +
+      '       --top-ports N\n              Scan the N most common ports.\n\n' +
+      'SERVICE, OS AND SCRIPT DETECTION\n' +
+      '       -sV\n              Ask the open ports what they are and show product and version in a VERSION column.\n' +
+      '       -O     Guess the operating system from how the host answers (root).\n' +
+      '       -sC    Run the default scripts; the same as --script=default.\n' +
+      '       --script NAMES\n              Run the named scripts. This simulation has these informational ones: banner, ftp-anon, ' +
+      'http-robots.txt, http-server-header, http-title, smtp-commands, ssh-hostkey, ssl-cert.\n' +
+      '       -A     Aggressive: -sV, -sC and, as root, -O and --traceroute.\n\n' +
+      'TIMING\n' +
+      '       -T0 ... -T5\n              Timing template, from paranoid (very slow) to insane. -T3 is the default.\n' +
+      '       --min-rate N\n              Send at least N packets per second.\n\n' +
+      'OUTPUT\n' +
+      '       -oN FILE, -oG FILE, -oX FILE\n              Also write the results to FILE in normal, grepable or XML format (- for standard output).\n' +
+      '       -oA BASENAME\n              Write all three: BASENAME.nmap, BASENAME.gnmap and BASENAME.xml.\n' +
       '       --open Show only open ports.\n' +
       '       --reason\n              Show why each port is in its state (syn-ack, reset, conn-refused, no-response).\n' +
-      '       -n, -R Never, or always, look up reverse DNS names.\n' +
-      '       -T0 ... -T5\n              Timing template, from paranoid (very slow) to insane. -T3 is the default.\n' +
       '       -v     More detail while the scan runs. May be given twice.\n' +
       '       -h, -V Print the option summary, or the version.\n\n' +
       'EXAMPLES\n' +
       '       nmap -sn 10.10.10.0/24\n              Which hosts of the lab network are up?\n' +
-      '       sudo nmap -p 22,80,443 --reason web01.halcyon.lab\n              Check three ports on one host and show the evidence for each state.',
+      '       sudo nmap -p 22,80,443 --reason web01.halcyon.lab\n              Check three ports on one host and show the evidence for each state.\n' +
+      '       sudo nmap -sV -O -oA files01 files01.halcyon.lab\n              Services, versions and operating system of one host, saved in all three formats.',
     run: nmapRun,
-    complete: (info) => (info.cur[0] === '-' ? [] : labTargets()),
+    complete: nmapComplete,
   });
 
   /* ------------------------------------------------------------------ arp-scan */
@@ -1540,13 +1679,6 @@
     return what + " -- '" + long[1] + "'";
   }
 
-  /** Everything on standard input: the pipe, or lines typed at the terminal until Ctrl-D. */
-  async function stdinText(ctx) {
-    if (ctx.stdin != null) return ctx.stdin;
-    let text = '';
-    for (let line = await ctx.readLine(''); line != null; line = await ctx.readLine('')) text += line + '\n';
-    return text;
-  }
 
   /** Resolve fping's target words; returns { targets: [{ip, label}], unknown } after the scope guard. */
   function fpingTargets(ctx, o, words) {

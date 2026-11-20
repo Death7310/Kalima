@@ -219,17 +219,32 @@ test('nmap: errors use the real wording and exit codes', async () => {
     const r = await sim.run(line);
     assert.deepEqual([r.code, r.err, r.out], [code, err, ''], line);
   };
+  // Ports and probes are worked out after the opening line, so these errors follow it.
+  const failsLate = async (line, err) => {
+    const r = await sim.run(line);
+    assert.deepEqual([r.code, r.err], [1, err + '\nQUITTING!\n'], line);
+    assert.match(r.out, /^Starting Nmap 7\.98 [^\n]*\n$/, line);
+  };
   await fails('nmap -sS 10.10.10.10', 1, 'You requested a scan type which requires root privileges.\nQUITTING!\n');
   await fails('nmap --bogus 10.10.10.10', 255, "nmap: unrecognized option '--bogus'\nSee the output of nmap -h for a summary of options.\n");
   await fails('nmap -Z 10.10.10.10', 255, "nmap: invalid option -- 'Z'\nSee the output of nmap -h for a summary of options.\n");
   await fails('nmap 10.10.10.10 -p', 255, "nmap: option requires an argument -- 'p'\nSee the output of nmap -h for a summary of options.\n");
-  await fails('nmap -sK 10.10.10.10', 1, 'Scantype K not supported\nQUITTING!\n');
+  let r = await sim.run('nmap -sK 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [255, 'Scantype K not supported\n\n']);
+  assert.match(r.out, /^Nmap 7\.98 \( https:\/\/nmap\.org \)\nUsage: nmap /, 'an unknown scan type prints the usage summary first');
+  r = await sim.run('nmap -s');
+  assert.deepEqual([r.code, r.err], [255, 'An option is required for -s, most common are -sT (tcp scan), -sS (SYN scan), -sF (FIN scan), -sU (UDP scan) and -sn (Ping scan)\n']);
   await fails('nmap -PX 10.10.10.10', 1, 'Illegal Argument to -P, use -Pn, -PE, -PS, -PA, -PP, -PM, -PU, -PY, or -PO\nQUITTING!\n');
   await fails('nmap -T9 10.10.10.10', 1, 'Unknown timing mode (-T argument).  Use either "Paranoid", "Sneaky", "Polite", "Normal", "Aggressive", "Insane" or a number from 0 (Paranoid) to 5 (Insane)\nQUITTING!\n');
-  await fails('nmap -p 70000 10.10.10.10', 1, 'Ports specified must be between 0 and 65535 inclusive\nQUITTING!\n');
-  await fails('nmap -p 80-22 10.10.10.10', 1, 'Your port specifications are illegal.  Example of proper form: "-100,200-1024,T:3000-4000,U:60000-"\nQUITTING!\n');
-  await fails('nmap -p nosuchservice 10.10.10.10', 1, "Found no matches for the service mask 'nosuchservice' and your specified protocols\nQUITTING!\n");
-  await fails('nmap -F -p 22 10.10.10.10', 1, 'You cannot use -F (fast scan) with -p (explicit port selection) but see --top-ports and --port-ratio to fast scan a range of ports\nQUITTING!\n');
+  await failsLate('nmap -p 70000 10.10.10.10', 'Ports specified must be between 0 and 65535 inclusive');
+  await failsLate('nmap -p 80-22 10.10.10.10', 'Your port range 80-22 is backwards. Did you mean 22-80?');
+  await failsLate('nmap -p 22:80 10.10.10.10', 'Your port specifications are illegal.  Example of proper form: "-100,200-1024,T:3000-4000,U:60000-"');
+  await failsLate('nmap -p nosuchservice 10.10.10.10', "Found no matches for the service mask 'nosuchservice' and your specified protocols");
+  await failsLate('nmap -F -p 22 10.10.10.10', 'You cannot use -F (fast scan) with -p (explicit port selection) but see --top-ports and --port-ratio to fast scan a range of ports');
+  await failsLate('nmap -sn -p 22 10.10.10.10', 'You cannot use -F (fast scan) or -p (explicit port selection) when not doing a port scan');
+  await failsLate('nmap --traceroute 10.10.10.10', 'Traceroute has to be run as root');
+  await fails('nmap -sL -sT 10.10.10.10', 1, '-sL and -sn (skip port scan) are not valid with any other scan types\nQUITTING!\n');
+  await fails('nmap --min-rate fast 10.10.10.10', 1, 'Argument to --min-rate must be a positive floating-point number\nQUITTING!\n');
   await fails('nmap --top-ports 0 10.10.10.10', 1, '--top-ports should be an integer 1 or greater\nQUITTING!\n');
   await fails('sudo nmap -sS -sT 10.10.10.10', 1, 'You specified more than one type of TCP scan.  Please choose only one of -sA, -b, -sT, -sF, -sI, -sM, -sN, -sS, -sW, and -sX\nQUITTING!\n');
   const dup = await sim.run('nmap -p 22,22 10.10.10.10');
@@ -260,7 +275,7 @@ test('nmap -v: phases, discovered ports, down hosts and packet counts', async ()
   assert.deepEqual(lines.slice(1, 4), ['Initiating ARP Ping Scan at 14:30', 'Scanning 10.10.10.10 [1 port]', 'Completed ARP Ping Scan at 14:30, ' + /, (\d\.\d\ds)/.exec(lines[3])[1] + ' elapsed (1 total hosts)']);
   assert.match(r.out, /Initiating Parallel DNS resolution of 1 host\. at 14:30\nCompleted Parallel DNS resolution of 1 host\. at 14:30, 0\.0\ds elapsed\n/);
   assert.match(r.out, /Initiating SYN Stealth Scan at 14:30\nScanning web01\.halcyon\.lab \(10\.10\.10\.10\) \[3 ports\]\nDiscovered open port 22\/tcp on 10\.10\.10\.10\nDiscovered open port 80\/tcp on 10\.10\.10\.10\nCompleted SYN Stealth Scan at 14:30, \d\.\d\ds elapsed \(3 total ports\)\n/);
-  assert.match(r.out, /\nRead data files from: \/usr\/share\/nmap\nNmap done: 1 IP address \(1 host up\) scanned in \d\.\d\d seconds\n {11}Raw packets sent: 4 \(0\.160KB\) \| Rcvd: 4 \(0\.156KB\)\n$/);
+  assert.match(r.out, /\nRead data files from: \/usr\/share\/nmap\nNmap done: 1 IP address \(1 host up\) scanned in \d\.\d\d seconds\n {11}Raw packets sent: 4 \(160B\) \| Rcvd: 4 \(156B\)\n$/);
 
   r = await sim.run('nmap -v -sn 10.10.10.9-10');
   assert.match(r.out, /Initiating Ping Scan at 14:30\nScanning 2 hosts \[2 ports\/host\]\n/);
@@ -290,6 +305,79 @@ test('nmap: output works in pipelines and redirections', async () => {
   assert.equal((await sim.run("nmap -sn 10.10.10.0/24 | grep 'scan report' | cut -d' ' -f5 | head -3")).out, 'gw.halcyon.lab\nkali\nweb01.halcyon.lab\n');
   await sim.run('nmap -p 22 10.10.10.30 > /tmp/scan.txt 2>&1');
   assert.match((await sim.run('grep -c open /tmp/scan.txt')).out, /^1\n$/);
+});
+
+test('nmap -sL lists the targets without sending them anything', async () => {
+  const sim = await lab();
+  const packets = [];
+  sim.K.net.bus.on('packet', (p) => { if (p.proto !== 'UDP') packets.push(p); });
+  let r = await sim.run('nmap -sL 10.10.10.0/29');
+  assert.deepEqual(r.out.split('\n').slice(1), [
+    'Nmap scan report for 10.10.10.0', 'Nmap scan report for gw.halcyon.lab (10.10.10.1)', 'Nmap scan report for 10.10.10.2',
+    'Nmap scan report for 10.10.10.3', 'Nmap scan report for 10.10.10.4', 'Nmap scan report for kali (10.10.10.5)',
+    'Nmap scan report for 10.10.10.6', 'Nmap scan report for 10.10.10.7',
+    'Nmap done: 8 IP addresses (0 hosts up) scanned in ' + seconds(r.out).toFixed(2) + ' seconds', '',
+  ]);
+  assert.deepEqual(packets, [], 'only DNS questions leave the machine');
+  assert.equal((await sim.run('nmap -sL -n 10.10.10.10-11 | grep -c report')).out, '2\n');
+  assert.equal((await sim.run('nmap -sL -oG - 10.10.10.10 | grep Status')).out, 'Host: 10.10.10.10 (web01.halcyon.lab)\tStatus: Unknown\n');
+  r = await sim.run('nmap -sL 10.10.9.0/24');
+  assert.match(r.err, /Out-of-scope target blocked: 10\.10\.9\.0/);
+  assert.match(r.out, /Nmap done: 0 IP addresses/);
+});
+
+test('nmap: discovery probes can be chosen with -PS, -PA, -PE and -PU', async () => {
+  const sim = await lab();
+  let r = await sim.run('nmap -sn -PS445 dc01.halcyon.lab backup01.halcyon.lab');
+  assert.match(r.out, /Nmap scan report for dc01\.halcyon\.lab \(10\.10\.10\.50\)\nHost is up/, 'a connect to 445 finds the host that filters 80 and 443');
+  assert.match(r.out, /Nmap done: 2 IP addresses \(1 host up\)/);
+  r = await sim.run('nmap -v -sn -PS22,873 -PA445 10.10.10.90');
+  assert.match(r.out, /Scanning 10\.10\.10\.90 \[3 ports\]\n/);
+  assert.match(r.out, /Nmap scan report for backup01\.halcyon\.lab \(10\.10\.10\.90\)\nHost is up/);
+
+  r = await sim.run('nmap -sn -PE 10.10.10.50');
+  assert.equal(r.err, 'Warning:  You are not root -- using TCP pingscan rather than ICMP\n');
+  assert.match(r.out, /Note: Host seems down/, 'the fallback is a connect to port 80');
+  r = await sim.run('nmap -sn -PU 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [1, 'Sorry, UDP Ping (-PU) only works if you are root (because we need to read raw responses off the wire)\nQUITTING!\n']);
+  r = await sim.run('nmap -sn -PS22 -PS80 10.10.10.10');
+  assert.deepEqual([r.code, r.err], [1, 'Only one -PS option is allowed. Combine port ranges with commas.\nQUITTING!\n']);
+  r = await sim.run('nmap -sn -PSssh 10.10.10.10');
+  assert.equal(r.err, 'Bogus argument to -PS: ssh\nQUITTING!\n');
+
+  // As root the local network is asked with ARP whatever the probes; --disable-arp-ping shows what they alone find.
+  r = await sim.run('sudo nmap -sn -PE 10.10.10.50');
+  assert.match(r.out, /Host is up[^\n]*\nMAC Address: /);
+  r = await sim.run('sudo nmap -sn --disable-arp-ping --reason 10.10.10.10 10.10.10.50');
+  assert.match(r.out, /Nmap scan report for web01\.halcyon\.lab \(10\.10\.10\.10\)\nHost is up, received echo-reply ttl 64 \(0\.\d+s latency\)\.\nNmap done: 2 IP addresses \(1 host up\)/);
+  assert.doesNotMatch(r.out, /MAC Address/);
+  r = await sim.run('sudo nmap -sn --disable-arp-ping -PS445 -PU --reason 10.10.10.50');
+  assert.match(r.out, /Host is up, received syn-ack ttl 128 /);
+  r = await sim.run('sudo nmap -v -sn --disable-arp-ping 10.10.10.50');
+  assert.match(r.out, /Scanning 10\.10\.10\.50 \[4 ports\]\n/);
+  assert.match(r.out, /Raw packets sent: 4 \(152B\) \| Rcvd: 0 \(0B\)\n$/);
+});
+
+test('nmap: what else the report says (other addresses, -Pn notice, min-rate, port 0)', async () => {
+  const sim = await lab();
+  let r = await sim.run('nmap -p 22 localhost');
+  assert.match(r.out, /Nmap scan report for localhost \(127\.0\.0\.1\)\nHost is up \(0\.0000\d+s latency\)\.\nOther addresses for localhost \(not scanned\): ::1\nPORT /);
+  r = await sim.run('nmap -Pn -v -p 22 10.10.10.10');
+  assert.equal(r.err, "Host discovery disabled (-Pn). All addresses will be marked 'up' and scan times may be slower.\n");
+  assert.equal((await sim.run('nmap -Pn -p 22 10.10.10.10')).err, '');
+  const slow = seconds((await sim.run('nmap -Pn -p- 10.10.10.90')).out);
+  const pushed = seconds((await sim.run('nmap -Pn -p- --min-rate 5000 10.10.10.90')).out);
+  assert.ok(pushed < slow / 3 && pushed > 10, `--min-rate shortens the scan: ${pushed} < ${slow}`);
+  r = await sim.run('nmap -p 0-2 10.10.10.10');
+  assert.equal(r.err, 'WARNING: Scanning "port 0" is supported, but unusual.\n');
+  assert.deepEqual(portLines(r.out).slice(1), ['0/tcp closed unknown', '1/tcp closed tcpmux', '2/tcp closed compressnet']);
+
+  r = await sim.run('nmap -sV -oN /tmp/down.nmap backup01.halcyon.lab');
+  assert.doesNotMatch(r.out, /detection performed/, 'nothing was detected on a host that seems down');
+  assert.doesNotMatch((await sim.run('cat /tmp/down.nmap')).out, /Note: Host seems down/, 'the hint is for the screen only');
+  sim.term.feed('10.10.10.30');
+  r = await sim.run('nmap -sn -iL -');
+  assert.match(r.out, /Nmap scan report for db01\.halcyon\.lab/, 'without a pipe the list is typed at the terminal');
 });
 
 /* ------------------------------------------- nmap: detection and output files */
@@ -510,12 +598,15 @@ test('nmap: tab completion offers lab hosts and the network in scope', async () 
   assert.deepEqual(complete('nmap web'), ['web01.halcyon.lab']);
   assert.deepEqual(complete('nmap -sn 10.'), ['10.10.10.0/24']);
   assert.ok(complete('sudo nmap -p 22 ').includes('dc01.halcyon.lab'));
+  assert.deepEqual(complete('nmap --to'), ['--top-ports']);
+  assert.deepEqual(complete('nmap --script http-t'), ['http-title']);
+  assert.deepEqual(complete('nmap -iL /etc/hostn'), ['/etc/hostname'], 'file names after -iL and -oN');
 });
 
 test('nmap: Ctrl-C stops a running scan', async () => {
   const sim = await lab();
   const r = await interrupted(sim, 'nmap -Pn -p- 10.10.10.90');
-  assert.equal(r.code, 130);
+  assert.equal(r.code, 1, 'Nmap catches the signal and exits with status 1');
   assert.match(r.output, /^Starting Nmap 7\.98/);
   assert.match(r.output, /caught SIGINT signal, cleaning up\n$/);
   assert.doesNotMatch(r.output, /Nmap done/);
