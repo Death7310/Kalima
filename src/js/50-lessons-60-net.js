@@ -215,12 +215,189 @@
     refs: ['ip(8)', 'ip-address(8)', 'hostname(1)', 'RFC 4632 (CIDR notation)', 'RFC 1918 (private addresses)', 'Kali Linux Revealed, ch. 5'],
   };
 
+  /* ---------------------------------------------------------------- routes */
+  const routesLesson = {
+    id: 'net-routes',
+    title: 'Routes and the default gateway',
+    minutes: 10,
+    objectives: [
+      'Read the routing table with `ip route` and tell the connected route from the default route',
+      'Name your default gateway and explain what it is for',
+      'Ask the kernel with `ip route get` how it would reach a particular address',
+      'Read the neighbor table with `ip neigh` to see which machines yours hands data to directly',
+    ],
+    intro: T(
+      'Your address tells you who your neighbors are. The routing table tells your machine what to do with a packet for everybody else. It is a short list of rules, and on a workstation two of them matter: one for the local network and one for the rest of the world.',
+      '',
+      'Reading it answers practical questions quickly. Why can I reach the lab but not the internet? Which interface will this traffic leave by? A tester\'s machine often has several connections at once, for example a lab network and a VPN. The routing table shows which of them a packet for a given target would really travel over, and you can find that out before you send anything.'
+    ),
+    steps: [
+      {
+        id: 'table',
+        prompt: T(
+          'Print the routing table:',
+          '',
+          '```',
+          'ip route',
+          '```',
+          '',
+          'Each line is a rule: a destination, followed by how to reach it. Start with the second line.',
+          '',
+          '- `10.10.10.0/24 dev eth0` says that addresses in your own network are reached directly through `eth0`. `scope link` means "on this link, no router needed", and `proto kernel` means the kernel added the rule by itself when the interface received its address. This is the *connected route*.',
+          '- `default via 10.10.10.1 dev eth0` covers every destination that no other line matches. `via` names the router such packets are handed to, the *default gateway*. `proto dhcp` says the rule arrived from the DHCP server together with your address.',
+          '',
+          'When several lines match a destination, the most specific one wins, which is the one with the longest prefix. `default` is the least specific rule there is.'
+        ),
+        hint: 'Type `ip route`, or `ip r` for short. If it prints nothing, an earlier exercise left `eth0` switched off: run `sudo ip link set eth0 up` first.',
+        solution: 'ip route',
+        check: { cmd: 'ip', fn: prints(/^default via 10\.10\.10\.1 dev eth0/m, /^10\.10\.10\.0\/24 dev eth0 .*scope link/m) },
+      },
+      {
+        id: 'gateway',
+        prompt: 'Which address is your default gateway?',
+        hint: 'It follows the word `via` in the line that begins with `default`.',
+        solution: '10.10.10.1',
+        answer: /^10\.10\.10\.1$/,
+      },
+      {
+        id: 'get-local',
+        prompt: T(
+          'The table lists rules. To see what the kernel would do with one particular address, ask it:',
+          '',
+          '```',
+          'ip route get 10.10.10.20',
+          '```',
+          '',
+          '`10.10.10.20` is the file server of the lab. The first line of the answer is the decision for that one destination: send the packet out of `eth0` (`dev eth0`) with `10.10.10.5` as its source address (`src`). There is no `via`, so the packet goes straight to the destination, as the connected route says. `uid 1000` is you, the user who asked.',
+          '',
+          'The command sends nothing. It only reports what would happen, so it is safe to use on any address.'
+        ),
+        hint: 'Type `ip route get 10.10.10.20`.',
+        solution: 'ip route get 10.10.10.20',
+        check: { cmd: 'ip', out: /^10\.10\.10\.20 dev eth0 src 10\.10\.10\.5/m },
+      },
+      {
+        id: 'get-remote',
+        prompt: T(
+          'Ask the same question about `8.8.8.8`, a public DNS server on the internet. Before you press Enter, decide which line of the routing table you expect to apply.',
+          '',
+          'This time the answer contains `via 10.10.10.1`. The address is outside `10.10.10.0/24`, so only the default route matches, and the packet would be handed to the gateway.'
+        ),
+        hint: 'The command is the one from the last step with a different address at the end.',
+        solution: 'ip route get 8.8.8.8',
+        check: { cmd: 'ip', out: /^8\.8\.8\.8 via 10\.10\.10\.1 dev eth0/m },
+      },
+      {
+        id: 'no-host',
+        prompt: T(
+          'A routing decision is made from the address alone. The kernel does not know, and does not check, whether a machine exists there.',
+          '',
+          'No machine in the lab uses the address `10.10.10.200`. Ask the kernel how it would reach it. Does the answer contain `via`? Answer yes or no.'
+        ),
+        hint: 'Run `ip route get 10.10.10.200` and compare the answer with the two you have seen. Is the address inside `10.10.10.0/24`?',
+        solution: 'no',
+        answer: /^no\b/i,
+      },
+      {
+        id: 'traffic',
+        prompt: T(
+          'So what is the gateway for? Your machine can deliver data only to neighbors on its own segment. Every other packet it hands to the gateway, a router that is connected to further networks and passes the packet on toward its destination.',
+          '',
+          'Produce a little traffic to see this. Send two test packets to `8.8.8.8`:',
+          '',
+          '```',
+          'ping -c 2 8.8.8.8',
+          '```',
+          '',
+          'Two lines beginning with `64 bytes from 8.8.8.8` show that answers came back. The next lesson reads the output of `ping` in detail.'
+        ),
+        hint: 'Type `ping -c 2 8.8.8.8`. The option `-c 2` stops it after two packets.',
+        solution: 'ping -c 2 8.8.8.8',
+        check: { cmd: 'ping', out: /bytes from (\S+ \()?8\.8\.8\.8/ },
+      },
+      {
+        id: 'neigh',
+        prompt: T(
+          'To put a packet on the wire, your machine needs the MAC address of the neighbor that is to receive it. It asks for that address on the segment, with a protocol called ARP, and keeps the answers in the *neighbor table*:',
+          '',
+          '```',
+          'ip neigh',
+          '```',
+          '',
+          'Each line gives an IP address, the interface, and after `lladdr` the MAC address learned for it. The last word is the state of the entry. `REACHABLE` means it was confirmed a moment ago. `STALE` means it has not been confirmed for a while and will be checked the next time it is used.',
+          '',
+          'There is a line for `10.10.10.1` and none for `8.8.8.8`. Your packets were addressed to `8.8.8.8`, but the machine they were handed to on the wire was the gateway.'
+        ),
+        hint: 'Type `ip neigh`. If there is no line for `10.10.10.1`, repeat the `ping` from the last step and look again.',
+        solution: 'ip neigh',
+        check: { any: [
+          { cmd: 'ip', out: /^10\.10\.10\.1 dev eth0 lladdr [0-9a-f:]{17} [A-Z]+/m },
+          { cmd: 'arp', out: /00:1b:21:8e:ba:c6/ },
+        ] },
+      },
+      {
+        id: 'neighbors',
+        prompt: 'Look at the IP address at the start of each line of the neighbor table. How many of them lie outside `10.10.10.0/24`?',
+        hint: 'Compare the first three numbers of every address with `10.10.10`. A neighbor is a machine your own can hand data to directly.',
+        solution: '0',
+        answer: /^(0|zero|none|no(ne)?(\s+of\s+them)?)\.?$/i,
+      },
+    ],
+    quiz: [
+      {
+        q: 'A routing table has two lines: `default via 192.168.1.1 dev eth0` and `192.168.1.0/24 dev eth0 scope link`. Where does the machine send a packet for `192.168.1.50`?',
+        choices: [
+          'To the gateway `192.168.1.1`, because the default route is listed first',
+          'Directly to `192.168.1.50` through `eth0`, because the more specific route wins',
+          'To both, and whichever answers first is used',
+          'Nowhere, because two lines match and the kernel cannot decide',
+        ],
+        answer: 1,
+        why: 'Both lines match, and the one with the longest prefix is used. The order of the lines plays no part. `default` only applies when nothing more specific does.',
+      },
+      {
+        q: 'On your Kali machine the `default` line disappears from the routing table and the line for `10.10.10.0/24` stays. What can you still reach?',
+        choices: [
+          'Everything, because the gateway `10.10.10.1` is itself inside `10.10.10.0/24`',
+          'Nothing, because every packet needs a default route',
+          'Hosts on the internet, but no hosts in the lab',
+          'Hosts in `10.10.10.0/24`, but nothing beyond it',
+        ],
+        answer: 3,
+        why: 'The connected route still covers the local network. For any other destination no rule matches any more, so the kernel refuses to send and programs report `Network is unreachable`.',
+      },
+      {
+        q: 'What does `ip route get 1.1.1.1` send over the network?',
+        choices: [
+          'Nothing. It asks the kernel which route it would use and prints the answer',
+          'One test packet to `1.1.1.1`',
+          'A question to the default gateway',
+          'A DNS query for the name that belongs to `1.1.1.1`',
+        ],
+        answer: 0,
+        why: 'The command is a look at the kernel\'s own decision. No packet leaves the machine, which is why you can use it to check where traffic for a target would go before you send any.',
+      },
+      {
+        q: 'Your machine sends a packet to `8.8.8.8` through the gateway `10.10.10.1`. On the first stretch of wire, which destination addresses does it carry?',
+        choices: [
+          'IP address `10.10.10.1` and the MAC address of the gateway',
+          'IP address `8.8.8.8` and the MAC address of `8.8.8.8`',
+          'IP address `8.8.8.8` and the MAC address of the gateway',
+          'IP address `10.10.10.1` and no MAC address',
+        ],
+        answer: 2,
+        why: 'The IP destination stays the same for the whole journey. The MAC address only says who receives the packet on the current segment, and that is the gateway. Your machine never learns the MAC address of a host on another network.',
+      },
+    ],
+    refs: ['ip-route(8)', 'ip-neighbour(8)', 'ip(8)', 'RFC 1122, section 3.3.1 (routing outbound datagrams)', 'RFC 826 (ARP)'],
+  };
+
   K.lessons.register({
     id: 'net',
     title: 'Networking fundamentals',
     order: 60,
     summary: 'Read your own addresses and routes, test reachability with ping, follow the path a packet takes, see which ports are listening, and find a network fault by working upward from the cable.',
-    lessons: [addressesLesson],
+    lessons: [addressesLesson, routesLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
