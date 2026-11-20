@@ -392,12 +392,215 @@
     refs: ['ip-route(8)', 'ip-neighbour(8)', 'ip(8)', 'RFC 1122, section 3.3.1 (routing outbound datagrams)', 'RFC 826 (ARP)'],
   };
 
+  /* ------------------------------------------------------------------ ping */
+  const pingLesson = {
+    id: 'net-ping',
+    title: 'Is it there? Reading ping',
+    minutes: 12,
+    objectives: [
+      'Test whether a host answers with `ping -c`, and read a reply line and the statistics',
+      'Tell apart three ways a ping fails: `Destination Host Unreachable`, silence, and `Name or service not known`',
+      'Check with `ip neigh` whether a silent neighbor is really absent',
+      'Use the TTL of a reply as a hint about the remote system and its distance',
+    ],
+    intro: T(
+      '`ping` is the first tool most people reach for when something on a network does not respond, and it is the one most often misread. It sends a small test packet and reports whether an answer came back and how long that took.',
+      '',
+      'The value is in the detail. A reply tells you more than "it works". And a ping can fail in three ways that mean three different things: there is nobody at that address, there is somebody who does not answer, or the name could not be looked up. Mixing them up sends you looking for a fault in the wrong place, or puts "host is down" into a report about a machine that is running.'
+    ),
+    steps: [
+      {
+        id: 'reply',
+        prompt: T(
+          'Start with a host that answers, your gateway:',
+          '',
+          '```',
+          'ping -c 4 10.10.10.1',
+          '```',
+          '',
+          '`ping` sends a message called an ICMP *echo request*, and a host that receives one normally sends back an *echo reply*. `-c 4` is the count: stop after four requests. Without it, `ping` on Linux carries on until you press Ctrl+C.',
+          '',
+          'Each reply produces one line. Read one from left to right:',
+          '',
+          '- `64 bytes from 10.10.10.1` is the size of the reply and the address it came from',
+          '- `icmp_seq=1` is the number of the request it answers. The numbers count up, so a gap means a lost packet',
+          '- `ttl=64` is a counter carried in the reply. You will come back to it at the end of this lesson',
+          '- `time=` is the round trip, from sending the request to receiving the reply, in milliseconds'
+        ),
+        hint: 'Type `ping -c 4 10.10.10.1` and wait for the four replies.' + IF_DOWN,
+        solution: 'ping -c 4 10.10.10.1',
+        check: { cmd: 'ping', out: /bytes from (\S+ \()?10\.10\.10\.1\)?: icmp_seq=\d+ ttl=\d+ time=/ },
+      },
+      {
+        id: 'stats',
+        prompt: T(
+          'After the last reply `ping` prints a summary. The line that begins `4 packets transmitted` counts what was sent and what came back. The line below it gives the shortest, average and longest round trip, and how much the times varied (`min/avg/max/mdev`).',
+          '',
+          'When you only need a verdict, the summary is the place to look. What packet loss does it report for the gateway?'
+        ),
+        hint: 'Find the words `packet loss` in the second line from the bottom and read the percentage in front of them.',
+        solution: '0%',
+        answer: /^(0|zero)\s*(%|percent)?$/i,
+      },
+      {
+        id: 'by-name',
+        prompt: T(
+          '`ping` accepts a name in place of an address. Send three requests to the lab\'s web server, `web01.halcyon.lab`.',
+          '',
+          'Look at the first line of the output: `PING web01.halcyon.lab (10.10.10.10)`. The name was looked up before anything was sent, and the address in brackets is the result. Everything after that works exactly as it did with an address.'
+        ),
+        hint: 'Change the count and the destination of the first command: `ping -c 3` followed by the name.',
+        solution: 'ping -c 3 web01.halcyon.lab',
+        check: { cmd: 'ping', fn: prints(/PING web01\.halcyon\.lab \(10\.10\.10\.10\)/, /\b3 packets transmitted, 3 received/) },
+      },
+      {
+        id: 'unreachable',
+        prompt: T(
+          'Now the failures. No machine in the lab has the address `10.10.10.77`. Ping it with four requests:',
+          '',
+          '```',
+          'ping -c 4 10.10.10.77',
+          '```',
+          '',
+          'After about three seconds you see lines such as `From 10.10.10.5 icmp_seq=1 Destination Host Unreachable`. Notice who is speaking. `10.10.10.5` is your own machine.',
+          '',
+          'The address is inside your own network, so your machine tried to deliver the packet itself. It asked on the segment for the MAC address that belongs to `10.10.10.77`, nobody answered, and it gave up. For a local address this error means that no machine there is switched on. The summary counts the lines as `errors` and ends with `100% packet loss`.'
+        ),
+        hint: 'Type the command as shown, with four requests. The message takes about three seconds to appear.',
+        solution: 'ping -c 4 10.10.10.77',
+        check: { cmd: 'ping', out: /From 10\.10\.10\.5 icmp_seq=\d+ Destination Host Unreachable/ },
+      },
+      {
+        id: 'silence',
+        prompt: T(
+          'Send three requests to `10.10.10.50`, which the lab\'s paperwork lists as a Windows server.',
+          '',
+          'This failure looks different. Between the first line and the summary there is nothing at all, and the summary says `0 received, 100% packet loss` without counting any errors. The requests went out and no reply came back.',
+          '',
+          'Silence has more than one possible cause. The machine may be switched off. Or it, or a firewall on the way, may be set to ignore echo requests. Silence alone does not show that a host is down.'
+        ),
+        hint: '`ping -c 3` followed by the address. Wait for the summary.',
+        solution: 'ping -c 3 10.10.10.50',
+        check: { cmd: 'ping', fn: prints(/PING \S+ \(10\.10\.10\.50\)/, /\b0 received, 100% packet loss/), not: { out: /Unreachable/ } },
+      },
+      {
+        id: 'neigh',
+        prompt: T(
+          'For a host on your own segment there is a way to tell the two cases apart. Before your machine can send anything to a neighbor it has to learn the neighbor\'s MAC address, and it keeps what it learned in the neighbor table:',
+          '',
+          '```',
+          'ip neigh',
+          '```',
+          '',
+          'Find the lines for the two addresses you just pinged.',
+          '',
+          '- `10.10.10.77` ends in `FAILED` and has no MAC address. Nobody answered the question "who has this address?".',
+          '- `10.10.10.50` has a MAC address after `lladdr`, and a state of `REACHABLE` or `STALE`. Something at that address answered.',
+          '',
+          'A machine has to answer that question to be able to communicate at all, even if it ignores every ping.'
+        ),
+        hint: 'Type `ip neigh`. If one of the two addresses is missing from the list, ping it again as in the last two steps.',
+        solution: 'ip neigh',
+        check: { cmd: 'ip', fn: prints(/^10\.10\.10\.77 dev eth0\s+FAILED/m, /^10\.10\.10\.50 dev eth0 lladdr [0-9a-f:]{17}/m) },
+      },
+      {
+        id: 'which',
+        prompt: 'Both `10.10.10.77` and `10.10.10.50` showed 100% packet loss. Going by the neighbor table, at which of the two addresses is a machine switched on?',
+        hint: 'Which of the two lines in `ip neigh` shows a MAC address after `lladdr`?',
+        solution: '10.10.10.50',
+        answer: /^(the\s+)?(second(\s+one)?|dc01(\.halcyon\.lab)?|10\.10\.10\.50)\.?$/i,
+      },
+      {
+        id: 'name',
+        prompt: T(
+          'The third failure happens before any packet is sent. Somebody tells you that the web server is called `web1.halcyon.lab`, which is not quite right. Ping that name with two requests.',
+          '',
+          'There is a single line: `Name or service not known`. There is no `PING` line and no summary, because nothing was sent. The name could not be turned into an address.',
+          '',
+          'This message says nothing about whether any host is up or down. Check the spelling first.'
+        ),
+        hint: '`ping -c 2 web1.halcyon.lab`, with the name exactly as given, mistake included.',
+        solution: 'ping -c 2 web1.halcyon.lab',
+        check: { cmd: 'ping', out: /Name or service not known/ },
+      },
+      {
+        id: 'ttl',
+        prompt: T(
+          'Back to `ttl`. Every packet starts its journey with a *time to live*, a number chosen by the system that sends it. Each router that passes the packet on lowers the number by one, and a packet that reaches zero is thrown away, so that nothing can circle forever. The `ttl=` in a reply line is what was left when the reply arrived.',
+          '',
+          'Systems start from a few typical values: 64 on Linux and most other Unix-like systems, 128 on Windows, 255 on a lot of network equipment. The lab hosts answered with `ttl=64`: sent with 64, and no router in between.',
+          '',
+          'Now ping something far away. Send three requests to `8.8.8.8`, a public DNS server. A few pings to a public server like this are ordinary client behavior.',
+          '',
+          'The replies show `ttl=119`. The nearest typical start value above that is 128, so the reply probably crossed 9 routers. Treat this as a hint and not as proof, because the start value can be configured. Compare the `time=` values with those of the gateway as well.'
+        ),
+        hint: '`ping -c 3 8.8.8.8`',
+        solution: 'ping -c 3 8.8.8.8',
+        check: { cmd: 'ping', out: /bytes from (\S+ \()?8\.8\.8\.8\)?: icmp_seq=\d+ ttl=\d+/ },
+      },
+      {
+        id: 'hops',
+        prompt: 'Ping `example.com` with three requests and read the `ttl` of the replies. If the replies started with a TTL of 64, how many routers did they cross on the way to you?',
+        hint: 'Subtract the `ttl=` value in the reply lines from 64.',
+        solution: '13',
+        answer: /^13(\s+(routers?|hops?))?\.?$/i,
+      },
+    ],
+    quiz: [
+      {
+        q: '`ping -c 3 10.10.10.90` prints the `PING` line and then `3 packets transmitted, 0 received, 100% packet loss`, with nothing in between. What can you conclude?',
+        choices: [
+          'The host is switched off',
+          'The address does not exist',
+          'Only that no replies came back. The host may be off, or it or a firewall may be dropping pings',
+          'The name could not be looked up',
+        ],
+        answer: 2,
+        why: 'Silence has several possible causes and `ping` cannot tell them apart. For a host on your own segment the neighbor table gives a second piece of evidence. In a report, write what you observed: "did not answer ICMP echo requests".',
+      },
+      {
+        q: 'Your address is `10.10.10.5/24`. You ping `10.10.10.123` and see `From 10.10.10.5 icmp_seq=1 Destination Host Unreachable`. Who is reporting what?',
+        choices: [
+          'Your own machine reports that nobody answered when it asked for the MAC address of `10.10.10.123`',
+          'The host `10.10.10.123` reports that it refuses pings',
+          'The gateway reports that it has no route to `10.10.10.123`',
+          'The DNS server reports that the name is unknown',
+        ],
+        answer: 0,
+        why: 'The address after `From` is the sender of the error, and here it is your own. For an address on your own segment your machine has to find the neighbor itself. When nobody answers, it reports the failure to `ping`.',
+      },
+      {
+        q: 'A server on your own segment answers a ping with `ttl=128`. What does that suggest?',
+        choices: [
+          'The reply crossed 128 routers',
+          'It is probably a Windows system, and no router lies between you and it',
+          'It is probably a Linux system that is 64 routers away',
+          'The server will stop answering after 128 more pings',
+        ],
+        answer: 1,
+        why: 'Windows starts with a TTL of 128, and on the same segment no router lowers it. It is a hint only, because the start value can be changed, so look for other evidence before you rely on it.',
+      },
+      {
+        q: 'Four replies arrive with `icmp_seq=1`, `icmp_seq=2`, `icmp_seq=4` and `icmp_seq=5`. What happened?',
+        choices: [
+          'The host answered the third request twice',
+          '`ping` skips a number after every two requests',
+          'The route to the host changed after the second request',
+          'The third request or its reply was lost on the way',
+        ],
+        answer: 3,
+        why: 'Every request carries the next sequence number and each reply repeats the number of the request it answers. A missing number is a packet that did not come back, and the summary would show it as packet loss.',
+      },
+    ],
+    refs: ['ping(8)', 'ip-neighbour(8)', 'RFC 792 (ICMP)', 'RFC 1122, section 3.2.2.6 (echo request and reply)'],
+  };
+
   K.lessons.register({
     id: 'net',
     title: 'Networking fundamentals',
     order: 60,
     summary: 'Read your own addresses and routes, test reachability with ping, follow the path a packet takes, see which ports are listening, and find a network fault by working upward from the cable.',
-    lessons: [addressesLesson, routesLesson],
+    lessons: [addressesLesson, routesLesson, pingLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
