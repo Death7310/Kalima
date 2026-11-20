@@ -446,11 +446,237 @@
     refs: ['dig(1)', 'RFC 1034', 'RFC 1035', 'RFC 7208 (SPF)'],
   };
 
+  /* ----------------------------------------------------------- dns-servers */
+  /** Public resolvers of the simulated internet, as a server argument (address or name). */
+  const PUBLIC = '(?:8\\.8\\.8\\.8|8\\.8\\.4\\.4|1\\.1\\.1\\.1|9\\.9\\.9\\.9|dns\\.google|one\\.one\\.one\\.one|dns9\\.quad9\\.net)';
+  const AT_PUBLIC = new RegExp('(^|\\s)@' + PUBLIC + '(\\s|$)');
+  const AT_LAB = /(^|\s)@(10\.10\.10\.53|ns1(\.halcyon\.lab)?)(\s|$)/;
+  /** Everything a line printed, without colour codes. */
+  const outOf = (ev) => K.util.stripAnsi(ev.output || '');
+
+  const serversLesson = {
+    id: 'dns-servers',
+    title: 'Choosing which server to ask',
+    minutes: 12,
+    objectives: [
+      'Send a query to a particular DNS server with `dig @server`',
+      'Explain why an internal name resolves on the lab server and is `NXDOMAIN` on a public resolver',
+      'Tell an authoritative answer from a non-authoritative one by the `aa` flag',
+      'Ask the same questions with `host` and `nslookup`',
+    ],
+    intro: T(
+      'So far every question went to one server, the one named in `/etc/resolv.conf`. DNS is not one database, though. Different servers know different things, and the same name can get different answers depending on whom you ask. The names of internal machines usually exist only on an organization\'s own servers.',
+      '',
+      'Being able to pick the server, and to read whether an answer is first-hand, lets you explain the puzzle "it resolves here and fails there", which you will meet on almost every network. This lesson also introduces `host` and `nslookup`, two tools that ask the same questions with less detail.'
+    ),
+    steps: [
+      {
+        id: 'at',
+        prompt: T(
+          'To send a query to a server of your choice, put `@` and the server in front of the name. Start with the server you have been using all along, this time named explicitly:',
+          '',
+          '```',
+          'dig @10.10.10.53 web01.halcyon.lab',
+          '```',
+          '',
+          'Two things in the output confirm where the question went. Near the top `dig` reports `(1 server found)`, and the `;; SERVER:` line at the bottom shows 10.10.10.53.',
+          '',
+          'The answer is the one you would get without the `@`, because `/etc/resolv.conf` names the same server. The `@` only replaces that default for one query.'
+        ),
+        hint: 'There is no space between `@` and the address, and the name to look up comes after it.',
+        solution: 'dig @10.10.10.53 web01.halcyon.lab',
+        check: { cmd: 'dig', argsRe: AT_LAB, out: /web01\.halcyon\.lab\.\s+\d+\s+IN\s+A\s+10\.10\.10\.10[\s\S]*SERVER: 10\.10\.10\.53/ },
+      },
+      {
+        id: 'public',
+        prompt: T(
+          'Now put the same question to a public resolver. 8.8.8.8 is one that anybody on the internet may use:',
+          '',
+          '```',
+          'dig @8.8.8.8 web01.halcyon.lab',
+          '```',
+          '',
+          'The status is `NXDOMAIN`. The server that answered this time is 8.8.8.8, and as far as it can tell the name does not exist.',
+          '',
+          'Both servers are right. `halcyon.lab` is an *internal zone*: it is held on Halcyon\'s own server, and nothing in the public DNS leads there. A public resolver follows the public tree down from the root and finds no such branch. This is how organizations keep the names of internal machines out of public view.',
+          '',
+          'One caution for real work. Whoever runs a public resolver sees the questions it is sent, so think before you send a client\'s internal names to a third party. Here everything stays inside the simulation.'
+        ),
+        hint: 'Change only the address after the `@`.',
+        solution: 'dig @8.8.8.8 web01.halcyon.lab',
+        check: { cmd: 'dig', argsRe: AT_PUBLIC, out: /status: NXDOMAIN/ },
+      },
+      {
+        id: 'root',
+        prompt: T(
+          'The reply from 8.8.8.8 shows where the search ended. Its **AUTHORITY SECTION** holds one `SOA` record. The record belongs to `.`, a single dot, which is the root of the DNS tree, and the first name after `SOA` is the root\'s primary server.',
+          '',
+          'What is that name?'
+        ),
+        hint: 'In the output of `dig @8.8.8.8 web01.halcyon.lab`, find the line with `IN SOA`. The answer is the first name to the right of `SOA`.',
+        solution: 'a.root-servers.net',
+        answer: /^a\.root-servers\.net\.?$/i,
+      },
+      {
+        id: 'public-ok',
+        prompt: T(
+          'A public resolver does its job for public names. Ask 8.8.8.8 for the address of `example.com`.',
+          '',
+          'The status is `NOERROR` and there is an answer. Now read the line that starts `;; flags:`. It shows `qr rd ra`:',
+          '',
+          '- `qr` marks the message as a reply.',
+          '- `rd`, *recursion desired*, repeats your request that the server should find the answer for you, wherever it is kept.',
+          '- `ra`, *recursion available*, says the server is willing to do that.',
+          '',
+          'A server that hunts down answers on behalf of its clients is called a *resolver*.'
+        ),
+        hint: 'The command has the same shape as the previous one, with the name `example.com`.',
+        solution: 'dig @8.8.8.8 example.com',
+        check: { cmd: 'dig', argsRe: AT_PUBLIC, out: /status: NOERROR[\s\S]*example\.com\.\s+\d+\s+IN\s+A\s+\d/ },
+      },
+      {
+        id: 'aa',
+        prompt: T(
+          'Compare that with a reply from the lab server about its own zone. Run this again and read its flags line:',
+          '',
+          '```',
+          'dig @10.10.10.53 web01.halcyon.lab',
+          '```',
+          '',
+          'It has one flag that the reply from 8.8.8.8 did not have. Which one?'
+        ),
+        hint: 'The reply from 8.8.8.8 had the flags `qr rd ra`. This one has four flags. Type the one that is new.',
+        solution: 'aa',
+        answer: /^aa$/i,
+      },
+      {
+        id: 'nonauth',
+        prompt: T(
+          '`aa` stands for *authoritative answer*. A server sets it when it holds the zone itself, so the answer is first-hand. The lab server holds `halcyon.lab`, and that is why the flag was there.',
+          '',
+          '8.8.8.8 does not hold the zone `example.com`. It collected the answer from the servers that do and passed it on, perhaps from its memory of an earlier query. Such an answer is called *non-authoritative*. It is usually correct, and it can be as old as the time to live allows.',
+          '',
+          'The lab server is a resolver as well. Predict what its flags will be for a name outside its own zone, then check: ask 10.10.10.53 for `example.com`.'
+        ),
+        hint: 'Use `dig @10.10.10.53` with the name `example.com`, and look for `aa` on the flags line.',
+        solution: 'dig @10.10.10.53 example.com',
+        check: { cmd: 'dig', argsRe: /example\.com/, fn: (ev) => { const o = outOf(ev); return /status: NOERROR/.test(o) && /SERVER: 10\.10\.10\.53/.test(o) && /;; flags: [a-z ]*;/.test(o) && !/;; flags: [a-z ]*\baa\b/.test(o); } },
+      },
+      {
+        id: 'host',
+        prompt: T(
+          'There was no `aa`: for `example.com` the lab server is only a messenger.',
+          '',
+          '`dig` shows everything, which is more than you need for a quick check. `host` asks the same kind of question and answers in a sentence:',
+          '',
+          '```',
+          'host web01.halcyon.lab',
+          '```',
+          '',
+          'One line: the name *has address* 10.10.10.10. `host` words each record type in this way. An alias is reported as `is an alias for`, and a mail server as `mail is handled by`.',
+          '',
+          'Unlike `dig`, `host` applies the search domain from `/etc/resolv.conf`, so `host web01` works as well.'
+        ),
+        hint: 'Type `host` followed by the full name.',
+        solution: 'host web01.halcyon.lab',
+        check: { cmd: 'host', out: /web01\.halcyon\.lab has address 10\.10\.10\.10/ },
+      },
+      {
+        id: 'host-public',
+        prompt: T(
+          '`host` has no `@`. It takes the server to ask as a second argument, after the name. Use `host` to ask 8.8.8.8 about `web01.halcyon.lab`.',
+          '',
+          'The first lines name the server that was used. The last line gives the verdict, `not found: 3(NXDOMAIN)`. The 3 is the number that stands for NXDOMAIN inside a DNS message.'
+        ),
+        hint: 'The order is `host`, the name, then the address of the server.',
+        solution: 'host web01.halcyon.lab 8.8.8.8',
+        check: { cmd: 'host', argsRe: new RegExp('web01\\S*\\s+' + PUBLIC + '$'), out: /not found: 3\(NXDOMAIN\)/ },
+      },
+      {
+        id: 'nslookup',
+        prompt: T(
+          'The third tool is `nslookup`. It is worth knowing because it is also present on Windows, where `dig` and `host` are usually missing. Try it on a public name:',
+          '',
+          '```',
+          'nslookup example.com',
+          '```',
+          '',
+          'The first two lines show the server that was asked. The answer follows under the heading `Non-authoritative answer:`, which is how `nslookup` tells you that the reply did not carry the `aa` flag.'
+        ),
+        hint: 'Type `nslookup` followed by the name. Like `host`, it accepts a server as a second argument, but none is needed here.',
+        solution: 'nslookup example.com',
+        check: { cmd: 'nslookup', argsRe: /example\.com/, out: /Non-authoritative answer:/ },
+      },
+      {
+        id: 'nslookup-auth',
+        prompt: T(
+          'Predict first, then check. Run:',
+          '',
+          '```',
+          'nslookup web01.halcyon.lab',
+          '```',
+          '',
+          'Does the heading `Non-authoritative answer:` appear in the output this time? Answer `yes` or `no`.'
+        ),
+        hint: 'Think about which server is asked by default, and whether it holds the zone `halcyon.lab` itself. Then run the command and look.',
+        solution: 'no',
+        answer: /^(no|n)\.?$/i,
+      },
+    ],
+    quiz: [
+      {
+        q: 'At home, with a public resolver configured on your laptop, you run `dig intranet.halcyon.lab`. What do you expect?',
+        choices: [
+          'The address 10.10.10.10, because DNS answers are the same everywhere',
+          '`NXDOMAIN`, because the zone exists only on the organization\'s internal server',
+          'A timeout, because public resolvers block names that end in `.lab`',
+          'A request for a password',
+        ],
+        answer: 1,
+        why: 'An internal zone is known only to the servers inside the organization. A public resolver searches the public tree, finds no such name and reports that it does not exist.',
+      },
+      {
+        q: 'A reply shows `flags: qr rd ra` and no `aa`. What does that mean?',
+        choices: [
+          'The answer is wrong and should be discarded',
+          'The query was refused',
+          'The server that replied holds the zone itself',
+          'The server passed the answer on from elsewhere or from its cache; it does not hold the zone',
+        ],
+        answer: 3,
+        why: 'Only a server that holds the zone sets `aa`. A resolver without that flag is relaying what it learned. That is normally accurate, but it may be a stored copy.',
+      },
+      {
+        q: 'A site moved to a new address an hour ago. The domain\'s own name server returns the new address, while a public resolver still returns the old one. What is the most likely reason?',
+        choices: [
+          'The resolver is reusing a stored answer until its time to live runs out',
+          'The public resolver has been compromised',
+          'The two servers use different versions of the DNS protocol',
+          'Public resolvers only update their records once a year',
+        ],
+        answer: 0,
+        why: 'A resolver may reuse an answer for as many seconds as its TTL says. Until then it does not ask again, so it cannot know about the change. The authoritative server always has the current record.',
+      },
+      {
+        q: 'On the Kali machine, `dig web01.halcyon.lab` and `dig @10.10.10.53 web01.halcyon.lab` print the same answer. Why?',
+        choices: [
+          'Every DNS server in the world holds a copy of every zone',
+          '`dig` ignores the `@` when the name is internal',
+          '`/etc/resolv.conf` already names 10.10.10.53, so both queries go to the same server',
+          'The answer comes from `/etc/hosts` in both cases',
+        ],
+        answer: 2,
+        why: 'Without `@`, `dig` uses the servers listed in `/etc/resolv.conf`. Naming the same server explicitly changes nothing. `dig` never reads `/etc/hosts`.',
+      },
+    ],
+    refs: ['dig(1)', 'host(1)', 'nslookup(1)', 'resolv.conf(5)', 'RFC 1034', 'RFC 9499 (DNS Terminology)'],
+  };
+
   K.lessons.register({
     id: 'dns',
     title: 'Names: DNS and WHOIS',
     order: 70,
     summary: 'How a name becomes an address on your workstation, how to question DNS servers with dig, host and nslookup, and what public records such as WHOIS and a zone reveal about a network.',
-    lessons: [resolveLesson, digLesson],
+    lessons: [resolveLesson, digLesson, serversLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
