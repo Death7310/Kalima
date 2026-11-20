@@ -238,11 +238,219 @@
     refs: ['hosts(5)', 'resolv.conf(5)', 'nsswitch.conf(5)', 'getent(1)', 'tee(1)', 'The Debian Administrator\'s Handbook, section 8.3 (Setting the Hostname and Configuring the Name Service)'],
   };
 
+  /* --------------------------------------------------------------- dns-dig */
+  const digLesson = {
+    id: 'dns-dig',
+    title: 'Asking DNS with dig',
+    minutes: 12,
+    objectives: [
+      'Find the status, the question, the answer, the query time and the answering server in the output of `dig`',
+      'Tell a name that does not exist (`NXDOMAIN`) from a name that has no record of the type you asked for',
+      'Query the record types A, CNAME, MX, NS, TXT and SOA, and shorten the output with `+short`',
+      'Look up the name that belongs to an address with `dig -x`',
+    ],
+    intro: T(
+      'A lookup with `getent` tells you which address your machine would use. `dig` shows what a DNS server actually said: the records it holds, whether the query succeeded, which server replied and how long it took. It is the standard tool for reading DNS, and its output is dense until you know the parts.',
+      '',
+      'DNS is usually the first thing you read about a network. It tells you which names exist, which machine handles the mail and who runs the zone, in reply to ordinary questions that any client may ask. In this lesson you query the lab zone `halcyon.lab`, one record type at a time.'
+    ),
+    steps: [
+      {
+        id: 'first',
+        prompt: T(
+          'Ask for the address of the intranet server:',
+          '',
+          '```',
+          'dig web01.halcyon.lab',
+          '```',
+          '',
+          'Lines that start with `;` are commentary from `dig`. Work through the output from the top:',
+          '',
+          '- The header line holds `status: NOERROR`: the query succeeded. The line below it counts what came back, here `ANSWER: 1`.',
+          '- **QUESTION SECTION** repeats what was asked: the name, the class `IN` (Internet) and the record type `A`, an IPv4 address.',
+          '- **ANSWER SECTION** holds the record itself: name, `3600`, `IN`, `A`, and the address. The number is the *time to live*: for that many seconds a resolver may reuse the answer without asking again.',
+          '- At the bottom, `Query time` says how long the answer took and `SERVER` says who gave it.',
+          '',
+          'Names are printed with a final dot. The dot stands for the root of the DNS tree and marks the name as complete.'
+        ),
+        hint: 'Type `dig`, a space, and the full name `web01.halcyon.lab`.',
+        solution: 'dig web01.halcyon.lab',
+        check: { cmd: 'dig', out: /status: NOERROR[\s\S]*ANSWER SECTION:\s*\nweb01\.halcyon\.lab\.\s+\d+\s+IN\s+A\s+10\.10\.10\.10/ },
+      },
+      {
+        id: 'server',
+        prompt: 'Look at the `;; SERVER:` line near the end of that output. Which address answered the query?',
+        hint: 'The line reads `;; SERVER:` followed by an address, `#53` for the port, and the address again in brackets. Type only the address.',
+        solution: '10.10.10.53',
+        answer: /^10\.10\.10\.53(#53)?(\s*\(10\.10\.10\.53\))?$/,
+      },
+      {
+        id: 'nx',
+        prompt: T(
+          'Now ask for a name that does not exist, `nosuch.halcyon.lab`, and find the status before you read on.',
+          '',
+          'It says `NXDOMAIN`, short for *non-existent domain*: the server is certain there is no such name. The count shows `ANSWER: 0`, and there is no answer section. In its place the **AUTHORITY SECTION** shows a record of type `SOA` for `halcyon.lab`, which identifies the zone that gave the verdict.',
+          '',
+          'Notice that `dig` itself did not fail. It asked, it was answered, and the answer was no.'
+        ),
+        hint: 'The command has the same form as the first one, with the name `nosuch.halcyon.lab`.',
+        solution: 'dig nosuch.halcyon.lab',
+        check: { cmd: 'dig', out: /status: NXDOMAIN/ },
+      },
+      {
+        id: 'short',
+        prompt: T(
+          'When you only want the data, `+short` drops everything else:',
+          '',
+          '```',
+          'dig +short web01.halcyon.lab',
+          '```',
+          '',
+          'One line, the address. This is the form to use inside pipelines and scripts.',
+          '',
+          'It has a cost. `+short` prints nothing for a name that does not exist, and also nothing for a name that exists but has no record of the type you asked for. When the output is empty, run the query again without `+short` and read the status.'
+        ),
+        hint: 'Options of `dig` that begin with `+` can stand before or after the name.',
+        solution: 'dig +short web01.halcyon.lab',
+        check: { cmd: 'dig', argsRe: /\+short/, out: /^10\.10\.10\.10\s*$/m, not: { out: /QUESTION SECTION/ } },
+      },
+      {
+        id: 'mx',
+        prompt: T(
+          'An address is only one kind of record. To ask for another kind, name the type after the domain. `MX` records say which machine accepts mail for a domain:',
+          '',
+          '```',
+          'dig halcyon.lab MX',
+          '```',
+          '',
+          'The answer section reads `10 mail01.halcyon.lab.` The name is the mail server. The number in front is a preference: when a domain lists several mail servers, senders try the lowest number first.'
+        ),
+        hint: 'The query is for the domain `halcyon.lab` itself, not for one of its hosts, and the type `MX` follows the name.',
+        solution: 'dig halcyon.lab MX',
+        check: { cmd: 'dig', argsRe: /\bmx\b/i, out: /10 mail01\.halcyon\.lab\./ },
+      },
+      {
+        id: 'ns',
+        prompt: T(
+          '`NS` records name the servers that hold a zone, its *name servers*. Find the name server of `halcyon.lab`, and use `+short` so that only its name is printed.',
+          '',
+          'A public domain normally lists at least two name servers, so that one of them can fail. This lab zone has a single one, and it is the same server that answers all your queries.'
+        ),
+        hint: 'Take the `MX` query, replace the type with `NS`, and add `+short`.',
+        solution: 'dig +short halcyon.lab NS',
+        check: { cmd: 'dig', argsRe: /\bns\b/i, out: /ns1\.halcyon\.lab\./ },
+      },
+      {
+        id: 'txt',
+        prompt: T(
+          '`TXT` records hold free text. Administrators use them to publish statements about a domain that other systems can look up.',
+          '',
+          'Query the `TXT` record of `halcyon.lab`. What text does it hold?',
+          '',
+          'The text is an SPF policy, which states who may send mail in the name of the domain. This one allows the domain\'s own mail servers and nobody else. Receiving mail servers look the policy up to judge whether a message is forged.'
+        ),
+        hint: 'Run `dig +short halcyon.lab TXT` and type the text that appears between the quotation marks.',
+        solution: 'v=spf1 mx -all',
+        answer: /^["'`]?v=spf1\s+mx\s+-all["'`]?$/i,
+      },
+      {
+        id: 'cname',
+        prompt: T(
+          'Some names are only aliases. Ask for the address of `www.halcyon.lab` with the full output, and count the records in the answer section.',
+          '',
+          'There are two. The first has the type `CNAME`, for *canonical name*: it says that `www.halcyon.lab` is another name for `web01.halcyon.lab`. The server then adds the `A` record of that real name, so one question gets you all the way to an address.',
+          '',
+          'Aliases let an administrator move a service to another machine by changing one record. For you, a CNAME is a statement that two names lead to the same host.'
+        ),
+        hint: 'Run `dig www.halcyon.lab` without `+short`, so that the record types are shown.',
+        solution: 'dig www.halcyon.lab',
+        check: { cmd: 'dig', argsRe: /\bwww\.halcyon\.lab/, out: /www\.halcyon\.lab\.\s+\d+\s+IN\s+CNAME\s+web01\.halcyon\.lab\./ },
+      },
+      {
+        id: 'soa',
+        prompt: T(
+          'Every zone has exactly one `SOA` record, the *start of authority*. It describes the zone itself. Run:',
+          '',
+          '```',
+          'dig +short halcyon.lab SOA',
+          '```',
+          '',
+          'The first field is the primary name server. The second is the mailbox of the person responsible, written with a dot where the `@` would be. The third is the serial number, which the administrator raises with every change to the zone. Many administrators build it from the date of the change and a two-digit counter.',
+          '',
+          'What is the serial number of `halcyon.lab`?'
+        ),
+        hint: 'It is the long number that follows `hostmaster.halcyon.lab.` in the output.',
+        solution: '2026111201',
+        answer: /^2026111201$/,
+      },
+      {
+        id: 'reverse',
+        prompt: T(
+          'DNS also answers the opposite question: which name belongs to an address? The option `-x` builds that query for you. Find the name of 10.10.10.40.',
+          '',
+          'If you ran it without `+short`, look at the question section. `dig` asked for a `PTR` record under the odd-looking name `40.10.10.10.in-addr.arpa.`, the address written backwards inside a special zone.',
+          '',
+          'Reverse records are kept separately from the forward ones, and nothing forces the two to agree. Treat a reverse name as a useful hint, and confirm it with a forward lookup before it goes into your notes as fact.'
+        ),
+        hint: 'Write `dig -x` followed by the address. `+short` works here as well.',
+        solution: 'dig -x 10.10.10.40',
+        check: { cmd: 'dig', args: ['-x'], argsRe: /10\.10\.10\.40/, out: /mail01\.halcyon\.lab\./ },
+      },
+    ],
+    quiz: [
+      {
+        q: '`dig halcyon.lab` asks for an `A` record and comes back with `status: NOERROR` and `ANSWER: 0`. What does that tell you?',
+        choices: [
+          'The DNS server could not be reached',
+          'The name `halcyon.lab` does not exist',
+          'The name exists, but it has no record of the type that was asked for',
+          'The answer was removed because it is confidential',
+        ],
+        answer: 2,
+        why: 'A name that does not exist is reported as `NXDOMAIN`. `NOERROR` with an empty answer means the name is there, in this case with MX, NS and TXT records, but without an address record of its own.',
+      },
+      {
+        q: 'A domain has the records `MX 10 mail-a` and `MX 20 mail-b`. Where does a sending mail server deliver first?',
+        choices: [
+          'To `mail-a`, because the lower preference number is tried first',
+          'To `mail-b`, because the higher preference number is tried first',
+          'To both at the same time',
+          'To whichever of the two answered a ping faster',
+        ],
+        answer: 0,
+        why: 'The number in an MX record is a preference, and the lowest value wins. `mail-b` is the fallback for when `mail-a` cannot be reached.',
+      },
+      {
+        q: '`dig +short portal.halcyon.lab` prints nothing at all. What can you conclude?',
+        choices: [
+          'The name certainly does not exist',
+          'The DNS server is switched off',
+          'The name exists, and its address is being kept from you',
+          'Nothing yet: run it again without `+short` and read the status',
+        ],
+        answer: 3,
+        why: '`+short` shows only record data, so a missing name and a missing record type look the same. The status in the full output tells the cases apart.',
+      },
+      {
+        q: '`www.halcyon.lab` is a CNAME for `web01.halcyon.lab`. The administrator moves web01 to a new address and updates its `A` record. What has to change for `www`?',
+        choices: [
+          'Its own `A` record must be updated as well',
+          'Nothing: the alias points at the name, so it follows to the new address',
+          'The CNAME has to be deleted and created again',
+          'The serial number of the reverse zone',
+        ],
+        answer: 1,
+        why: 'A CNAME holds a name, not an address. Whoever looks up `www` is referred to `web01` and receives whatever address that name has at the time.',
+      },
+    ],
+    refs: ['dig(1)', 'RFC 1034', 'RFC 1035', 'RFC 7208 (SPF)'],
+  };
+
   K.lessons.register({
     id: 'dns',
     title: 'Names: DNS and WHOIS',
     order: 70,
     summary: 'How a name becomes an address on your workstation, how to question DNS servers with dig, host and nslookup, and what public records such as WHOIS and a zone reveal about a network.',
-    lessons: [resolveLesson],
+    lessons: [resolveLesson, digLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
