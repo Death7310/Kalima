@@ -245,12 +245,250 @@
     refs: ['apt(8)', 'sources.list(5)', 'apt-secure(8)', 'os-release(5)', 'Kali Linux Revealed, ch. 8 (Debian Package Management)'],
   };
 
+  /* --------------------------------------------------------------- install */
+  /** 'installed', 'config-files' (removed, configuration kept) or 'none' for a package on the Kali machine. */
+  const pkgState = (name) => {
+    const p = K.kali && K.kali.packages ? K.kali.packages.get(name) : null;
+    return p ? p.status : 'none';
+  };
+  const hasFile = (path) => { try { return !!K.kali.vfs.stat(path); } catch (e) { return false; } };
+
+  const installLesson = {
+    id: 'pkg-install',
+    title: 'Finding, installing and removing software',
+    minutes: 12,
+    objectives: [
+      'Find a package with `apt search` and read its record with `apt show`',
+      'Install and remove a package with `sudo apt install` and `sudo apt remove`, reading the plan before you confirm',
+      'Explain what `purge` deletes that `remove` leaves behind, and what `autoremove` cleans up',
+      'Recognize what the shell tells you when a command is not installed',
+    ],
+    intro: T(
+      'On Kali you do not download installers from websites. Software comes as *packages* from the Kali repository, and one tool, `apt`, finds them, installs them together with everything they need, and removes them again without leaving loose ends. Because every package is signed by Kali, this is also the safe way to add a tool.',
+      '',
+      'In this lesson you take one small, harmless package, `tree`, through its whole life: look it up, remove it, see what the shell says when it is missing, and put it back. The workstation ends the lesson as it started.'
+    ),
+    steps: [
+      {
+        id: 'search',
+        prompt: T(
+          'You want a tool that prints a folder as a tree, to paste into your engagement notes. Ask `apt` what it has:',
+          '',
+          '```',
+          'apt search tree',
+          '```',
+          '',
+          '`apt search` looks for your word in package names and descriptions. Each hit takes two lines. The first is the package name, a slash and the suite, the version and the architecture; `[installed]` at the end means you already have it. The second line is a one-line description.',
+          '',
+          'A real mirror holds tens of thousands of packages, so real searches return long lists. Add a second word to narrow them down: `apt` shows only packages that match every word.'
+        ),
+        hint: 'Type `apt search` followed by the word `tree`. Searching needs no `sudo`.',
+        solution: 'apt search tree',
+        check: { cmd: ['apt', 'apt-cache'], args: ['search'], exit: 0, out: /^tree(\/| - )/m },
+      },
+      {
+        id: 'show',
+        prompt: T(
+          'A one-line description is not much to go on. Read the full record before you install anything:',
+          '',
+          '```',
+          'apt show tree',
+          '```',
+          '',
+          'The fields worth reading every time:',
+          '',
+          '- `Version` is what you would get.',
+          '- `Depends` lists the other packages this one needs. `apt` installs them for you.',
+          '- `Download-Size` and `Installed-Size` say what it costs in bandwidth and disk.',
+          '- `APT-Sources` shows which repository it comes from.',
+          '- `Description` says what it does.'
+        ),
+        hint: '`apt show` takes a package name: `apt show tree`.',
+        solution: 'apt show tree',
+        check: { cmd: ['apt', 'apt-cache'], args: ['show', 'tree'], exit: 0, out: /^Package: tree$/m },
+      },
+      {
+        id: 'remove',
+        prompt: T(
+          'This workstation already has `tree`, so begin the cycle at the other end and remove it:',
+          '',
+          '```',
+          'sudo apt remove tree',
+          '```',
+          '',
+          'The password is `kali`. `apt` does not act straight away. It prints its plan: the packages under `REMOVING`, a `Summary` line with the counts, and the disk space that will be freed. Then it asks `Continue? [Y/n]`. Read the plan first, every time, and answer `y` only if it lists what you expect. A capital letter in `[Y/n]` marks the answer you get by pressing Enter.',
+          '',
+          'If `apt` answers that `tree` is not installed, an earlier visit to this lesson left it removed. Carry on with the next step.'
+        ),
+        hint: 'Type `sudo apt remove tree`, check that the plan lists only `tree`, then answer `y`.',
+        solution: 'sudo apt remove tree',
+        testSolution: ['sudo -k', 'sudo apt remove tree'],
+        input: ['kali', 'y'],
+        check: {
+          any: [
+            { cmd: APT, argsRe: /(^|\s)(remove|purge)\s(.*\s)?tree(\s|$)/, user: 'root', exit: 0, fn: () => pkgState('tree') !== 'installed' && !hasFile('/usr/bin/tree') },
+            { cmd: 'dpkg', argsRe: /(^|\s)(-r|--remove|-P|--purge)\s(.*\s)?tree(\s|$)/, user: 'root', exit: 0, fn: () => pkgState('tree') !== 'installed' && !hasFile('/usr/bin/tree') },
+          ],
+        },
+      },
+      {
+        id: 'missing',
+        prompt: T(
+          'Now run the program you just removed:',
+          '',
+          '```',
+          'tree',
+          '```',
+          '',
+          'The shell cannot find it, and on Kali it does more than say so: it looks the name up and tells you which package provides the command and how to install it. You will meet this message whenever a guide uses a tool your system does not have.',
+          '',
+          'A name that no package provides gets only a plain `command not found`. That usually means a typing mistake.'
+        ),
+        hint: 'Type `tree` on its own and press Enter. An error message is the expected result here.',
+        solution: 'tree',
+        check: { exit: 127, out: /Command 'tree' not found, but can be installed with/ },
+      },
+      {
+        id: 'purge',
+        prompt: T(
+          '`remove` deletes the program but keeps the package\'s system-wide configuration files, so that your settings are still there if you install it again. `purge` deletes those as well:',
+          '',
+          '```',
+          'sudo apt purge tree',
+          '```',
+          '',
+          'Look for the line `Purging configuration files for tree`. That is the part `remove` left behind.',
+          '',
+          'Use `remove` when you may want the tool back as you had it, and `purge` when you want a clean slate, for example before reinstalling something you have misconfigured. Neither touches files in your home directory.'
+        ),
+        hint: 'The same shape as before, with `purge` in place of `remove`: `sudo apt purge tree`.',
+        solution: 'sudo apt purge tree',
+        testSolution: ['sudo -k', 'sudo apt purge tree'],
+        input: ['kali', 'y'],
+        check: {
+          any: [
+            { cmd: APT, argsRe: /(^|\s)(purge|autopurge|--purge)(\s|$)/, user: 'root', exit: 0, fn: () => pkgState('tree') === 'none' },
+            { cmd: 'dpkg', argsRe: /(^|\s)(-P|--purge)\s(.*\s)?tree(\s|$)/, user: 'root', exit: 0, fn: () => pkgState('tree') === 'none' },
+          ],
+        },
+      },
+      {
+        id: 'install',
+        prompt: T(
+          'Put `tree` back. The shell gave you the command two steps ago.',
+          '',
+          'Read the plan as you did before. This time the package is under `Installing`, and the summary shows the download size and the disk space needed. If `apt` asks whether to continue, answer `y`. Then watch it work: `Get:` downloads the package, `Unpacking` puts its files in place and `Setting up` configures it.'
+        ),
+        hint: 'Installing is `sudo apt install` followed by the package name.',
+        solution: 'sudo apt install tree',
+        testSolution: ['sudo -k', 'sudo apt install tree'],
+        input: ['kali', 'y'],
+        check: { cmd: APT, args: ['install'], user: 'root', exit: 0, fn: () => pkgState('tree') === 'installed' && hasFile('/usr/bin/tree') },
+      },
+      {
+        id: 'run',
+        prompt: 'Check that the installation worked by using the tool: print your engagement folder, `~/engagement`, as a tree. The last line of its output counts the directories and files.',
+        hint: 'Give `tree` the folder as its argument: `tree ~/engagement`.',
+        solution: 'tree ~/engagement',
+        check: { cmd: 'tree', exit: 0, out: /\d+ director(y|ies), \d+ files?/ },
+      },
+      {
+        id: 'simulate',
+        prompt: T(
+          'You can ask `apt` for its plan without letting it act. The option `-s` means *simulate*:',
+          '',
+          '```',
+          'apt install -s nginx',
+          '```',
+          '',
+          '`nginx` is a web server that is not installed here. Nothing is downloaded or changed, which is why this works without `sudo`.',
+          '',
+          'The plan has a section you have not seen yet, `Installing dependencies`: packages you did not ask for but that `nginx` needs. The lines that start with `Inst` and `Conf` are the steps `apt` would carry out. Simulating first is a careful way to find out how much a package would pull in.'
+        ),
+        hint: 'Type `apt install -s nginx`. There is no `sudo` and no question to answer.',
+        solution: 'apt install -s nginx',
+        check: { cmd: APT, args: ['install'], exit: 0, out: /^Inst nginx /m, fn: () => pkgState('nginx') !== 'installed' },
+      },
+      {
+        id: 'dependency',
+        prompt: 'Read the plan from the last step. Which package would be installed as a dependency of `nginx`?',
+        hint: 'Look at the line under the heading `Installing dependencies:`.',
+        solution: 'nginx-common',
+        answer: /^nginx-common\.?$/i,
+      },
+      {
+        id: 'autoremove',
+        prompt: T(
+          'Packages that arrive as dependencies are marked *automatic*. When you later remove the package that needed them, they stay behind. One command finds automatic packages that nothing needs any more and offers to remove them:',
+          '',
+          '```',
+          'sudo apt autoremove',
+          '```',
+          '',
+          'Read the `Summary` line. On a tidy system it says `Removing: 0` and `apt` stops there. When it does list packages, read the names before you agree: you are confirming a removal like any other.'
+        ),
+        hint: 'Type `sudo apt autoremove` and read the `Removing` count in the summary.',
+        solution: 'sudo apt autoremove',
+        testSolution: ['sudo -k', 'sudo apt autoremove'],
+        input: ['kali', 'y'],
+        check: { cmd: APT, argsRe: /(^|\s)(autoremove|autopurge|--auto-remove|--autoremove)(\s|$)/, user: 'root', exit: 0, out: /Removing: \d+|\d+ to remove/ },
+      },
+    ],
+    quiz: [
+      {
+        q: 'You installed a web server package, which brought two dependencies with it, and later ran `sudo apt remove` on the web server. What is still on the system?',
+        choices: [
+          'Nothing: `remove` also deletes dependencies and configuration',
+          'The web server\'s system-wide configuration files, and the two dependencies until you run `sudo apt autoremove`',
+          'Only the two dependencies; the configuration files are deleted',
+          'The whole package, switched off but still installed',
+        ],
+        answer: 1,
+        why: '`remove` deletes the program and keeps its configuration; `purge` would delete that too. Dependencies that were installed automatically stay until `autoremove` clears those that nothing needs.',
+      },
+      {
+        q: 'On a freshly installed machine you type `nmap` and the shell answers `Command \'nmap\' not found, but can be installed with: sudo apt install nmap`. What does that tell you?',
+        choices: [
+          'The `nmap` package is installed but damaged',
+          '`nmap` may only be run with `sudo`',
+          'No program of that name is installed, and a package called `nmap` provides it',
+          'The network is down, so `nmap` cannot start',
+        ],
+        answer: 2,
+        why: 'The shell found no program called `nmap` in the directories it searches. Kali then looked the name up in its package lists and named the package that would provide it.',
+      },
+      {
+        q: 'As the ordinary user `kali`, without `sudo`, you run `apt install -s wireshark`. What happens?',
+        choices: [
+          'Permission denied, because installing needs root',
+          '`apt` prints the plan, including dependencies, and changes nothing',
+          'The package is downloaded but not installed',
+          'The package is installed for the user `kali` only',
+        ],
+        answer: 1,
+        why: '`-s` asks for a simulation. `apt` works out and prints what it would do, then stops. Since nothing is changed, no root privilege is needed.',
+      },
+      {
+        q: 'You used a tool for a while and it saved its settings in `~/.config`. Then you run `sudo apt purge` on its package. What happens to those settings?',
+        choices: [
+          'They are deleted, because `purge` removes all configuration',
+          'They are moved to `/etc`',
+          'They stay: `purge` removes the package\'s system-wide configuration, never files in a home directory',
+          'They are kept only if you answer `n` at the prompt',
+        ],
+        answer: 2,
+        why: 'The package manager only manages files the package itself installed or registered. What a program writes into your home directory while you use it is yours, and you delete it yourself.',
+      },
+    ],
+    refs: ['apt(8)', 'apt-get(8)', 'apt-cache(8)', 'dpkg(1)', 'Kali Linux Revealed, ch. 8 (Debian Package Management)'],
+  };
+
   K.lessons.register({
     id: 'pkg',
     title: 'Packages and keeping Kali current',
     order: 50,
     summary: 'Know where Kali\'s software comes from, keep the system up to date, install and remove tools cleanly, and find out which package any file belongs to.',
-    lessons: [updateLesson],
+    lessons: [updateLesson, installLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
