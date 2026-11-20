@@ -243,6 +243,135 @@ test('kalima reset asks before it restarts the simulator', async () => {
   assert.equal(power.length, 3);
 });
 
+test('the catalogue maps the Kali toolbox by category', async () => {
+  const { K } = await boot();
+  const cats = K.atlas.categories;
+  assert.deepEqual(cats.map((c) => c.title), [
+    'Information Gathering', 'Vulnerability Analysis', 'Web Application Analysis', 'Database Assessment', 'Password Attacks',
+    'Wireless Attacks', 'Reverse Engineering', 'Exploitation Tools', 'Sniffing and Spoofing', 'Post Exploitation', 'Forensics',
+    'Reporting Tools', 'Social Engineering Tools', 'System and Utilities',
+  ]);
+  assert.equal(new Set(cats.map((c) => c.id)).size, cats.length);
+  for (const c of cats) {
+    assert.match(c.id, /^[a-z-]+$/);
+    const sentences = c.summary.split(/\. (?=[A-Z])/).length;
+    assert.ok(sentences >= 2 && sentences <= 3, `${c.id}: two or three sentences, found ${sentences}`);
+  }
+  assert.ok(cats.filter((c) => c.summary.includes('NIST SP 800-115')).length >= 8, 'summaries place the phases in a methodology');
+
+  const tools = K.atlas.list();
+  assert.ok(tools.length >= 120 && tools.length <= 160, `${tools.length} entries`);
+  assert.equal(new Set(tools.map((t) => t.name)).size, tools.length);
+  for (const t of tools) {
+    assert.deepEqual(Object.keys(t).sort(), ['category', 'installed', 'name', 'pkg', 'summary', 'url'], t.name);
+    assert.match(t.name, /^[A-Za-z0-9][A-Za-z0-9._+-]*$/, t.name);
+    assert.match(t.pkg, /^[a-z0-9][a-z0-9.+-]+$/, t.name);
+    assert.ok(cats.some((c) => c.id === t.category), t.name);
+    assert.equal(typeof t.installed, 'boolean', t.name);
+    assert.match(t.url, /^https:\/\/(www\.kali\.org\/tools\/[a-z0-9.+-]+\/|manpages\.debian\.org\/[A-Za-z0-9._+-]+)$/, t.name);
+    // one neutral sentence, and nothing that reads like usage: no options, commands or examples
+    assert.ok(/^[A-Z]/.test(t.summary) && !/[.!?;:]( |$)/.test(t.summary), t.name);
+    assert.ok(t.summary.length >= 10 && t.summary.length <= 100, t.name);
+    assert.ok(!/(^|\s)--?[a-z]|[`$|<>]|\b(usage|example|e\.g\.|run|type|use it)\b/i.test(t.summary), t.name);
+  }
+  for (const c of cats) assert.ok(tools.filter((t) => t.category === c.id).length >= 5, c.id);
+  assert.equal(K.atlas.get('nmap').pkg, 'nmap');
+  assert.equal(K.atlas.get('gobuster').installed, false);
+  assert.equal(K.atlas.get('hydra').installed, true);
+});
+
+test('whether a tool is simulated is worked out when asked', async () => {
+  const sim = await boot();
+  const { K } = sim;
+  assert.equal(K.atlas.isSimulated('nmap'), true);
+  assert.equal(K.atlas.isSimulated('hydra'), false);
+  assert.equal(K.atlas.isSimulated('no-such-tool'), false);
+  // catalogue packages agree with the commands that are simulated
+  for (const t of K.atlas.list().filter((x) => K.atlas.isSimulated(x.name))) assert.equal(t.pkg, K.cmd.get(t.name).pkg, t.name);
+
+  assert.match((await sim.run('kalima atlas hydra')).out, /In this build +not simulated/);
+  K.cmd.register({ name: 'hydra', pkg: 'hydra', summary: 'test double', run() { return 0; } });
+  assert.equal(K.atlas.isSimulated('hydra'), true);
+  assert.match((await sim.run('kalima atlas hydra')).out, /In this build +simulated; man hydra/);
+});
+
+test('kalima atlas gives an overview of the categories', async () => {
+  const sim = await boot();
+  const { K } = sim;
+  const r = await sim.run('kalima atlas');
+  assert.equal(r.code, 0);
+  const tools = K.atlas.list();
+  const simulated = tools.filter((t) => K.atlas.isSimulated(t.name)).length;
+  assert.ok(r.out.startsWith(`Kali tool atlas\nA map of the toolbox: ${tools.length} tools in 14 categories, ${simulated} of them simulated in this\n`));
+  for (const c of K.atlas.categories) {
+    const mine = tools.filter((t) => t.category === c.id);
+    const sim1 = mine.filter((t) => K.atlas.isSimulated(t.name)).length;
+    assert.match(r.out, new RegExp(`^  ${c.id} +${mine.length} +${sim1} +${c.title}$`, 'm'), c.id);
+  }
+  assert.ok(r.out.includes('kalima atlas TOOL'));
+  assert.equal((await sim.run('kalima atlas | grep -cE "^  [a-z-]+ +[0-9]+ +[0-9]+ "')).out, '14\n', 'one line per category');
+  assert.match((await sim.run('kalima status')).out, new RegExp(`Tool atlas +${tools.length} tools catalogued, ${simulated} of them simulated`));
+});
+
+test('kalima atlas CATEGORY lists the tools of a category', async () => {
+  const sim = await boot();
+  const { K } = sim;
+  const r = await sim.run('kalima atlas web-application-analysis');
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^Web Application Analysis {2}\d+ tools, \d+ simulated\n {2}Examining web sites/);
+  assert.match(r.out, /^ {2}TOOL +SIMULATED +DEFAULT +WHAT IT IS$/m);
+  assert.match(r.out, /^ {2}whatweb +yes +yes +Next generation web scanner/m);
+  assert.match(r.out, /^ {2}gobuster +no +no +Discovery tool/m);
+  assert.match(r.out, /^ {2}burpsuite +no +yes +Integrated platform/m);
+  assert.ok(r.out.includes('kali-linux-default'));
+  for (const t of K.atlas.list().filter((x) => x.category === 'web-application-analysis')) assert.ok(r.out.includes(`\n  ${t.name} `), t.name);
+  assert.ok(!r.out.includes('\n  nmap '), 'tools of other categories are left out');
+
+  // a unique beginning of the id or the title, in any case
+  for (const word of ['web', 'WEB', 'Web Application Analysis', 'web-app']) assert.equal((await sim.run(`kalima atlas '${word}'`)).out, r.out, word);
+  assert.match((await sim.run('kalima atlas forensics')).out, /^Forensics {2}/);
+  assert.match((await sim.run('kalima atlas sys')).out, /^System and Utilities {2}/);
+  assert.equal((await sim.run('kalima atlas info | grep -c " yes  *yes "')).out.trim(), String(K.atlas.list().filter((t) => t.category === 'information-gathering' && K.atlas.isSimulated(t.name) && t.installed).length));
+
+  for (const c of K.atlas.categories) {
+    const out = (await sim.run('kalima atlas ' + c.id)).out;
+    assert.ok(out.split('\n').every((l) => l.length <= 80 && !/\s$/.test(l)), c.id + ' fits 80 columns');
+  }
+});
+
+test('kalima atlas TOOL shows one entry, and says so when nothing matches', async () => {
+  const sim = await boot();
+  const nmap = await sim.run('kalima atlas nmap');
+  assert.equal(nmap.code, 0);
+  assert.equal(nmap.out, [
+    'nmap', 'Network exploration tool and security / port scanner.', '',
+    '  Category         Information Gathering',
+    '  Package          nmap',
+    '  Default install  yes, as part of kali-linux-default',
+    '  In this build    simulated; man nmap describes what works here',
+    '  Reference        https://www.kali.org/tools/nmap/', '',
+  ].join('\n'));
+  const gobuster = (await sim.run('kalima atlas gobuster')).out;
+  assert.match(gobuster, /Default install +no; Kali adds it with: sudo apt install gobuster/);
+  assert.match(gobuster, /In this build +not simulated/);
+  assert.match((await sim.run('kalima atlas theharvester')).out, /^theHarvester\n/, 'tool names match in any case');
+  assert.match((await sim.run('kalima atlas ssh')).out, /Reference +https:\/\/manpages\.debian\.org\/ssh\n/);
+
+  const vague = await sim.run('kalima atlas re');
+  assert.equal(vague.code, 1);
+  assert.equal(vague.err, "kalima: atlas: 're' could be any of these categories: reverse-engineering, reporting-tools\n");
+  const near = await sim.run('kalima atlas smb');
+  assert.equal(near.code, 1);
+  assert.equal(near.out, '');
+  assert.equal(near.err, "kalima: atlas: no category or tool named 'smb'\nTools with a similar name: smbmap, smbclient\n");
+  assert.equal((await sim.run('kalima atlas zzz')).err, "kalima: atlas: no category or tool named 'zzz'\nRun 'kalima atlas' for the list of categories.\n");
+  assert.equal((await sim.run('kalima atlas nmap hydra')).code, 2);
+  assert.equal((await sim.run('kalima atlas --list')).err, "kalima: atlas: unrecognized option '--list'\nTry 'kalima help' for a list of commands.\n");
+
+  const words = sim.K.cmd.get('kalima').complete({ words: ['kalima', 'atlas', ''], index: 2, cur: '' });
+  for (const w of ['forensics', 'password-attacks', 'nmap', 'hydra']) assert.ok(words.includes(w), w);
+});
+
 test('kalima about says what is simulated and that the lab is fictional', async () => {
   const sim = await boot();
   const r = await sim.run('kalima about');
