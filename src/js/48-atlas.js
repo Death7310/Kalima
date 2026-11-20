@@ -193,6 +193,156 @@
     return 0;
   }
 
+  /* ------------------------------------------------------------------ scope */
+  // The numbered rules of ~/engagement/rules-of-engagement.txt, one line each.
+  const RULES = [
+    ['Authorization', 'you hold written permission for the addresses in scope and for nothing else'],
+    ['Scope', 'active testing stays inside the in-scope ranges'],
+    ['Do no harm', 'prefer the least intrusive technique that answers the question'],
+    ['Handle data with care', 'what you see belongs to the client; record only what the report needs'],
+    ['Record what you do', 'keep commands and times so that every finding can be reproduced'],
+    ['Stop and report', 'on signs of a real incident, or of anything outside the agreed scope, stop and contact the client'],
+  ];
+
+  const GUARD_ON = 'The scope guard is on. Active testing tools, such as port scanners, check every target against this scope before they send anything, and refuse a target outside it with an explanation. Ordinary client tools such as ping, dig, whois and curl are not held back: looking something up is not testing it.';
+  const GUARD_OFF = 'The scope guard is off. Active testing tools no longer check their targets against this scope. The scope itself has not changed, and neither have the rules.';
+
+  function cmdScope(ctx, args) {
+    if (args.length) return usageError(ctx, 'scope: too many arguments');
+    const p = pen(ctx); const e = K.net.world.engagement;
+    const excluded = (e.exclude || []).length ? para(ctx, 'Excluded from the ranges above: ' + e.exclude.join(', ') + '.', 2) : '';
+    ctx.out(
+      p.head('Engagement ' + e.id) + '\n' + para(ctx, e.name, 0) + '\n' +
+      rows(ctx, [['Client', e.client], ['Window', e.window], ['Contact', e.contact]], p.key) + '\n' +
+      p.head('IN SCOPE') + '\n' + scopeList(e).map((s) => '  ' + p.ok(s) + '\n').join('') + '\n' +
+      p.head('OUT OF SCOPE') + '\n' + excluded +
+      para(ctx, 'Everything else, including the public internet. Looking up public records (DNS, WHOIS) is permitted; active testing is not.', 2) + '\n' +
+      p.head('RULES IN BRIEF') + '\n' + rows(ctx, RULES.map(([title, text], i) => [(i + 1) + '. ' + title, text])) +
+      para(ctx, 'The full text is in ~/engagement/rules-of-engagement.txt.', 2) + '\n' +
+      p.head('SCOPE GUARD') + '\n' + para(ctx, K.settings.scopeGuard ? GUARD_ON : GUARD_OFF, 2));
+    return 0;
+  }
+
+  /* ------------------------------------------------------- discovered hosts
+   * A lab host counts as discovered once it has answered something: any packet
+   * it sent back, or a connection one of its services accepted. The record
+   * belongs to one world, so a new boot starts with nothing discovered.
+   */
+  const seen = { world: null, hosts: new Map(), unwatch: [] };
+
+  /** Address -> set of open ports ('80/tcp') seen on it, for the current world. */
+  function seenHosts() {
+    if (seen.world !== K.net.world) { seen.world = K.net.world; seen.hosts = new Map(); }
+    return seen.hosts;
+  }
+
+  const isLabHost = (h) => !!h && !h.inet && h.id !== 'kali' && K.net.inScope(h.ip);
+  const labHosts = () => K.net.hosts.filter(isLabHost);
+  const labHostAt = (ip) => { const h = K.net.knownHost(ip); return isLabHost(h) ? h : null; };
+
+  function noteHost(host, port) {
+    const found = seenHosts();
+    if (!found.has(host.ip)) found.set(host.ip, new Set());
+    if (port) found.get(host.ip).add(port);
+  }
+
+  function sawPacket(p) {
+    const host = labHostAt(p.src);
+    if (host) noteHost(host, p.proto === 'TCP' && p.flags === 'S.' ? p.sport + '/tcp' : null);
+  }
+
+  function sawConn(c) {
+    const host = c.host && labHostAt(c.host.ip);
+    if (host) noteHost(host, c.port + '/' + c.proto);
+  }
+
+  /** (Re)subscribe to the network bus; K.boot() may have replaced it along with the world. */
+  function watchNetwork() {
+    for (const off of seen.unwatch) off();
+    seen.unwatch = [K.net.bus.on('packet', sawPacket), K.net.bus.on('conn', sawConn)];
+  }
+  watchNetwork();
+  K.events.on('boot', watchNetwork);
+
+  const byAddress = (a, b) => U.ipToInt(a.ip) - U.ipToInt(b.ip);
+  const byPort = (a, b) => parseInt(a, 10) - parseInt(b, 10) || (a < b ? -1 : 1);
+  const portList = (ports) => (ports && ports.size ? Array.from(ports).sort(byPort).join(' ') : '-');
+  const hostName = (h) => h.fqdn || h.hostname;
+
+  const HOSTS_HINT = 'A host is listed once it has replied to something you sent, and a port once a connection to it succeeded.';
+  const HOSTS_ALL_HINT = 'kalima hosts --all lists every lab host. That is a spoiler: finding them is part of the exercise.';
+
+  function hostsFound(ctx) {
+    const p = pen(ctx); const found = seenHosts();
+    const hosts = labHosts().filter((h) => found.has(h.ip)).sort(byAddress);
+    const lab = K.net.world.engagement.scope.join(', ');
+    if (!hosts.length) return 'No lab host has answered you yet.\n\n' + para(ctx, HOSTS_HINT + ' The lab network is ' + lab + '.', 0) + para(ctx, HOSTS_ALL_HINT, 0);
+    return 'Lab hosts that have answered you so far: ' + p.head(String(hosts.length)) + '\n\n' +
+      table(ctx, ['ADDRESS', 'NAME', 'OPEN PORTS SEEN'], hosts.map((h) => [h.ip, hostName(h), portList(found.get(h.ip))]), [p.key]) + '\n' +
+      para(ctx, HOSTS_HINT, 0) + para(ctx, HOSTS_ALL_HINT, 0);
+  }
+
+  function hostsAll(ctx) {
+    const p = pen(ctx); const found = seenHosts();
+    const hosts = labHosts().sort(byAddress);
+    const body = hosts.map((h) => [h.ip, hostName(h), h.kind || 'host', found.has(h.ip) ? 'yes' : 'no', portList(found.get(h.ip))]);
+    return p.warn('Spoiler: this is the whole lab, including hosts you have not found yet.') + '\n\n' +
+      table(ctx, ['ADDRESS', 'NAME', 'ROLE', 'FOUND', 'OPEN PORTS SEEN'], body, [p.key, null, null, (cell) => (cell.trim() === 'yes' ? p.ok(cell) : cell)]) + '\n' +
+      para(ctx, plural(hosts.filter((h) => found.has(h.ip)).length, 'host') + ' of ' + hosts.length + ' found. Open ports are still listed only where you have seen them.', 0);
+  }
+
+  function cmdHosts(ctx, args) {
+    const g = K.getopt(args, { short: 'a', long: ['all'], alias: { all: 'a' } });
+    if (g.err || g.rest.length) return usageError(ctx, 'hosts: ' + (g.err || 'too many arguments'));
+    ctx.out(g.opts.a ? hostsAll(ctx) : hostsFound(ctx));
+    return 0;
+  }
+
+  /* ---------------------------------------------------------------- lessons */
+  const MARKS = { done: '[x]', started: '[~]', open: '[ ]' };
+
+  function lessonState(lesson) {
+    const progress = K.lessons.progress.of(lesson.id);
+    if (progress.done) return 'done';
+    return Object.keys(progress.steps).length ? 'started' : 'open';
+  }
+
+  function cmdLessons(ctx, args) {
+    if (args.length) return usageError(ctx, 'lessons: too many arguments');
+    if (!K.lessons.modules.length) { ctx.println('No lesson packs are loaded.'); return 0; }
+    const p = pen(ctx); const paint = { done: p.ok, started: p.warn, open: identity };
+    let out = 'Lessons: ' + lessonLine() + '\n';
+    for (const mod of K.lessons.modules) {
+      const done = mod.lessons.filter((l) => K.lessons.progress.isDone(l.id)).length;
+      out += '\n' + p.head(mod.title) + p.dim('  ' + done + ' of ' + mod.lessons.length) + '\n';
+      for (const lesson of mod.lessons) {
+        const state = lessonState(lesson);
+        const title = lesson.title + (lesson.minutes ? ' (' + lesson.minutes + ' min)' : '');
+        out += '  ' + paint[state](MARKS[state]) + ' ' + wrap(title, textWidth(ctx) - 6).join('\n      ') + '\n';
+      }
+    }
+    ctx.out(out + '\n' + p.dim(MARKS.done + ' completed   ' + MARKS.started + ' started   ' + MARKS.open + ' not started') + '\n' +
+      para(ctx, 'Lessons are opened from the Lessons panel, next to this terminal.', 0));
+    return 0;
+  }
+
+  /* ------------------------------------------------------------------ reset */
+  const RESET_NOTICE = 'This restarts the simulated machine and rebuilds the lab network. Running programs stop and every change outside your home directory is undone. Your home directory and your lesson progress are kept.';
+
+  async function cmdReset(ctx, args) {
+    const g = K.getopt(args, { short: 'y', long: ['yes'], alias: { yes: 'y' } });
+    if (g.err || g.rest.length) return usageError(ctx, 'reset: ' + (g.err || 'too many arguments'));
+    ctx.out(para(ctx, RESET_NOTICE, 0));
+    if (!g.opts.y) {
+      const answer = await ctx.readLine('Restart now? [y/N] ');
+      if (answer == null && ctx.stdin == null) ctx.println('');
+      if (!/^y(es)?$/i.test((answer || '').trim())) { ctx.println('Nothing was reset.'); return 1; }
+    }
+    ctx.println('Restarting the simulator...');
+    K.events.emit('power', { action: 'reset' });
+    return 0;
+  }
+
   /* ------------------------------------------------------------------ about */
   function simulatedCommandCount() { return K.cmd.list().filter((d) => !d.stub && !d.aliasOf).length; }
 
@@ -226,11 +376,14 @@
   /** Report a mistake in how kalima was called; exit status 2. */
   function usageError(ctx, msg, noHint) { return ctx.fail(msg + (noHint ? '' : '\n' + TRY_HELP), 2); }
 
-  const HANDLERS = { help: cmdHelp, status: cmdStatus, speed: cmdSpeed, about: cmdAbout };
+  const HANDLERS = { help: cmdHelp, status: cmdStatus, scope: cmdScope, hosts: cmdHosts, lessons: cmdLessons, speed: cmdSpeed, reset: cmdReset, about: cmdAbout };
 
-  const usageText = () => 'Usage: kalima [COMMAND] [ARGUMENT]...\n\n' +
-    SUBCOMMANDS.map(([name, arg, text]) => '  ' + (name + (arg ? ' ' + arg : '')).padEnd(16) + text).join('\n') +
-    '\n\n  -h, --help      display this help and exit\n  -V, --version   output version information and exit\n';
+  function usageText() {
+    const options = [['-h, --help', 'display this help and exit'], ['-V, --version', 'output version information and exit']];
+    const width = Math.max.apply(null, SUBCOMMANDS.map((sub) => usageOf(sub).length)) + 2;
+    const list = (pairs) => pairs.map(([key, text]) => '  ' + key.padEnd(width) + text + '\n').join('');
+    return 'Usage: kalima [COMMAND] [ARGUMENT]...\n\n' + list(SUBCOMMANDS.map((sub) => [usageOf(sub), sub[2]])) + '\n' + list(options);
+  }
 
   K.cmd.register({
     name: 'kalima',
@@ -240,10 +393,10 @@
     synopsis: 'kalima [COMMAND] [ARGUMENT]...',
     man: () => 'DESCRIPTION\n' +
       '       kalima belongs to the simulator, not to Kali Linux. It explains how the simulator works, shows the state of the training lab and changes a few simulator settings. Without a command it prints the overview that kalima help prints.\n\n' +
-      'COMMANDS\n' + SUBCOMMANDS.map(([name, arg, text]) => '       ' + name + (arg ? ' ' + arg : '') + '\n              ' + text[0].toUpperCase() + text.slice(1) + '.').join('\n\n') + '\n\n' +
+      'COMMANDS\n' + SUBCOMMANDS.map((sub) => '       ' + usageOf(sub) + '\n              ' + sub[2][0].toUpperCase() + sub[2].slice(1) + '.').join('\n\n') + '\n\n' +
       'OPTIONS\n       -h, --help\n              Display a usage summary and exit.\n\n       -V, --version\n              Output version information and exit.\n\n' +
       'EXIT STATUS\n       0 on success, 1 when a command could not do what was asked, 2 when kalima was called incorrectly.\n\n' +
-      'EXAMPLES\n       kalima status\n              Show what is being simulated and how far the lessons have been completed.\n\n       kalima speed fast\n              Shorten every simulated wait, such as the second between two pings.',
+      'EXAMPLES\n       kalima status\n              Show what is being simulated and how far the lessons have been completed.\n\n       kalima hosts\n              List the lab hosts that have replied so far, with the open ports seen on each.\n\n       kalima speed fast\n              Shorten every simulated wait, such as the second between two pings.',
     run(ctx) {
       const [sub, ...args] = ctx.args;
       if (sub == null) return cmdHelp(ctx);
@@ -256,7 +409,10 @@
     },
     complete(info) {
       if (info.index === 1) return SUBCOMMANDS.map((s) => s[0]);
-      if (info.words[1] === 'speed' && info.index === 2) return SPEEDS.map((s) => s.name);
+      if (info.index !== 2) return [];
+      if (info.words[1] === 'speed') return SPEEDS.map((s) => s.name);
+      if (info.words[1] === 'hosts') return ['--all'];
+      if (info.words[1] === 'reset') return ['--yes'];
       return [];
     },
   });
