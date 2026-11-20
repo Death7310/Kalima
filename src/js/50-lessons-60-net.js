@@ -801,12 +801,230 @@
     refs: ['traceroute(8)', 'mtr(8)', 'RFC 792 (ICMP)', 'RFC 1812, section 5.3.1 (time to live)'],
   };
 
+  /* ----------------------------------------------------------------- ports */
+  const SS_LONG = { t: '--tcp', u: '--udp', l: '--listening', n: '--numeric', p: '--processes', a: '--all' };
+  /** Did the line run `ss` (directly or through sudo) with every one of these one-letter options? `-a` also counts as `-l`. */
+  const ssWith = (letters) => (ev) => (ev.commands || []).some((c) => {
+    const i = c.argv.findIndex((a) => String(a).split('/').pop() === 'ss');
+    if (i < 0) return false;
+    const rest = c.argv.slice(i + 1);
+    const has = (x) => rest.some((a) => a === SS_LONG[x] || (/^-[a-zA-Z0-9]+$/.test(a) && a.indexOf(x) > 0));
+    return letters.split('').every((x) => has(x) || (x === 'l' && has('a')));
+  });
+  /** Is something on the Kali machine listening on TCP port 22 right now? */
+  const sshListening = () => K.net.listening(K.kali).some((l) => l.port === 22 && (l.proto || 'tcp') === 'tcp');
+  const SSH_ROW = /^(tcp\s+)?LISTEN\s.*:(22|ssh)\s/m;
+  const sshService = (verb) => ({ any: [
+    { cmd: 'systemctl', argsRe: new RegExp('\\b' + verb + '\\b.*\\bsshd?(\\.service)?\\b') },
+    { cmd: 'service', argsRe: new RegExp('\\bsshd?\\s+' + verb + '\\b') },
+  ] });
+
+  const portsLesson = {
+    id: 'net-ports',
+    title: 'Ports and listening services',
+    minutes: 10,
+    objectives: [
+      'List the listening sockets of a machine with `ss -tln` and `ss -tuln`, and read the address and port of each',
+      'Explain the difference between TCP and UDP in a sentence each',
+      'Look up the conventional name of a port in `/etc/services`',
+      'Start and stop a service with `systemctl`, and confirm the effect on the listening ports',
+    ],
+    intro: T(
+      'An address gets a packet to the right machine. A *port* number gets it to the right program on that machine. A program that waits for connections is said to listen on a port, and every listening port is a door into the system.',
+      '',
+      'Knowing which doors are open on your own workstation, and why, is basic hygiene for anyone who connects that workstation to other people\'s networks. Kali is delivered with its network services switched off for this reason. In this lesson you check that, open one door on purpose, watch it appear, and close it again. The same commands are among the first to run on any server you are asked to review.'
+    ),
+    steps: [
+      {
+        id: 'listening',
+        prompt: T(
+          'The tool for looking at ports from the inside is `ss`. It lists *sockets*, the endpoints that programs open in order to talk over the network.',
+          '',
+          '```',
+          'ss -tln',
+          '```',
+          '',
+          'Three options are combined here. `-t` selects TCP sockets. `-l` selects the ones that are listening, that is, waiting for somebody to connect. `-n` prints numbers and does not look up names for them.',
+          '',
+          'On a freshly started Kali you get a header line and nothing below it: no program is waiting for TCP connections. Kali starts no network services unless you ask for them, so there is nothing here for anyone else on the network to connect to.',
+          '',
+          'If you do see a row with port 22, the SSH service was started earlier. It does no harm here, and you will meet that row in a moment.'
+        ),
+        hint: 'Type `ss -tln`. The three letters may come in any order.',
+        solution: 'ss -tln',
+        check: { fn: ssWith('tl'), out: /Local Address:Port/ },
+      },
+      {
+        id: 'udp',
+        prompt: T(
+          'TCP is one of two protocols that programs use on top of IP. Each of the two has its own set of port numbers, from 0 to 65535.',
+          '',
+          '- **TCP** sets up a connection before any data flows, numbers everything it sends, and repeats what gets lost. Web pages, SSH and mail use it.',
+          '- **UDP** sends single messages with no setup and no guarantee that they arrive. It suits short questions and answers, such as DNS and DHCP.',
+          '',
+          'Add `-u` to include UDP sockets:',
+          '',
+          '```',
+          'ss -tuln',
+          '```',
+          '',
+          'Now there is a row. The new first column, `Netid`, shows `udp`, and `Local Address:Port` ends in `:68`. Something on your machine has UDP port 68 open on the address of `eth0`. The state reads `UNCONN`, for "unconnected", because UDP has no connections and therefore nothing like a listening state.'
+        ),
+        hint: 'Type `ss -tuln`: the command from the last step with a `u` added to the options.',
+        solution: 'ss -tuln',
+        check: { fn: ssWith('tul'), out: /^udp\s+UNCONN\s.*:(68|bootpc)\s/m },
+      },
+      {
+        id: 'services',
+        prompt: T(
+          'What is port 68 for? The file `/etc/services` lists the names that are used for port numbers by convention. Search it for the port and its protocol:',
+          '',
+          '```',
+          'grep -w 68/udp /etc/services',
+          '```',
+          '',
+          '`-w` makes `grep` match whole words only, so that `68/udp` does not also find `168/udp`. The answer is `bootpc`, the client side of the protocol behind DHCP. The socket belongs to the program that obtained your IP address, and it stays open so that the address can be renewed.',
+          '',
+          'Keep in mind what this file is: a list of conventions. It tells you what usually uses a port. It cannot tell you which program is behind a port on a particular machine.'
+        ),
+        hint: 'Type `grep -w 68/udp /etc/services`.',
+        solution: 'grep -w 68/udp /etc/services',
+        check: { cmd: ['grep', 'egrep', 'fgrep', 'getent'], out: /^bootpc\s+68\/udp/m },
+      },
+      {
+        id: 'lookup',
+        prompt: 'The file can be searched in the other direction too. Look for the service name `https` in it. Which port number does the file give for `https`?',
+        hint: '`grep -w https /etc/services`. The number stands in front of `/tcp`.',
+        solution: '443',
+        answer: /^(port\s*)?443(\s*\/\s*tcp)?$/i,
+      },
+      {
+        id: 'start',
+        prompt: T(
+          'Now open a door on purpose. Start the SSH server, the service that lets people log in to a machine over the network:',
+          '',
+          '```',
+          'sudo systemctl start ssh',
+          '```',
+          '',
+          '`systemctl` controls services. Changing them needs root, so `sudo` asks for your password, which is `kali` in this lab. A successful start prints nothing.',
+          '',
+          '`start` runs the service now. It does not arrange for the service to run again after a reboot. That would be `systemctl enable`, and on Kali SSH stays disabled until you decide otherwise.'
+        ),
+        hint: 'Type `sudo systemctl start ssh`, and your password when it is asked for.',
+        solution: 'sudo systemctl start ssh',
+        input: ['kali'],
+        check: { all: [sshService('(re)?start'), { fn: () => sshListening() }] },
+      },
+      {
+        id: 'appear',
+        prompt: T(
+          'List the listening TCP sockets again, as you did in the first step.',
+          '',
+          'Two rows have appeared, both in the state `LISTEN`. Read the column `Local Address:Port`.',
+          '',
+          '- `0.0.0.0:22` is port 22 on every IPv4 address this machine has. `0.0.0.0` stands for "all of them", so the port can be reached by any machine that can reach yours.',
+          '- `[::]:22` is the same for IPv6.',
+          '',
+          'Had the address been `127.0.0.1:22`, only programs on this machine could connect. The local address is the first thing to read when you judge how exposed a service is.'
+        ),
+        hint: 'The command is `ss -tln`. If no rows appear, start the service again as in the last step.',
+        solution: 'ss -tln',
+        check: { fn: ssWith('tl'), out: /^(tcp\s+)?LISTEN\s.*\s0\.0\.0\.0:(22|ssh)\s/m },
+      },
+      {
+        id: 'process',
+        prompt: T(
+          'The port number tells you which door is open. To see who opened it, add `-p` for the process. Details of processes that belong to other users are shown to root only, so this needs `sudo`:',
+          '',
+          '```',
+          'sudo ss -tlnp',
+          '```',
+          '',
+          'The last column now shows `users:(("sshd",pid=...` and so on. The program is `sshd`, the SSH server, and `pid` is its process ID.',
+          '',
+          'This is the dependable answer to the question "what is behind this port?". `/etc/services` could only say what is usually there.'
+        ),
+        hint: 'Type `sudo ss -tlnp`. Without `sudo` the command works, but the last column stays empty.',
+        solution: 'sudo ss -tlnp',
+        input: ['kali'],
+        check: { cmd: 'ss', out: /:(22|ssh)\s.*users:\(\("sshd",pid=\d+/ },
+      },
+      {
+        id: 'stop',
+        prompt: T(
+          'The exercise is over, so close the door. A service that was started for one task and then forgotten is exactly the kind of open port that somebody finds months later.',
+          '',
+          'Stop the SSH server.'
+        ),
+        hint: 'Use `systemctl` again, with `stop` in place of `start`, and `sudo` in front.',
+        solution: 'sudo systemctl stop ssh',
+        input: ['kali'],
+        check: { all: [sshService('stop'), { fn: () => !sshListening() }] },
+      },
+      {
+        id: 'verify',
+        prompt: 'Do not assume that it worked. Check with `ss` that nothing is listening on TCP port 22 any more.',
+        hint: 'The command from the first step, `ss -tln`, should print no row for port 22.',
+        solution: 'ss -tln',
+        check: { fn: (ev) => ssWith('tl')(ev) && /Local Address:Port/.test(outOf(ev)) && !SSH_ROW.test(outOf(ev)) && !sshListening() },
+      },
+    ],
+    quiz: [
+      {
+        q: 'On a server, `ss -tln` shows a row with `127.0.0.1:5432` under `Local Address:Port`. Who can connect to that port?',
+        choices: [
+          'Any machine that can reach the server',
+          'Only machines on the same segment as the server',
+          'Only programs running on the server itself',
+          'Nobody, because `127.0.0.1` is not a real address',
+        ],
+        answer: 2,
+        why: 'The socket is bound to the loopback address, which exists only inside the machine. A row with `0.0.0.0:5432` would mean every IPv4 address of the server, and so everyone who can reach it.',
+      },
+      {
+        q: 'You find that port 53/tcp is open on a server. A colleague concludes that 53/udp must be open as well. Are they right?',
+        choices: [
+          'No. TCP and UDP have separate sets of ports, so each has to be checked on its own',
+          'Yes. A port number is always open for both protocols',
+          'Yes, because DNS uses port 53',
+          'No, because UDP has no port numbers',
+        ],
+        answer: 0,
+        why: 'Port 53 for TCP and port 53 for UDP are two different doors that happen to carry the same number. A service may listen on one, on both, or on neither.',
+      },
+      {
+        q: '`/etc/services` contains the line `http 80/tcp`. On some host, port 80 is open. What does the file prove about the program behind that port?',
+        choices: [
+          'That it is a web server',
+          'That it is the program named `http`',
+          'That it was started by root',
+          'Nothing. The file records a naming convention, and any program can listen on any port',
+        ],
+        answer: 3,
+        why: 'The file maps numbers to the names they usually go by. To find out what really listens, look at the process on the machine itself with `sudo ss -tlnp`, or at what the port says when a client connects to it.',
+      },
+      {
+        q: 'On Kali you run `sudo systemctl start ssh` and later restart the machine. What does `ss -tln` show for port 22 after the restart?',
+        choices: [
+          'Two rows as before, because a started service stays started',
+          'No row, because `start` only lasts until the service is stopped or the machine restarts',
+          'One row, for IPv4 only',
+          'An error, because the service has to be stopped before a restart',
+        ],
+        answer: 1,
+        why: '`start` affects the running system only. Whether a service comes up at boot is a separate setting, changed with `systemctl enable` and `systemctl disable`, and Kali leaves SSH disabled.',
+      },
+    ],
+    refs: ['ss(8)', 'systemctl(1)', 'services(5)', 'RFC 9293 (TCP)', 'RFC 768 (UDP)', 'RFC 6335 (service names and port numbers)', 'Kali Linux Revealed, ch. 5'],
+  };
+
   K.lessons.register({
     id: 'net',
     title: 'Networking fundamentals',
     order: 60,
     summary: 'Read your own addresses and routes, test reachability with ping, follow the path a packet takes, see which ports are listening, and find a network fault by working upward from the cable.',
-    lessons: [addressesLesson, routesLesson, pingLesson, pathLesson],
+    lessons: [addressesLesson, routesLesson, pingLesson, pathLesson, portsLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
