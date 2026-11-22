@@ -996,6 +996,7 @@
     _open(ov) {
       this._overlay = ov;
       this.over.textContent = ''; this.over.appendChild(ov.el); this.over.hidden = false;
+      if (this.opts.onOverlay) { this.opts.onOverlay(true); this.fit(); }      // the app may give the program more room
       this._mode();
       this._syncField();
       ov.resize();
@@ -1003,6 +1004,7 @@
     _closeOverlay() {
       this._overlay = null;
       this.over.hidden = true; this.over.textContent = '';
+      if (this.opts.onOverlay) { this.opts.onOverlay(false); this.fit(); }
       this._mode();
       this._syncField();
       this._stick = true; this._schedule();

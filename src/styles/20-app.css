@@ -81,9 +81,52 @@
   .k-lab { position: absolute; top: 0; right: 0; bottom: 0; z-index: 5; box-shadow: -18px 0 44px rgba(0, 0, 0, 0.5); }
 }
 @media (max-width: 899.98px) {
+  .k-body { flex-direction: column; }
   .k-lesson, .k-work, .k-lab { display: none; flex: 1 1 auto; width: 100%; }
   [data-view="lesson"] .k-lesson, [data-view="lab"] .k-lab, [data-view="terminal"] .k-work { display: flex; }
   .k-panel-body { padding-left: max(14px, env(safe-area-inset-left, 0px)); padding-right: max(14px, env(safe-area-inset-right, 0px)); }
+}
+
+/* ------------------------------------------------- terminal docked in the lesson
+ * Narrow layout, Lesson view: the lesson scrolls above, the same terminal sits below.
+ * JavaScript sets --k-dock-h (the saved split, kept inside limits that leave both parts usable)
+ * and the classes has-dock, is-short (a soft keyboard is probably up) and is-takeover (a pager or editor is open).
+ */
+.k-dock-split { display: none; }
+.k-head-end { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.k-dock-toggle { min-height: 30px; padding: 0 0.7em; font-size: 0.82rem; color: var(--k-muted); }
+.k-dock-toggle .k-icon { width: 16px; height: 16px; }
+.k-dock-toggle[aria-pressed="true"] { border-color: rgba(106, 169, 255, 0.5); background: var(--k-accent-soft); color: var(--k-accent); }
+.k-dock-btn { flex: none; min-height: 26px; margin: 0 0 4px auto; padding: 0 0.6em; font-size: 0.78rem; color: var(--k-muted); }
+.k-dock-btn .k-icon { width: 14px; height: 14px; }
+@media (max-width: 899.98px) {
+  .has-dock .k-lesson { flex: 1 1 0; width: 100%; min-height: 0; }
+  .has-dock .k-work { display: flex; flex: none; width: 100%; height: var(--k-dock-h, 40%); }
+  .has-dock .k-dock-split {
+    display: block; flex: none; position: relative; z-index: 3; height: 22px; margin: -1px 0 0; background: var(--k-surface);
+    border-top: 1px solid var(--k-line); cursor: row-resize; touch-action: none;
+  }
+  .k-dock-split::after {
+    content: ""; position: absolute; left: 50%; top: 9px; width: 44px; height: 4px; margin-left: -22px; border-radius: 2px;
+    background: var(--k-line-strong); transition: background var(--k-ease);
+  }
+  .k-dock-split:hover::after, .k-dock-split:focus-visible::after, .is-resizing .k-dock-split::after { background: var(--k-accent); }
+  .k-dock-split:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--k-accent); }
+  .is-resizing, .is-resizing * { user-select: none; -webkit-user-select: none; }
+  .has-dock.is-resizing, .has-dock.is-resizing * { cursor: row-resize !important; }
+  .has-dock:not(.is-short) .k-task { display: none; }
+  .has-dock .k-task { padding: 5px 12px; }
+  .has-dock.is-short .k-task-text { -webkit-line-clamp: 1; }
+  .has-dock .k-termbar { padding-left: 4px; }
+  .has-dock .k-termtab { max-width: 132px; min-width: 46px; }
+  .has-dock .k-termtab-btn { gap: 6px; padding: 0 8px; }
+  .has-dock .k-step-how .k-btn { display: none; }
+  .has-dock.is-short .k-panel-head { padding-top: 6px; padding-bottom: 6px; }
+  .has-dock.is-short .k-panel-head .k-bar { display: none; }
+  /* a pager or editor gets the whole view and the split comes back when it closes */
+  .is-takeover .k-lesson, .is-takeover .k-dock-split { display: none; }
+  .is-takeover .k-work { flex: 1 1 auto; height: auto; }
+  .is-takeover .k-dock-btn { display: none; }
 }
 
 /* ------------------------------------------------------------ terminal tabs */

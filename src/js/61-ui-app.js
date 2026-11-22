@@ -15,6 +15,7 @@
 
   const WIDE = '(min-width: 900px)';     // keep in step with the media queries in 20-app.css
   const MAX_TABS = 4;
+  const DOCK_ROWS = 4; const DOCK_LESSON_MIN = 72; const DOCK_STEP = 24; const SHORT_VIEW = 460;   // narrow dock: smallest terminal (rows), smallest lesson text area (px), arrow-key step, height below which the keyboard is assumed up
   const SIDE_MIN = 300; const SIDE_MAX = 720; const SIDE_DEFAULT = 420; const WORK_MIN = 380;
   const CELEBRATE_MS = 1100;             // how long a finished step shows its success state before the next one opens
   const SPEEDS = [
@@ -103,6 +104,7 @@
     back: 'M14.5 5.5L8 12l6.5 6.5',
     check: 'M5 12.5l4.5 4.5L19 7.5',
     terminal: 'M4 5.5h16v13H4zM7.5 10l3 2.2-3 2.3M12.5 14.5H16',
+    expand: 'M14 4.5h5.5V10M10 19.5H4.5V14M19.5 4.5l-6 6M4.5 19.5l6-6',
   };
   const icon = (name) => '<svg class="k-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="' + ICONS[name] + '"/></svg>';
   const MARK = '<svg class="k-mark" viewBox="0 0 28 28" aria-hidden="true"><rect x="1.5" y="1.5" width="25" height="25" rx="7"/>' +
@@ -116,7 +118,7 @@
       this.host = host;
       this.wide = root.matchMedia(WIDE);
       this.settings = Object.assign({ timeScale: 1, fontSize: this.wide.matches ? 14 : 12, keybar: 'auto', welcomed: false }, store.get('settings', {}));
-      this.state = Object.assign({ lesson: null, view: null, sideWidth: SIDE_DEFAULT, lessonOpen: true, labOpen: null }, store.get('ui', {}));
+      this.state = Object.assign({ lesson: null, view: null, sideWidth: SIDE_DEFAULT, lessonOpen: true, labOpen: null, dock: true, dockH: null }, store.get('ui', {}));
       this.found = store.get('lab', {});     // lab hosts seen so far, by IP: { up, ports: { 'tcp/22': true } }
       this.tabs = []; this.active = null; this.term = null; this.tabSeq = 0;
       this.booted = false;
@@ -141,7 +143,7 @@
     /* ---------------------------------------------------------------- layout */
     _build() {
       const viewTab = (id, label) => h('button', {
-        type: 'button', class: 'k-view-tab', role: 'tab', 'data-view': id, 'aria-controls': 'k-panel-' + id, onclick: () => this.setView(id),
+        type: 'button', class: 'k-view-tab', role: 'tab', 'data-view': id, 'aria-controls': 'k-panel-' + id, onclick: () => { if (this.term && this.term._overlay) this._noTakeover = true; this.setView(id); },
       }, label);
       this.viewTabs = [viewTab('lesson', 'Lesson'), viewTab('terminal', 'Terminal'), viewTab('lab', 'Lab')];
       this.progressEl = h('button', { type: 'button', class: 'k-top-progress', hidden: true, onclick: () => this.openBrowser() });
@@ -160,11 +162,14 @@
       this.splitEl = h('div', { class: 'k-split k-wide-only', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Resize the lesson panel', tabindex: '0' });
       this.termTabsEl = h('div', { class: 'k-termtabs', role: 'tablist', 'aria-label': 'Terminal tabs' });
       this.btnNewTab = h('button', { type: 'button', class: 'k-icon-btn k-newtab', title: 'New terminal tab', 'aria-label': 'New terminal tab', html: icon('plus'), onclick: () => this.newTab() });
-      this.taskEl = h('button', { type: 'button', class: 'k-task k-narrow-only', hidden: true, onclick: () => this.setView('lesson') });
+      this.dockSplitEl = h('div', { class: 'k-dock-split', role: 'separator', 'aria-orientation': 'horizontal', 'aria-label': 'Resize the lesson and the terminal', tabindex: '0' });
+      this.btnDock = h('button', { type: 'button', class: 'k-btn k-dock-btn k-narrow-only' });
+      this.btnDock.addEventListener('click', () => this.setView(this.state.view === 'lesson' ? 'terminal' : 'lesson'));
+      this.taskEl = h('button', { type: 'button', class: 'k-task k-narrow-only', hidden: true, onclick: () => (this._dockShown() ? this._showCurrent() : this.setView('lesson')) });
       this.termHost = h('div', { class: 'k-term-stack' });
-      this.workEl = h('main', { class: 'k-work', id: 'k-panel-terminal' }, h('div', { class: 'k-termbar' }, this.termTabsEl, this.btnNewTab), this.taskEl, this.termHost);
+      this.workEl = h('main', { class: 'k-work', id: 'k-panel-terminal' }, h('div', { class: 'k-termbar' }, this.termTabsEl, this.btnNewTab, this.btnDock), this.taskEl, this.termHost);
       this.labEl = h('aside', { class: 'k-panel k-lab', id: 'k-panel-lab', 'aria-label': 'Lab' });
-      this.bodyEl = h('div', { class: 'k-body' }, this.lessonEl, this.splitEl, this.workEl, this.labEl);
+      this.bodyEl = h('div', { class: 'k-body' }, this.lessonEl, this.splitEl, this.dockSplitEl, this.workEl, this.labEl);
       this.toastEl = h('div', { class: 'k-toast', role: 'status', 'aria-live': 'polite', hidden: true });
       this.el = h('div', { class: 'k-app' }, top, this.bodyEl, this.toastEl);
       this.host.textContent = '';
@@ -178,6 +183,19 @@
       el.classList.toggle('is-lesson-closed', !s.lessonOpen);
       el.classList.toggle('is-lab-open', !!s.labOpen);
       el.style.setProperty('--k-side-w', s.sideWidth + 'px');
+      const dock = this._dockShown();
+      el.classList.toggle('has-dock', dock);
+      el.classList.toggle('is-takeover', dock && this._takeover());
+      const dockBtn = this.lessonEl.querySelector('[data-act="dock"]');
+      if (dockBtn) dockBtn.setAttribute('aria-pressed', String(!!s.dock));
+      const mode = s.view === 'lesson' ? 'expand' : 'back';
+      if (this._dockMode !== mode) {
+        this._dockMode = mode;
+        this.btnDock.innerHTML = icon(mode) + (mode === 'expand' ? 'Expand' : 'Lesson');
+        this.btnDock.setAttribute('aria-label', mode === 'expand' ? 'Expand to the full Terminal view' : 'Back to the lesson');
+        this.btnDock.title = mode === 'expand' ? 'Use the whole screen for the terminal' : 'Back to the lesson';
+      }
+      this._layoutDock();
       for (const t of this.viewTabs) t.setAttribute('aria-selected', String(t.getAttribute('data-view') === s.view));
       this.btnLesson.setAttribute('aria-pressed', String(!!s.lessonOpen));
       this.btnLab.setAttribute('aria-pressed', String(!!s.labOpen));
@@ -191,9 +209,44 @@
     /** Narrow screens show one of the three views at a time. */
     setView(view) {
       this.state.view = view;
-      this._saveState(); this._applyLayout();
+      this._saveState(); this._applyLayout(); this._renderTask();
       if (view === 'terminal') this.focusTerminal();
-      if (view === 'lesson') this._resume();
+      if (view === 'lesson') { this._resume(); this.focusTerminal(); }
+    }
+    /** The terminal docked under the lesson (narrow layout, Lesson view). */
+    _dockShown() { return !this.wide.matches && this.state.view === 'lesson' && !!this.state.dock; }
+    /** The pager and the editors take the whole view while they are open in the dock; the split returns afterwards. */
+    _takeover() { return !this._noTakeover && !!(this.term && this.term._overlay); }
+    setDock(on) {
+      this.state.dock = !!on;
+      this._saveState(); this._applyLayout(); this._renderTask();
+      if (on) { this.focusTerminal(); requestAnimationFrame(() => this._showCurrent()); }
+    }
+    /** Size the dock: the saved height, kept inside limits that leave both parts usable. */
+    _layoutDock() {
+      const el = this.el;
+      if (!this._dockShown() || el.classList.contains('is-takeover')) { el.classList.remove('is-short'); return; }
+      const bodyH = this.bodyEl.clientHeight;
+      if (!bodyH) return;
+      el.classList.toggle('is-short', bodyH < SHORT_VIEW);
+      const term = this.term; const lh = term ? term.lineH : 18;
+      const keys = term && !term.keys.hidden ? term.keys.offsetHeight : 0;
+      const task = this.taskEl.hidden ? 0 : this.taskEl.offsetHeight;
+      const termMin = Math.ceil(this.btnNewTab.parentNode.offsetHeight + task + 17 + DOCK_ROWS * lh + keys);
+      const lessonMin = this.lessonHead.offsetHeight + DOCK_LESSON_MIN;
+      const max = Math.max(termMin, bodyH - this.dockSplitEl.offsetHeight - lessonMin);
+      const want = this.state.dockH == null ? Math.round(bodyH * 0.42) : this.state.dockH;
+      const px = Math.round(Math.max(termMin, Math.min(max, want)));
+      this._dockLimits = { min: termMin, max };
+      el.style.setProperty('--k-dock-h', px + 'px');
+      const sp = this.dockSplitEl;
+      sp.setAttribute('aria-valuenow', String(px)); sp.setAttribute('aria-valuemin', String(termMin)); sp.setAttribute('aria-valuemax', String(max));
+      this._dockPx = px;
+    }
+    _setDockH(px) {
+      const lim = this._dockLimits || { min: 120, max: 600 };
+      this.state.dockH = Math.round(Math.max(lim.min, Math.min(lim.max, px)));
+      this._layoutDock();
     }
     togglePanel(key) {
       this.state[key] = !this.state[key];
@@ -220,8 +273,9 @@
       this.labEl.addEventListener('click', (e) => this._handBack(e));
       this.termTabsEl.addEventListener('click', (e) => this._tabClick(e));
       this._listenSplit();
+      this._listenDock();
 
-      const relayout = () => { this._applyLayout(); if (this.wide.matches) this.focusTerminal(); };
+      const relayout = () => { this._applyLayout(); this._renderTask(); this.focusTerminal(); };
       if (this.wide.addEventListener) this.wide.addEventListener('change', relayout); else this.wide.addListener(relayout);
       document.addEventListener('keydown', (e) => this._strayKey(e));
       document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') this._saveHome(); });
@@ -249,6 +303,45 @@
       });
     }
 
+    _listenDock() {
+      const split = this.dockSplitEl; let dragging = false; let kind = '';
+      const stop = () => {
+        if (!dragging) return;
+        dragging = false; this.el.classList.remove('is-resizing'); this._saveState();
+        if (kind === 'mouse') this.focusTerminal();
+      };
+      split.addEventListener('pointerdown', (e) => {
+        if (e.button) return;
+        dragging = true; kind = e.pointerType; split.setPointerCapture(e.pointerId); this.el.classList.add('is-resizing'); e.preventDefault();
+      });
+      split.addEventListener('pointermove', (e) => {
+        if (dragging) this._setDockH(this.bodyEl.getBoundingClientRect().bottom - e.clientY - split.offsetHeight / 2);
+      });
+      split.addEventListener('pointerup', stop);
+      split.addEventListener('pointercancel', stop);
+      split.addEventListener('dblclick', () => { this.state.dockH = null; this._layoutDock(); this._saveState(); });
+      split.addEventListener('keydown', (e) => {
+        const lim = this._dockLimits; if (!lim) return;
+        const to = { ArrowUp: this._dockPx + DOCK_STEP, ArrowDown: this._dockPx - DOCK_STEP, PageUp: this._dockPx + 4 * DOCK_STEP, PageDown: this._dockPx - 4 * DOCK_STEP, Home: lim.min, End: lim.max }[e.key];
+        if (to == null) return;
+        e.preventDefault(); this._setDockH(to); this._saveState();
+      });
+      // touch: keep the soft keyboard up while the learner scrolls or taps in the lesson
+      this.lessonEl.addEventListener('pointerdown', (e) => { this._ptype = e.pointerType; });
+      this.lessonEl.addEventListener('mousedown', (e) => {
+        if (this._ptype === 'touch' && this._dockShown() && this.term && document.activeElement === this.term.ta && !e.target.closest('input, textarea, select')) e.preventDefault();
+      });
+      if (typeof ResizeObserver !== 'undefined') {
+        let last = 0;
+        new ResizeObserver(() => {
+          const hh = this.bodyEl.clientHeight;
+          this._layoutDock();
+          if (this._dockShown() && last && Math.abs(hh - last) > 40) requestAnimationFrame(() => this._showCurrent());
+          last = hh;
+        }).observe(this.bodyEl);
+      }
+    }
+
     /** Keep the app inside the visible part of the window while a soft keyboard is open. */
     _followViewport() {
       const vv = root.visualViewport;
@@ -264,7 +357,7 @@
     }
 
     _dialogOpen() { return !!document.querySelector('dialog[open]'); }
-    _terminalShown() { return this.wide.matches || this.state.view === 'terminal'; }
+    _terminalShown() { return this.wide.matches || this.state.view === 'terminal' || this._dockShown(); }
     focusTerminal() { if (this.term && this._terminalShown() && !this._dialogOpen()) this.term.focus(); }
 
     /** A key pressed while nothing has focus belongs to the terminal. */
@@ -280,7 +373,9 @@
     /** After a mouse click on a side panel, give the keyboard back to the terminal unless a text field took it. */
     _handBack(e) {
       const a = document.activeElement;
-      if (e.detail === 0 || !this.wide.matches || (a && a.matches('input, textarea, select'))) return;
+      const dock = this._dockShown();
+      if (e.detail === 0 || (!this.wide.matches && !dock) || (a && a.matches('input, textarea, select'))) return;
+      if (dock && !e.target.closest('button')) return;                                              // a tap on lesson text is for reading, not typing
       if (String(root.getSelection && root.getSelection())) return;                                   // text was selected for copying
       this.focusTerminal();
     }
@@ -347,7 +442,8 @@
       const host = h('div', { class: 'k-term', role: 'tabpanel' });
       this.termHost.appendChild(host);
       const tab = { id: ++this.tabSeq, host, term: null, shell: null, closed: false, label: 'kali@kali: ~' };
-      tab.term = new ui.Terminal(host, { fontSize: this.settings.fontSize, keybar: this.settings.keybar, onTitle: (title) => this._setLabel(tab, title) });
+      tab.term = new ui.Terminal(host, { fontSize: this.settings.fontSize, keybar: this.settings.keybar, onTitle: (title) => this._setLabel(tab, title),
+        onOverlay: (open) => { if (!open) this._noTakeover = false; if (tab === this.active) this._applyLayout(); } });
       this.tabs.push(tab);
       return tab;
     }
@@ -387,6 +483,7 @@
       this.active = tab; this.term = tab.term;
       for (const t of this.tabs) t.host.hidden = t !== tab;
       this._renderTabs();
+      this._applyLayout();
       tab.term.fit();
       this.focusTerminal();
     }
@@ -507,8 +604,9 @@
         case 'solution': this.stepUi.solution = true; this.renderLesson(); this._showCurrent(); break;
         case 'continue': if (step && this._kind(step) === 'info') this._stepDone(lesson, step); break;
         case 'terminal': this.setView('terminal'); break;
+        case 'dock': this.setDock(!this.state.dock); break;
         case 'insert':
-          if (step && step.solution && this.term) { this.term.insert(step.solution); this.setView('terminal'); this.focusTerminal(); }
+          if (step && step.solution && this.term) { this.term.insert(step.solution); if (!this._dockShown()) this.setView('terminal'); this.focusTerminal(); }
           break;
         case 'choice': if (lesson) this._choose(lesson, +b.getAttribute('data-q'), +b.getAttribute('data-c')); break;
         case 'restart':
@@ -546,10 +644,13 @@
       const entry = this._entry();
       const field = this.lessonBody.querySelector('input[name="answer"]');
       const typing = !!field && document.activeElement === field;
+      const keep = this.lessonBody.scrollTop;
       if (entry) { this.lessonHead.innerHTML = this._lessonHeadHtml(entry.lesson); this.lessonBody.innerHTML = this._lessonHtml(entry); }
       else { this.lessonHead.innerHTML = this._browserHeadHtml(); this.lessonBody.innerHTML = this._browserHtml(); }
       const again = this.lessonBody.querySelector('input[name="answer"]');
       if (again) { again.value = this.stepUi.answer || ''; if (typing) again.focus(); }
+      this.lessonBody.scrollTop = keep;
+      this._applyLayout();
       this._renderProgress();
       this._renderTask();
     }
@@ -569,19 +670,23 @@
       const entry = this._entry(); const el = this.taskEl;
       el.hidden = !entry;
       if (!entry) return;
-      const lesson = entry.lesson; const i = this._currentIndex(lesson); const step = lesson.steps[i];
+      const lesson = entry.lesson; const i = this._currentIndex(lesson); const step = lesson.steps[i]; const dock = this._dockShown();
       let label; let body;
       if (this.celebrating) { label = 'Done'; body = 'Step complete'; }
-      else if (step) { label = 'Step ' + (i + 1) + '/' + lesson.steps.length; body = this._kind(step) === 'command' ? mdText(step.prompt) : 'Continue in the Lesson view'; }
-      else if (this._quizLeft(lesson)) { label = 'Quiz'; body = 'Answer the questions in the Lesson view'; }
+      else if (step) { label = 'Step ' + (i + 1) + '/' + lesson.steps.length; body = this._kind(step) === 'command' ? mdText(step.prompt) : dock ? 'Answer or continue in the lesson above' : 'Continue in the Lesson view'; }
+      else if (this._quizLeft(lesson)) { label = 'Quiz'; body = dock ? 'Answer the questions in the lesson above' : 'Answer the questions in the Lesson view'; }
       else { label = 'Done'; body = 'Lesson complete'; }
       el.classList.toggle('is-ok', label === 'Done');
       el.innerHTML = '<span class="k-task-label">' + esc(label) + '</span><span class="k-task-text">' + esc(body) + '</span>';
     }
 
+    /** The switch that docks the terminal under the lesson (narrow layout only). */
+    _dockToggleHtml() {
+      return '<button type="button" class="k-btn k-dock-toggle k-narrow-only" data-act="dock" aria-pressed="' + !!this.state.dock + '" title="Show or hide the terminal under the lesson">' + icon('terminal') + 'Terminal</button>';
+    }
     _browserHeadHtml() {
       const sum = K.lessons.progress.summary();
-      return '<div class="k-head-row"><h2>Lessons</h2>' + (sum.total ? '<span class="k-head-note">' + sum.done + ' of ' + sum.total + ' complete</span>' : '') + '</div>' +
+      return '<div class="k-head-row"><h2>Lessons</h2><span class="k-head-end">' + (sum.total ? '<span class="k-head-note">' + sum.done + ' of ' + sum.total + ' complete</span>' : '') + this._dockToggleHtml() + '</span></div>' +
         (sum.total ? this._barHtml(sum.done, sum.total) : '');
     }
     _browserHtml() {
@@ -617,7 +722,7 @@
       const n = lesson.steps.length; const i = Math.min(this._currentIndex(lesson), n);
       const where = K.lessons.progress.isDone(lesson.id) ? 'Complete' : i >= n ? 'Quiz' : 'Step ' + (i + 1) + ' of ' + n;
       return '<div class="k-head-row"><button type="button" class="k-btn is-quiet k-back" data-act="back">' + icon('back') + 'All lessons</button>' +
-        '<span class="k-head-note">' + where + '</span></div>' + this._barHtml(i, n);
+        '<span class="k-head-end"><span class="k-head-note">' + where + '</span>' + this._dockToggleHtml() + '</span></div>' + this._barHtml(i, n);
     }
     _lessonHtml(entry) {
       const lesson = entry.lesson; const cur = this._currentIndex(lesson);

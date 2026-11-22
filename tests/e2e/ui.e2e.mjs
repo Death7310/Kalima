@@ -927,6 +927,8 @@ group('phone viewport: one view at a time, touch keys, usable terminal', async (
     const tabs = page.locator('.k-views');
     assert.equal(await tabs.isVisible(), true);
     await tabs.getByRole('tab', { name: 'Lesson' }).tap();
+    assert.equal(await page.locator('#k-panel-terminal').isVisible(), true, 'the terminal is docked under the lesson by default');
+    await page.getByRole('button', { name: 'Terminal', exact: true }).tap();      // this group covers the one-view-at-a-time layout: close the dock
     assert.equal(await page.locator('#k-panel-terminal').isHidden(), true, 'only one view shows at a time');
     await panel(page).getByRole('button', { name: /First commands/ }).first().tap();
     assert.match(await page.locator('.k-step.is-current').innerText(), /Print the word hello/);
@@ -994,6 +996,371 @@ group('phone viewport: one view at a time, touch keys, usable terminal', async (
   } finally {
     await page.context().close();
   }
+});
+
+/* ---- the terminal docked in the lesson (narrow layout) ---- */
+if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
+const shot = (page, name) => (SHOTS ? page.screenshot({ path: path.join(SHOTS, name + '.png') }) : null);
+
+/** A lesson much taller than a phone screen, so scrolling matters. Installed per page: other groups count the lessons. */
+function installLong() {
+  K.lessons.register({
+    id: 'fx-long-m', title: 'Fixture long', order: 3, summary: 'One long lesson for the docked terminal.',
+    lessons: [{
+      id: 'fx-long', title: 'A long lesson', minutes: 12,
+      objectives: ['Read a lesson while typing'],
+      intro: Array.from({ length: 14 }, (_, i) => 'Paragraph ' + (i + 1) + ' of the introduction explains something worth reading slowly before the first command, which keeps this lesson taller than a phone screen.').join('\n\n'),
+      steps: [1, 2, 3, 4, 5, 6].map((i) => ({
+        id: 'l' + i, prompt: 'Run `echo l' + i + '` and read what it prints back. This sentence makes the step text a little longer than one line.',
+        hint: 'Type **echo l' + i + '**.', solution: 'echo l' + i, check: { cmd: 'echo', out: new RegExp('^l' + i + '$', 'm') },
+      })),
+      quiz: [{ q: 'Which command prints text?', choices: ['echo', 'cd'], answer: 0, why: 'echo prints its arguments.' }],
+    }],
+  });
+  K.app.renderLesson();
+}
+/** A new browser context at a narrow size with the long lesson open in the Lesson view. */
+async function dockPage(browser, viewport, o = {}) {
+  withLessons = true;
+  const page = await open(browser, { viewport, touch: o.touch !== false });
+  const press1 = page.getByRole('button', { name: 'Start', exact: true });
+  await press1.click(); await dialogGone(page);
+  await page.evaluate(installLong);
+  if (await page.locator('.k-views').isVisible()) await page.locator('.k-views').getByRole('tab', { name: 'Lesson' }).click();
+  await page.evaluate((id) => K.app.openLesson(id), o.lesson || 'fx-long');
+  await page.waitForFunction(() => K.app.term && K.app.term.mode === 'read');
+  return page;
+}
+const lessonBox = (page) => box(page, '#k-panel-lesson');
+const dockBox = (page) => box(page, '#k-panel-terminal');
+const inside = (r, outer) => r.y >= outer.y - 1 && r.y + r.height <= outer.y + outer.height + 1;
+const rect = (page, sel) => page.evaluate((q) => { const r = document.querySelector(q).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; }, sel);
+const overflowFree = (page) => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && Array.from(document.querySelectorAll('.k-app *')).every((el) => {
+  const r = el.getBoundingClientRect(); return r.width === 0 || el.closest('.kt-keys, .k-termtabs, pre') || (r.left >= -0.5 && r.right <= innerWidth + 0.5);
+}));
+
+group('inline terminal: open by default, typing completes a step, the lesson keeps its place', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 });
+  try {
+    const lesson = await lessonBox(page); const dock = await dockBox(page);
+    assert.equal(await page.locator('.k-app').evaluate((el) => el.classList.contains('has-dock')), true);
+    assert.ok(dock.height > 150 && lesson.height > 250, 'lesson and terminal both have room: ' + lesson.height + ' / ' + dock.height);
+    assert.ok(lesson.y + lesson.height <= dock.y + 1 && Math.abs(dock.y + dock.height - 740) < 2, 'terminal docked along the bottom edge, lesson above');
+    assert.equal(await page.getByRole('button', { name: 'Terminal', exact: true }).getAttribute('aria-pressed'), 'true');
+    assert.equal(await termFocused(page), true, 'the dock is ready for typing');
+    assert.ok(await page.evaluate(() => K.app.term.cols) >= 40, 'at least 40 columns at 360 px');
+    assert.equal(await overflowFree(page), true, 'nothing wider than the screen');
+    await shot(page, '01-dock-default');
+
+    // the lesson scrolls on its own, the terminal does not move
+    await page.locator('#k-panel-lesson .k-panel-body').evaluate((el) => { el.scrollTop = 40; });
+    assert.deepEqual(await dockBox(page), dock);
+    assert.equal(await page.evaluate(() => K.app.term.focus() || document.activeElement === K.app.term.ta), true);
+    await run(page, 'echo nope');
+    await page.keyboard.type('echo l1');
+    await page.keyboard.press('Enter');
+    await page.locator('.k-step.is-fresh').waitFor();
+    const kept = await page.locator('#k-panel-lesson .k-panel-body').evaluate((el) => el.scrollTop);
+    assert.ok(Math.abs(kept - 40) <= 1, 'completing a step does not move the lesson (scrollTop ' + kept + ')');
+    await waitCurrent(page, 2);
+    await page.waitForFunction(() => {
+      const b = document.querySelector('.k-panel-body').getBoundingClientRect(); const r = document.querySelector('.k-step.is-current').getBoundingClientRect();
+      return r.top >= b.top && r.bottom <= b.bottom + 1;
+    });
+    assert.equal(await termFocused(page), true, 'the next step scrolls into view without taking the keyboard');
+    await shot(page, '02-dock-next-step');
+    await run(page, 'echo l2');
+    await waitCurrent(page, 3);
+    assert.deepEqual(await dockBox(page), dock, 'the terminal did not move or resize while output arrived');
+    const rows = await page.evaluate(() => K.app.term.rows); const view = await page.evaluate(() => document.querySelector('.k-term:not([hidden]) .kt-view').clientHeight);
+    assert.ok(rows >= 4 && rows * (await page.evaluate(() => K.app.term.lineH)) <= view, 'the terminal fitted its rows to the dock');
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: the toggle hides and shows the dock and is remembered', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 });
+  try {
+    const toggle = page.getByRole('button', { name: 'Terminal', exact: true });
+    assert.ok((await toggle.getAttribute('title')).length > 5, 'the toggle explains itself');
+    const before = await lessonBox(page);
+    await toggle.click();
+    assert.equal(await toggle.getAttribute('aria-pressed'), 'false');
+    assert.equal(await page.locator('#k-panel-terminal').isHidden(), true);
+    const full = await lessonBox(page);
+    assert.ok(full.height > before.height + 150 && Math.abs(full.y + full.height - 740) < 2, 'the lesson takes the whole view');
+    await shot(page, '03-dock-closed');
+    await page.reload(); await ready(page);
+    await page.evaluate(installLong);
+    assert.equal(await page.locator('#k-panel-terminal').isHidden(), true, 'a closed dock stays closed after a reload');
+    await page.getByRole('button', { name: 'Terminal', exact: true }).click();
+    assert.equal(await page.locator('#k-panel-terminal').isVisible(), true);
+    assert.equal(await termFocused(page), true, 'opening the dock focuses the terminal');
+    // the lesson browser shows the dock too, with the same toggle
+    await page.evaluate(() => K.app.openBrowser());
+    assert.equal(await page.locator('#k-panel-terminal').isVisible(), true);
+    assert.equal(await page.getByRole('button', { name: 'Terminal', exact: true }).getAttribute('aria-pressed'), 'true');
+    await shot(page, '04-dock-browser');
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: the handle resizes by drag, touch and keyboard, and the size persists', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 });
+  try {
+    const handle = page.getByRole('separator', { name: /Resize/ });
+    assert.equal(await handle.getAttribute('aria-orientation'), 'horizontal');
+    const h0 = (await dockBox(page)).height;
+    assert.equal(await handle.getAttribute('aria-valuenow'), String(h0));
+    const hb = await handle.boundingBox();
+    const cx = hb.x + hb.width / 2; const cy = hb.y + hb.height / 2;
+    const rows0 = await page.evaluate(() => K.app.term.rows);
+    await page.mouse.move(cx, cy); await page.mouse.down();
+    await page.mouse.move(cx, cy - 60, { steps: 6 }); await page.mouse.up();
+    const h1 = (await dockBox(page)).height;
+    assert.ok(Math.abs(h1 - (h0 + 60)) <= 2, 'dragging up grows the terminal (' + h0 + ' -> ' + h1 + ')');
+    assert.equal(await handle.getAttribute('aria-valuenow'), String(Math.round(h1)));
+    await page.waitForFunction((r) => K.app.term.rows > r, rows0);
+
+    // touch
+    const cdp = await page.context().newCDPSession(page);
+    const hb2 = await handle.boundingBox(); const ty = hb2.y + hb2.height / 2;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 180, y: ty }] });
+    for (let i = 1; i <= 5; i++) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 180, y: ty + i * 14 }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    const h2 = (await dockBox(page)).height;
+    assert.ok(Math.abs(h2 - (h1 - 70)) <= 3, 'a touch drag resizes too (' + h1 + ' -> ' + h2 + ')');
+
+    // keyboard
+    await handle.focus();
+    await page.keyboard.press('ArrowUp');
+    assert.ok(Math.abs((await dockBox(page)).height - (h2 + 24)) <= 1, 'ArrowUp grows the terminal');
+    await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown');
+    assert.ok(Math.abs((await dockBox(page)).height - (h2 - 24)) <= 1, 'ArrowDown shrinks it');
+    await page.keyboard.press('End');
+    const big = await lessonBox(page);
+    assert.ok(await page.evaluate(() => document.querySelector('.k-panel-body').clientHeight) >= 66, 'the lesson keeps about three lines of text: ' + big.height);
+    await shot(page, '05-dock-max');
+    await page.keyboard.press('Home');
+    const small = await dockBox(page);
+    assert.ok(await page.evaluate(() => K.app.term.rows) >= 4, 'the terminal keeps at least four rows');
+    assert.ok(small.height < 200, 'Home gives the lesson the room: ' + small.height);
+    await shot(page, '06-dock-min');
+    assert.equal(await handle.evaluate((el) => document.activeElement === el), true, 'keyboard resizing keeps the focus on the handle');
+    await page.keyboard.press('ArrowUp'); await page.keyboard.press('ArrowUp'); await page.keyboard.press('ArrowUp');
+    const saved = (await dockBox(page)).height;
+    await page.reload(); await ready(page);
+    await page.evaluate(installLong);
+    assert.ok(Math.abs((await dockBox(page)).height - saved) <= 1, 'the split survives a reload');
+    await page.evaluate(() => K.app.restart());
+    await page.waitForFunction(() => K.app.booted && K.app.term && K.app.term.mode === 'read');
+    assert.ok(Math.abs((await dockBox(page)).height - saved) <= 1, 'and a simulator restart');
+    await handle.dblclick();
+    assert.ok(Math.abs((await dockBox(page)).height - Math.round((await page.evaluate(() => document.querySelector('.k-body').clientHeight)) * 0.42)) <= 2, 'double click restores the default split');
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: the full Terminal view is the same terminal', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 });
+  try {
+    await page.evaluate(() => { window.fxTerm = K.app.term; });
+    await run(page, 'echo carried-over');
+    await page.keyboard.type('echo half typed');
+    const expand = page.getByRole('button', { name: 'Expand to the full Terminal view' });
+    await expand.click();
+    assert.equal(await page.locator('#k-panel-lesson').isHidden(), true);
+    const full = await dockBox(page);
+    assert.ok(full.height > 600, 'the Terminal view fills the screen');
+    assert.equal(await page.evaluate(() => K.app.term === window.fxTerm), true, 'the same terminal object');
+    assert.match(await text(page), /carried-over/);
+    assert.equal(await typed(page), 'echo half typed', 'the half-typed line is still there');
+    assert.equal(await termFocused(page), true);
+    assert.match(await page.locator('.k-task').innerText(), /STEP 1\/6/i, 'the step strip is still above the full terminal');
+    const back = page.getByRole('button', { name: 'Back to the lesson' });
+    assert.equal(await back.isVisible(), true, 'an obvious way back');
+    await shot(page, '07-full-terminal');
+    await page.keyboard.type(' now');
+    await back.click();
+    assert.equal(await page.locator('#k-panel-lesson').isVisible(), true);
+    assert.equal(await typed(page), 'echo half typed now');
+    await page.keyboard.press('Enter');
+    await waitText(page, /\nhalf typed now\n/);
+    // a command that is still running keeps running while the view changes
+    await page.keyboard.type('fx-sleep'); await page.keyboard.press('Enter');
+    await waitMode(page, 'run');
+    await expand.click(); await page.getByRole('button', { name: 'Back to the lesson' }).click();
+    assert.equal(await page.evaluate(() => K.app.term.mode), 'run');
+    await page.keyboard.press('Control+c');
+    await waitMode(page, 'read');
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: several shells stay usable in the dock', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 });
+  try {
+    await run(page, 'echo in-first-shell');
+    await page.getByRole('button', { name: 'New terminal tab' }).click();
+    await page.getByRole('button', { name: 'New terminal tab' }).click();
+    await page.waitForFunction(() => K.app.tabs.length === 3 && K.app.term.mode === 'read');
+    const bar = await rect(page, '.k-termbar');
+    assert.ok(bar.width <= 360 && bar.height <= 40, 'the tab bar stays one compact row');
+    for (const sel of ['.k-newtab', '.k-dock-btn', '.k-termtab.is-active']) { const r = await rect(page, sel); assert.ok(r.x >= 0 && r.x + r.width <= 360, sel + ' is on screen'); }
+    await run(page, 'echo in-third-shell');
+    await page.locator('.k-termtab-btn').first().click();
+    assert.doesNotMatch(await text(page), /third/);
+    assert.match(await text(page), /in-first-shell/);
+    assert.equal(await termFocused(page), true);
+    await shot(page, '08-dock-tabs');
+    await page.getByRole('button', { name: 'Close terminal 3' }).click();
+    await page.getByRole('button', { name: 'Close terminal 2' }).click();
+    await page.waitForFunction(() => K.app.tabs.length === 1);
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: the pager and the editors take over the view and give it back', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 });
+  try {
+    const before = await dockBox(page);
+    await start(page, 'fx-pager', 'pager');
+    assert.equal(await page.locator('#k-panel-lesson').isHidden(), true, 'the pager has the whole view');
+    const full = await dockBox(page);
+    assert.ok(full.height > 600 && full.y < 80, 'the pager uses the view under the top bar');
+    const o = await overlay(page);
+    assert.ok(o.screen.length > 20);
+    assert.ok(await page.evaluate(() => K.app.term.rows) > 25, 'more rows than the dock had');
+    await shot(page, '09-pager-takeover');
+    await page.keyboard.press('Space');
+    assert.ok((await overlay(page)).top > 1);
+    await page.keyboard.press('q');
+    await waitMode(page, 'read');
+    assert.equal(await page.locator('#k-panel-lesson').isVisible(), true, 'the split returns');
+    assert.deepEqual(await dockBox(page), before);
+    assert.equal(await termFocused(page), true);
+    await start(page, 'fx-edit nano /tmp/dock.txt', 'nano');
+    assert.equal(await page.locator('#k-panel-lesson').isHidden(), true);
+    await page.keyboard.type('docked');
+    await press(page, 'Control+x');
+    await page.keyboard.press('y'); await page.keyboard.press('Enter');
+    await waitMode(page, 'read');
+    assert.equal(await fileOnKali(page, '/tmp/dock.txt'), 'docked\n');
+    assert.deepEqual(await dockBox(page), before);
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: panel buttons leave the learner able to type', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 }, { lesson: 'fx-first' });
+  try {
+    const p = panel(page);
+    await p.getByRole('button', { name: 'Hint' }).tap();
+    assert.equal(await termFocused(page), true, 'after Hint');
+    await p.getByRole('button', { name: 'Show solution' }).tap();
+    assert.equal(await termFocused(page), true, 'after Show solution');
+    await p.getByRole('button', { name: 'Put it on the command line' }).tap();
+    assert.equal(await typed(page), 'echo hello', 'the solution is typed into the docked terminal');
+    assert.equal(await page.locator('#k-panel-lesson').isVisible(), true, 'without leaving the lesson');
+    assert.equal(await page.locator('#k-panel-terminal').isVisible(), true);
+    await page.keyboard.press('Enter');
+    await waitCurrent(page, 2);
+    await p.getByRole('button', { name: 'Continue' }).tap();
+    await waitCurrent(page, 3);
+    assert.equal(await termFocused(page), true, 'after Continue');
+    // typing an answer keeps the focus in the answer field
+    const answer = p.getByLabel('Your answer');
+    await answer.tap();
+    await page.keyboard.type('pw');
+    assert.equal(await answer.inputValue(), 'pw');
+    assert.equal(await termFocused(page), false, 'the answer field keeps the keyboard while the learner types');
+    await page.keyboard.type('d');
+    await page.keyboard.press('Enter');
+    await waitCurrent(page, 4);
+    assert.equal(await termFocused(page), true, 'after the answer the terminal has the keyboard again');
+    await run(page, 'cd /etc');
+    await page.locator('.k-quiz').waitFor();
+    await p.getByRole('button', { name: /The working directory/ }).tap();
+    assert.equal(await termFocused(page), true, 'after a quiz choice');
+    await shot(page, '10-dock-quiz');
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: with the keyboard up the prompt and the step stay visible', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 });
+  try {
+    await run(page, 'echo l1');
+    await waitCurrent(page, 2);
+    await page.evaluate(() => K.app.term.focus());
+    await page.getByRole('separator', { name: /Resize/ }).focus();
+    await page.keyboard.press('ArrowUp'); await page.keyboard.press('ArrowUp');
+    const saved = (await dockBox(page)).height;
+    await page.evaluate(() => K.app.term.focus());
+    await page.setViewportSize({ width: 360, height: 420 });       // what a soft keyboard does to the visible area
+    await page.waitForFunction(() => document.querySelector('.k-app').classList.contains('is-short'));
+    await page.waitForFunction(() => {
+      const b = document.querySelector('#k-panel-lesson .k-panel-body').getBoundingClientRect(); const r = document.querySelector('.k-step.is-current').getBoundingClientRect();
+      return r.top >= b.top - 1 && r.top < b.bottom - 20;
+    });
+    await page.waitForTimeout(400);
+    const dock = await dockBox(page); const lesson = await lessonBox(page);
+    assert.ok(dock.height < saved, 'the terminal gave room to the lesson area limits: ' + dock.height + ' < ' + saved);
+    const keys = await rect(page, '.k-term:not([hidden]) .kt-keys');
+    assert.ok(keys.y + keys.height <= 420 + 1 && keys.height > 20, 'the key bar is reachable above the bottom edge');
+    const cur = await rect(page, '.k-term:not([hidden]) .kt-cursor');
+    assert.ok(cur.y >= dock.y && cur.y + cur.height <= keys.y + 1, 'the prompt line is visible above the key bar');
+    const task = await rect(page, '.k-task');
+    assert.ok(task.height > 10 && task.y >= dock.y - 1, 'a one-line summary of the step sits in the dock');
+    assert.match(await page.locator('.k-task').innerText(), /STEP 2\/6\s+Run echo l2/i);
+    assert.ok(lesson.height >= 110, 'the lesson area is still usable: ' + lesson.height);
+    assert.equal(await page.getByRole('button', { name: 'Terminal', exact: true }).isVisible(), true, 'the toggle stays reachable');
+    assert.equal(await termFocused(page), true);
+    await shot(page, '11-keyboard-up');
+    await run(page, 'echo l2');
+    await waitCurrent(page, 3);
+    await page.setViewportSize({ width: 360, height: 740 });
+    await page.waitForFunction(() => !document.querySelector('.k-app').classList.contains('is-short'));
+    await page.waitForTimeout(150);
+    assert.ok(Math.abs((await dockBox(page)).height - saved) <= 1, 'when the keyboard closes the split returns to the saved size');
+    assert.equal(await page.locator('.k-task').isHidden(), true);
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: a side-panel sized window (600 x 900)', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 600, height: 900 }, { touch: false });
+  try {
+    assert.equal(await page.locator('.k-views').isVisible(), true, 'still the narrow layout below 900 px');
+    const lesson = await lessonBox(page); const dock = await dockBox(page);
+    assert.ok(lesson.y + lesson.height <= dock.y + 1 && lesson.width === 600 && dock.width === 600);
+    const cols = await page.evaluate(() => K.app.term.cols);
+    assert.ok(cols >= 75, 'about 80 columns fit (' + cols + ')');
+    assert.equal(await page.locator('.k-term:not([hidden]) .kt-keys').isHidden(), true, 'no touch key bar with a mouse');
+    assert.equal(await overflowFree(page), true);
+    await page.keyboard.type('echo l1'); await page.keyboard.press('Enter');
+    await waitCurrent(page, 2);
+    await shot(page, '12-side-panel');
+    const handle = page.getByRole('separator', { name: /Resize/ });
+    await handle.focus(); await page.keyboard.press('ArrowUp');
+    assert.ok(Math.abs((await dockBox(page)).height - (dock.height + 24)) <= 1);
+  } finally { await page.context().close(); }
+});
+
+group('inline terminal: the wide layout is unchanged', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 1280, height: 800 }, { touch: false });
+  try {
+    const app = page.locator('.k-app');
+    assert.equal(await app.evaluate((el) => el.classList.contains('has-dock')), false);
+    for (const sel of ['.k-dock-toggle', '.k-dock-split', '.k-dock-btn', '.k-views']) assert.equal(await page.locator(sel).first().isHidden(), true, sel + ' is not shown on a wide screen');
+    const lesson = await lessonBox(page); const work = await dockBox(page);
+    assert.equal(lesson.width, 420);
+    assert.ok(lesson.x + lesson.width <= work.x + 1 && Math.abs(lesson.y - work.y) < 1 && Math.abs(lesson.height - work.height) < 1, 'side by side, same height');
+    assert.equal(await page.locator('.k-task').isHidden(), true);
+    await shot(page, '13-wide');
+    // crossing the breakpoint switches layouts without losing the terminal
+    await page.evaluate(() => { window.fxTerm = K.app.term; });
+    await page.setViewportSize({ width: 880, height: 800 });
+    await page.waitForFunction(() => document.querySelector('.k-app').classList.contains('has-dock'));
+    assert.equal(await page.evaluate(() => K.app.term === window.fxTerm), true);
+    const narrowDock = await dockBox(page);
+    assert.ok(narrowDock.width === 880 && narrowDock.y > (await lessonBox(page)).y);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForFunction(() => !document.querySelector('.k-app').classList.contains('has-dock'));
+    assert.equal((await lessonBox(page)).width, 420);
+  } finally { await page.context().close(); }
 });
 
 /* ------------------------------------------------------------------- runner */
