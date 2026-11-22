@@ -361,3 +361,92 @@ test('locate fails before updatedb, needs root to build, and then finds files', 
   assert.match((await sh('locate --version')).out, /^plocate /);
   assert.equal((await sh('locate zzznothing')).code, 1);
 });
+
+/* ------------------------------------------- dd, lsblk, mount, sync, shred */
+
+test('dd copies blocks and prints the three-line summary', async () => {
+  const { sh, out } = await setup();
+  await sh('cd /tmp; seq 1 1000 > s');
+  let r = await sh('dd if=/dev/zero of=z bs=1M count=3');
+  assert.match(r.err, /^3\+0 records in\n3\+0 records out\n3145728 bytes \(3\.1 MB, 3\.0 MiB\) copied, [0-9.e-]+ s, [\d.]+ [kMG]B\/s\n$/);
+  assert.equal(await out('wc -c < z'), '3145728\n');
+  r = await sh('dd if=/dev/zero of=z bs=512 count=1');
+  assert.match(r.err, /^1\+0 records in\n1\+0 records out\n512 bytes copied, [0-9.e-]+ s, [\d.]+ [kMG]?B\/s\n$/);
+  r = await sh('dd if=s of=t bs=1000');
+  assert.match(r.err, /^3\+1 records in\n3\+1 records out\n3893 bytes \(3\.9 kB, 3\.8 KiB\) copied/);
+  assert.equal(await out('cmp s t && echo same'), 'same\n');
+  assert.equal((await sh('dd if=s of=t bs=1k count=1 status=none')).err, '');
+  assert.equal((await sh('dd if=s of=t bs=1k count=1 status=noxfer')).err, '1+0 records in\n1+0 records out\n');
+  assert.equal(await out('dd if=s bs=1 skip=3890 count=3 2>/dev/null'), '00\n');
+  assert.equal(await out('dd if=s of=u conv=ucase 2>&1 >/dev/null | head -1; echo hello | dd conv=ucase 2>/dev/null'), '7+1 records in\nHELLO\n');
+  assert.equal(await out('echo abcdef > w; printf XY | dd of=w bs=1 seek=1 conv=notrunc 2>/dev/null; cat w'), 'aXYdef\n');
+  assert.equal(await out('dd if=/dev/zero bs=4 count=2 2>/dev/null | wc -c'), '8\n');
+  assert.equal(await out('dd if=/dev/urandom of=r bs=1k count=2 2>/dev/null; wc -c < r'), '2048\n');
+});
+
+test('dd errors and device handling', async () => {
+  const { sim, sh } = await setup();
+  assert.equal((await sh('dd if=nope')).err, "dd: failed to open 'nope': No such file or directory\n");
+  assert.equal((await sh('dd bs=x')).err, "dd: invalid number: 'x'\n");
+  assert.equal((await sh('dd foo=1')).err, "dd: unrecognized operand 'foo=1'\nTry 'dd --help' for more information.\n");
+  assert.equal((await sh('dd if=/dev/zero of=/dev/sda count=1')).err, "dd: failed to open '/dev/sda': Permission denied\n");
+  sim.term.feed('kali');
+  const r = await sh('sudo dd if=/dev/zero of=/dev/sda bs=1M count=2');
+  assert.match(r.err, /^2\+0 records in\n2\+0 records out\n2097152 bytes/);
+  assert.equal((await sh('dd if=/tmp of=/dev/null')).code, 1);
+  assert.match((await sh('dd --version')).out, /^dd \(GNU coreutils\) /);
+  assert.match((await sh('dd --help')).out, /^Usage: dd \[OPERAND\]/);
+});
+
+test('lsblk draws the disk tree, lists, and shows filesystems', async () => {
+  const { sh, out } = await setup();
+  const t = await out('lsblk');
+  assert.match(t, /^NAME   MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS\nsda    8:0      0   80G  0 disk \n├─sda1 8:1      0 78.6G  0 part \/\n├─sda2 8:2      0    1K  0 part \n└─sda5 8:5      0  1.4G  0 part \[SWAP\]\nsr0    11:0     1 1024M  0 rom  \n$/);
+  assert.match(await out('lsblk -l | head -3'), /^NAME MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS\nsda  8:0      0   80G  0 disk \nsda1 8:1/);
+  assert.match(await out('lsblk -f'), /^NAME   FSTYPE FSVER LABEL UUID +FSAVAIL FSUSE% MOUNTPOINTS\n/);
+  assert.match(await out('lsblk -f'), /sda1 +ext4 +1\.0 +3c1f2d7e-[0-9a-f-]+ +\d+(\.\d)?G +17% \/\n/);
+  assert.equal(await out('lsblk -dn -o NAME,SIZE'), 'sda   80G\nsr0 1024M\n');
+  assert.match(await out('lsblk -p -d'), /\/dev\/sda/);
+  assert.equal((await sh('lsblk -o NOPE')).err, 'lsblk: unknown column: NOPE\n');
+  assert.equal((await sh('lsblk --bogus')).code, 1);
+  assert.match((await sh('lsblk --version')).out, /^lsblk from util-linux/);
+});
+
+test('mount lists mounts, filters by type, and refuses non-root mounting', async () => {
+  const { sim, sh, out } = await setup();
+  const m = await out('mount');
+  assert.match(m, /^sysfs on \/sys type sysfs \(rw,nosuid,nodev,noexec,relatime\)\n/);
+  assert.match(m, /\/dev\/sda1 on \/ type ext4 \(rw,relatime,errors=remount-ro\)\n/);
+  assert.equal(await out('mount -t ext4'), '/dev/sda1 on / type ext4 (rw,relatime,errors=remount-ro)\n');
+  assert.equal(await out('mount | grep -c tmpfs'), '6\n');
+  const r = await sh('mount /dev/sdb1 /mnt');
+  assert.match(r.err, /^mount: \/mnt: must be superuser to use mount\./);
+  assert.equal(r.code, 32);
+  sim.term.feed('kali');
+  assert.match((await sh('sudo mount /dev/sdb1 /mnt')).err, /^mount: \/mnt: special device \/dev\/sdb1 does not exist\./);
+});
+
+test('sync and shred', async () => {
+  const { sh, out } = await setup();
+  await sh('cd /tmp; seq 1 100 > f; cp f g');
+  assert.deepEqual([(await sh('sync')).code, (await sh('sync')).out], [0, '']);
+  assert.equal((await sh('sync nope')).err, "sync: error opening 'nope': No such file or directory\n");
+  assert.equal((await sh('sync nope')).code, 1);
+  const v = await sh('shred -v -n 2 f');
+  assert.equal(v.err, 'shred: f: pass 1/2 (random)...\nshred: f: pass 2/2 (random)...\n');
+  assert.equal(await out('wc -c < f'), '292\n');
+  assert.notEqual(await out('cat f | head -c 20 | wc -c'), '');
+  assert.equal(await out('cmp -s f g || echo differs'), 'differs\n');
+  assert.equal((await sh('shred -zv -n 1 g')).err, 'shred: g: pass 1/2 (random)...\nshred: g: pass 2/2 (000000)...\n');
+  assert.equal(await out('tr -d "\\0" < g | wc -c'), '0\n');
+  const u = await sh('shred -u -v -n 1 f');
+  assert.equal(u.err, 'shred: f: pass 1/1 (random)...\nshred: f: removing\nshred: f: renamed to 0\nshred: f: removed\n');
+  assert.equal(await out('ls f 2>&1'), "ls: cannot access 'f': No such file or directory\n");
+  await sh('echo x > secret.txt');
+  assert.match((await sh('shred -uv -n 0 secret.txt')).err, /removing\nshred: secret.txt: renamed to 0000000000\nshred: 0000000000: renamed to 000000000\n[\s\S]*shred: 00: renamed to 0\nshred: secret.txt: removed\n$/);
+  assert.equal((await sh('shred nope')).err, 'shred: nope: failed to open for writing: No such file or directory\n');
+  assert.equal((await sh('shred /tmp')).err, 'shred: /tmp: failed to open for writing: Is a directory\n');
+  assert.equal((await sh('shred')).err, "shred: missing file operand\nTry 'shred --help' for more information.\n");
+  assert.equal((await sh('shred --foo')).err, "shred: unrecognized option '--foo'\nTry 'shred --help' for more information.\n");
+  assert.equal((await sh('shred -n x f')).err, "shred: invalid number of passes: 'x'\n");
+});

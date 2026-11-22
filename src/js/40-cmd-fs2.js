@@ -1394,5 +1394,335 @@
     run: locateRun,
   });
 
+  /* ===================================================================== dd */
+
+  const COREUTILS_VERSION = (prog, authors) => prog + ' (GNU coreutils) 9.7\nCopyright (C) 2025 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\n' +
+    'This is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by ' + authors + '.\n';
+
+  const DD_HELP = 'Usage: dd [OPERAND]...\n  or:  dd OPTION\nCopy a file, converting and formatting according to the operands.\n\n' +
+    '  bs=BYTES        read and write up to BYTES bytes at a time (default: 512);\n                  overrides ibs and obs\n  conv=CONVS      convert the file as per the comma separated symbol list\n  count=N         copy only N input blocks\n' +
+    '  ibs=BYTES       read up to BYTES bytes at a time (default: 512)\n  if=FILE         read from FILE instead of stdin\n  obs=BYTES       write BYTES bytes at a time (default: 512)\n  of=FILE         write to FILE instead of stdout\n' +
+    '  seek=N          skip N obs-sized output blocks\n  skip=N          skip N ibs-sized input blocks\n  status=LEVEL    The LEVEL of information to print to stderr;\n                  \'none\' suppresses everything but error messages,\n                  \'noxfer\' suppresses the final transfer statistics,\n                  \'progress\' shows periodic transfer statistics\n\n' +
+    'N and BYTES may be followed by the following multiplicative suffixes:\nc=1, w=2, b=512, kB=1000, K=1024, MB=1000*1000, M=1024*1024, xM=M,\nGB=1000*1000*1000, G=1024*1024*1024, and so on for T, P, E, Z, Y, R, Q.\n\n' +
+    'Each CONV symbol may be:\n\n  lcase     change upper case to lower case\n  ucase     change lower case to upper case\n  notrunc   do not truncate the output file\n  sync      pad every input block with NULs to ibs-size\n  noerror   continue after read errors\n  fsync     physically write data and metadata of output file before finishing\n';
+
+  const DD_UNITS = { c: 1, w: 2, b: 512, kB: 1e3, k: 1024, K: 1024, KiB: 1024, MB: 1e6, M: 1048576, MiB: 1048576, GB: 1e9, G: 1073741824, GiB: 1073741824, TB: 1e12, T: 1099511627776, TiB: 1099511627776 };
+  function ddNumber(s) {
+    const m = /^(\d+)([A-Za-z]*)$/.exec(s);
+    if (!m || (m[2] && !(m[2] in DD_UNITS))) return null;
+    return +m[1] * (m[2] ? DD_UNITS[m[2]] : 1);
+  }
+
+  /** Three significant digits the way coreutils prints sizes: 3.1, 99.1, 188. */
+  function sig3(v) { return v < 100 ? (Math.round(v * 10) / 10).toFixed(1) : String(Math.round(v)); }
+  function humanUnits(n, base, units) {
+    let v = n; let i = 0;
+    while (v >= base && i < units.length - 1) { v /= base; i++; }
+    return sig3(v) + ' ' + units[i];
+  }
+  /** printf("%g") with six significant digits. */
+  function fmtG(x) {
+    if (x === 0) return '0';
+    if (x < 1e-4) { const [m, e] = x.toExponential(4).split('e'); return String(+m) + 'e-' + U.pad2(Math.abs(+e)); }
+    return String(+x.toPrecision(6));
+  }
+
+  /** Print dd's three-line summary. `secs` is the simulated transfer time. */
+  function ddStats(ctx, st, secs, level) {
+    if (level === 'none') return;
+    const rec = (full, part) => full + '+' + part + ' records ';
+    ctx.err(rec(st.inFull, st.inPart) + 'in\n' + rec(st.outFull, st.outPart) + 'out\n');
+    if (level === 'noxfer') return;
+    const n = st.bytes;
+    const size = n < 1000 ? n + ' bytes' : n + ' bytes (' + humanUnits(n, 1000, ['B', 'kB', 'MB', 'GB', 'TB']) + ', ' + humanUnits(n, 1024, ['B', 'KiB', 'MiB', 'GiB', 'TiB']) + ')';
+    const rate = n && secs ? humanUnits(n / secs, 1000, ['B', 'kB', 'MB', 'GB', 'TB']) + '/s' : '0.0 kB/s';
+    ctx.err(size + ' copied, ' + fmtG(secs) + ' s, ' + rate + '\n');
+  }
+
+  const DISK_NODE = /^\/dev\/(sd[a-z]\d*|vd[a-z]\d*|nvme\d+n\d+(p\d+)?|sr\d+|loop\d+)$/;
+
+  async function ddRun(ctx) {
+    const o = {};
+    for (const a of ctx.args) {
+      if (a === '--help') { ctx.out(DD_HELP); return 0; }
+      if (a === '--version') { ctx.out(COREUTILS_VERSION('dd', 'Paul Rubin, David MacKenzie, and Stuart Kemp')); return 0; }
+      const m = /^([a-z]+)=(.*)$/.exec(a);
+      if (!m || !['if', 'of', 'bs', 'ibs', 'obs', 'count', 'skip', 'seek', 'conv', 'status', 'iflag', 'oflag'].includes(m[1])) {
+        ctx.err("dd: unrecognized operand '" + a + "'\nTry 'dd --help' for more information.\n"); return 1;
+      }
+      o[m[1]] = m[2];
+    }
+    const num = (key, dflt) => {
+      if (o[key] === undefined) return dflt;
+      const v = ddNumber(o[key]);
+      if (v == null || (key.endsWith('bs') && v === 0)) { ctx.err("dd: invalid number: '" + o[key] + "'\n"); return false; }
+      return v;
+    };
+    const bs = num('bs', 0); const ibsN = num('ibs', 512); const obsN = num('obs', 512);
+    const count = num('count', Infinity); const skip = num('skip', 0); const seek = num('seek', 0);
+    if ([bs, ibsN, obsN, count, skip, seek].includes(false)) return 1;
+    const ibs = bs || ibsN; const obs = bs || obsN;
+    const conv = (o.conv || '').split(',').filter(Boolean);
+    for (const c of conv) if (!['ucase', 'lcase', 'notrunc', 'sync', 'noerror', 'fsync', 'fdatasync', 'excl', 'nocreat', 'swab'].includes(c)) { ctx.err("dd: invalid conversion: '" + c + "'\nTry 'dd --help' for more information.\n"); return 1; }
+    if (o.status && !['none', 'noxfer', 'progress'].includes(o.status)) { ctx.err("dd: invalid status level: '" + o.status + "'\nTry 'dd --help' for more information.\n"); return 1; }
+
+    // input source: a finite byte string, or an endless generator for /dev/zero and /dev/random
+    let src = null; let endless = null; const rnd = K.util.prng('dd:' + K.clock.now());
+    if (o.if === undefined || o.if === '-') src = ctx.stdin == null ? '' : toBin(ctx.stdin);
+    else {
+      let st;
+      try { st = ctx.fs.stat(o.if); } catch (e) { if (!isFsErr(e)) throw e; ctx.err("dd: failed to open '" + o.if + "': " + e.message + '\n'); return 1; }
+      if (st.isDev) {
+        endless = st.dev === 'zero' ? (n) => '\0'.repeat(n) : st.dev === 'random' ? (n) => { let s = ''; for (let i = 0; i < n; i++) s += String.fromCharCode((rnd() * 127) | 0); return s; } : () => '';
+      } else if (st.isDir) { ctx.err("dd: error reading '" + o.if + "': Is a directory\n0+0 records in\n0+0 records out\n0 bytes copied, 0.000142 s, 0.0 kB/s\n"); return 1; } else {
+        try { src = toBin(ctx.fs.read(o.if)); } catch (e) { if (!isFsErr(e)) throw e; ctx.err("dd: failed to open '" + o.if + "': " + e.message + '\n'); return 1; }
+      }
+    }
+    let sink = 'stdout'; let existing = '';
+    if (o.of !== undefined && o.of !== '-') {
+      const path = ctx.path(o.of);
+      let st = null;
+      try { st = ctx.fs.stat(o.of); } catch (e) { if (!isFsErr(e)) throw e; if (e.code !== 'ENOENT') { ctx.err("dd: failed to open '" + o.of + "': " + e.message + '\n'); return 1; } }
+      if (st && st.isDev) sink = 'null';
+      else if (!st && DISK_NODE.test(path)) {
+        if (!ctx.isRoot) { ctx.err("dd: failed to open '" + o.of + "': Permission denied\n"); return 1; }
+        sink = 'null'; // raw devices swallow data: nothing in the simulation can be damaged
+      } else {
+        if (st && st.isDir) { ctx.err("dd: failed to open '" + o.of + "': Is a directory\n"); return 1; }
+        if (!st && conv.includes('nocreat')) { ctx.err("dd: failed to open '" + o.of + "': No such file or directory\n"); return 1; }
+        if (st && conv.includes('excl')) { ctx.err("dd: failed to open '" + o.of + "': File exists\n"); return 1; }
+        try { if (st) existing = toBin(ctx.fs.read(o.of)); ctx.fs.write(o.of, existing, { mode: 0o666 }); } catch (e) { if (!isFsErr(e)) throw e; ctx.err("dd: failed to open '" + o.of + "': " + e.message + '\n'); return 1; }
+        sink = path;
+      }
+    }
+
+    const stats = { inFull: 0, inPart: 0, outFull: 0, outPart: 0, bytes: 0 };
+    const keep = sink !== 'null'; const LIMIT = 64 * 1048576;
+    let data = ''; let total = 0; let pos = skip * ibs; let blocks = 0; let interrupted = false; let full = false;
+    if (src != null && pos > src.length && skip) ctx.err("dd: '" + o.if + "': cannot skip to specified offset\n");
+    try {
+      while (blocks < count) {
+        if (endless) { await ctx.sleep(1); ctx.checkAbort(); }
+        const len = endless ? ibs : Math.max(0, Math.min(ibs, src.length - pos));
+        if (!len) break;
+        if (keep && total + len > LIMIT) { full = true; break; }
+        const chunk = keep ? (endless ? endless(len) : src.substr(pos, len)) : '';
+        pos += len; blocks++; total += len;
+        if (len < ibs) { stats.inPart++; if (conv.includes('sync')) { total += ibs - len; if (keep) data += chunk + '\0'.repeat(ibs - len); continue; } } else stats.inFull++;
+        data += chunk;
+      }
+    } catch (e) {
+      if (!(e instanceof K.Interrupt)) throw e;
+      interrupted = true;
+    }
+    if (conv.includes('ucase')) data = data.toUpperCase(); else if (conv.includes('lcase')) data = data.toLowerCase();
+    stats.bytes = total;
+    stats.outFull = Math.floor(total / obs); stats.outPart = total % obs ? 1 : 0;
+    if (sink === 'stdout') ctx.out(fromBin(data));
+    else if (sink !== 'null') {
+      let result = data;
+      if (seek) result = (existing.length >= seek * obs ? existing.slice(0, seek * obs) : existing + '\0'.repeat(seek * obs - existing.length)) + data;
+      if (conv.includes('notrunc') && existing.length > result.length) result += existing.slice(result.length);
+      try { ctx.fs.write(sink, fromBin(result), { mode: 0o666 }); } catch (e) { if (!isFsErr(e)) throw e; ctx.err("dd: error writing '" + o.of + "': " + e.message + '\n'); return 1; }
+    }
+    if (full) { ctx.err("dd: error writing '" + o.of + "': No space left on device\n"); ddStats(ctx, stats, 0.0004, o.status); return 1; }
+    // a believable duration: a small fixed cost plus a few GB/s
+    const secs = 0.00003 + (K.util.hash32('dd' + stats.bytes) % 90) / 1e6 + stats.bytes / 2.4e9;
+    if (interrupted) ctx.err('\n');
+    ddStats(ctx, stats, secs, o.status);
+    return interrupted ? 130 : 0;
+  }
+
+  K.cmd.register({
+    name: 'dd', pkg: 'coreutils', section: 1, summary: 'convert and copy a file', synopsis: 'dd [OPERAND]...',
+    man: 'DESCRIPTION\n       Copy a file, converting and formatting according to the operands. Data is read in blocks and written in blocks; the numbers of full and partial blocks are reported on standard error when dd finishes (or when interrupted with Ctrl-C).\n\n' +
+      'OPERANDS\n       if=FILE     read from FILE instead of standard input\n       of=FILE     write to FILE instead of standard output\n       bs=BYTES    block size for reading and writing (suffixes c w b kB K MB M GB G)\n       count=N     copy only N input blocks\n       skip=N      skip N input blocks\n       seek=N      skip N output blocks\n       conv=LIST   ucase, lcase, notrunc, sync, noerror\n       status=LEVEL  none, noxfer or progress\n\n' +
+      'EXAMPLES\n       dd if=/dev/zero of=/tmp/blank bs=1M count=10\n              Make a 10 MiB file of zeros.\n       sudo dd if=/dev/sda of=disk.img bs=4M status=progress\n              Image a disk.',
+    run: ddRun,
+  });
+
+  /* ================================================= lsblk, mount, sync, shred */
+
+  const DISKS = [
+    { name: 'sda', maj: 8, min: 0, rm: 0, size: 80 * 1073741824, ro: 0, type: 'disk', children: [
+      { name: 'sda1', maj: 8, min: 1, rm: 0, size: 82419448 * 1024, ro: 0, type: 'part', mount: '/', fstype: 'ext4', fsver: '1.0', uuid: '3c1f2d7e-6a41-4b0a-9d21-5e7a0c8b94aa', used: 14380128 * 1024 },
+      { name: 'sda2', maj: 8, min: 2, rm: 0, size: 1024, ro: 0, type: 'part' },
+      { name: 'sda5', maj: 8, min: 5, rm: 0, size: 1466624 * 1024, ro: 0, type: 'part', mount: '[SWAP]', fstype: 'swap', fsver: '1', uuid: '8e0d4b1a-52c7-47f3-b6a9-1d3f7c2e90b5' },
+    ] },
+    { name: 'sr0', maj: 11, min: 0, rm: 1, size: 1073741312, ro: 0, type: 'rom' },
+  ];
+
+  const sizeText = (n) => {
+    if (n === 0) return '0B';
+    let v = n; let i = 0; const u = ['B', 'K', 'M', 'G', 'T'];
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return String(Math.round(v * 10) / 10) + u[i];
+  };
+
+  const LSBLK_HELP = 'Usage:\n lsblk [options] [<device> ...]\n\nList information about block devices.\n\nOptions:\n -a, --all            print all devices\n -b, --bytes          print SIZE in bytes instead of a human-readable format\n -d, --nodeps         don\'t print slaves or holders\n -f, --fs             output info about filesystems\n -l, --list           use list format output\n -n, --noheadings     don\'t print headings\n -o, --output <list>  output columns\n -p, --paths          print complete device path\n -h, --help           display this help\n -V, --version        display version\n';
+
+  function lsblkRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'abdflno:pVh', long: ['all', 'bytes', 'nodeps', 'fs', 'list', 'noheadings', 'output=', 'paths', 'version', 'help'], alias: { all: 'a', bytes: 'b', nodeps: 'd', fs: 'f', list: 'l', noheadings: 'n', output: 'o', paths: 'p', version: 'V', help: 'h' } });
+    if (g.err) { ctx.err('lsblk: ' + g.err + "\nTry 'lsblk --help' for more information.\n"); return 1; }
+    const o = g.opts;
+    if (o.h) { ctx.out(LSBLK_HELP); return 0; }
+    if (o.V) { ctx.out('lsblk from util-linux 2.41.2\n'); return 0; }
+    const cols = o.o && o.o !== true ? o.o.toUpperCase().split(',') : o.f ? ['NAME', 'FSTYPE', 'FSVER', 'LABEL', 'UUID', 'FSAVAIL', 'FSUSE%', 'MOUNTPOINTS'] : ['NAME', 'MAJ:MIN', 'RM', 'SIZE', 'RO', 'TYPE', 'MOUNTPOINTS'];
+    const right = new Set(['RM', 'SIZE', 'RO', 'FSAVAIL', 'FSUSE%']);
+    const value = (d, c, prefix) => {
+      switch (c) {
+        case 'NAME': return prefix + (o.p ? '/dev/' : '') + d.name;
+        case 'PATH': return '/dev/' + d.name;
+        case 'KNAME': return d.name;
+        case 'MAJ:MIN': return d.maj + ':' + d.min;
+        case 'RM': return String(d.rm);
+        case 'SIZE': return o.b ? String(d.size) : sizeText(d.size);
+        case 'RO': return String(d.ro);
+        case 'TYPE': return d.type;
+        case 'MOUNTPOINT': case 'MOUNTPOINTS': return d.mount || '';
+        case 'FSTYPE': return d.fstype || '';
+        case 'FSVER': return d.fsver || '';
+        case 'LABEL': return '';
+        case 'UUID': return d.uuid || '';
+        case 'FSAVAIL': return d.used ? sizeText(d.size - d.used) : '';
+        case 'FSUSE%': return d.used ? Math.round((d.used / d.size) * 100) + '%' : '';
+        default: return null;
+      }
+    };
+    for (const c of cols) if (value(DISKS[0], c, '') === null) { ctx.err("lsblk: unknown column: " + c + '\n'); return 1; }
+    const rows = [];
+    const add = (d, prefix, childPrefix) => {
+      rows.push(cols.map((c) => value(d, c, o.l ? '' : prefix)));
+      const kids = o.d ? [] : d.children || [];
+      kids.forEach((k, i) => add(k, o.l ? '' : childPrefix + (i === kids.length - 1 ? '└─' : '├─'), childPrefix + (i === kids.length - 1 ? '  ' : '│ ')));
+    };
+    for (const d of DISKS) add(d, '', '');
+    const table = o.n ? rows : [cols].concat(rows);
+    const widths = cols.map((c, i) => Math.max(...table.map((r) => r[i].length)));
+    for (const r of table) ctx.out(r.map((cell, i) => (right.has(cols[i]) ? U.padStart(cell, widths[i]) : i === cols.length - 1 ? cell : U.padEnd(cell, widths[i]))).join(' ') + '\n');
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'lsblk', pkg: 'util-linux', section: 8, summary: 'list block devices', synopsis: 'lsblk [options] [device...]',
+    man: 'DESCRIPTION\n       lsblk lists information about all available block devices: disks, their partitions and where they are mounted.\n\nOPTIONS\n       -f, --fs         show filesystem type, UUID, free space and use\n       -l, --list       list format instead of a tree\n       -p, --paths      print full device paths\n       -b, --bytes      sizes in bytes\n       -d, --nodeps     only the disks, not their partitions\n       -n, --noheadings  no header line\n       -o LIST          choose the columns, for example NAME,SIZE,TYPE\n\nEXAMPLES\n       lsblk\n              Show the disk layout.\n       lsblk -f\n              Show filesystems and their UUIDs.',
+    run: async (ctx) => lsblkRun(ctx),
+  });
+
+  const MOUNT_TABLE = [
+    ['sysfs', '/sys', 'sysfs', 'rw,nosuid,nodev,noexec,relatime'],
+    ['proc', '/proc', 'proc', 'rw,nosuid,nodev,noexec,relatime'],
+    ['udev', '/dev', 'devtmpfs', 'rw,nosuid,relatime,size=1950568k,nr_inodes=487642,mode=755'],
+    ['devpts', '/dev/pts', 'devpts', 'rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=000'],
+    ['tmpfs', '/run', 'tmpfs', 'rw,nosuid,nodev,noexec,relatime,size=396072k,mode=755'],
+    ['/dev/sda1', '/', 'ext4', 'rw,relatime,errors=remount-ro'],
+    ['securityfs', '/sys/kernel/security', 'securityfs', 'rw,nosuid,nodev,noexec,relatime'],
+    ['tmpfs', '/dev/shm', 'tmpfs', 'rw,nosuid,nodev,size=1980348k'],
+    ['tmpfs', '/run/lock', 'tmpfs', 'rw,nosuid,nodev,noexec,relatime,size=5120k'],
+    ['cgroup2', '/sys/fs/cgroup', 'cgroup2', 'rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot'],
+    ['pstore', '/sys/fs/pstore', 'pstore', 'rw,nosuid,nodev,noexec,relatime'],
+    ['systemd-1', '/proc/sys/fs/binfmt_misc', 'autofs', 'rw,relatime,fd=30,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=9560'],
+    ['debugfs', '/sys/kernel/debug', 'debugfs', 'rw,nosuid,nodev,noexec,relatime'],
+    ['tmpfs', '/tmp', 'tmpfs', 'rw,nosuid,nodev,size=1980348k,nr_inodes=1048576'],
+    ['tmpfs', '/run/user/1000', 'tmpfs', 'rw,nosuid,nodev,relatime,size=396068k,nr_inodes=99017,mode=700,uid=1000,gid=1000'],
+  ];
+
+  function mountRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'lt:aVhnrvw', long: ['types=', 'all', 'version', 'help', 'show-labels'], alias: { types: 't', all: 'a', version: 'V', help: 'h' } });
+    if (g.err) { ctx.err('mount: ' + g.err + "\nTry 'mount --help' for more information.\n"); return 1; }
+    if (g.opts.V) { ctx.out('mount from util-linux 2.41.2 (libmount 2.41.2: selinux, smack, btrfs, verity, namespaces, idmapping, statx, assert, debug)\n'); return 0; }
+    if (g.opts.h) { ctx.out('\nUsage:\n mount [-lhV]\n mount -a [options]\n mount [options] [--source] <source> | [--target] <directory>\n mount [options] <source> <directory>\n\nMount a filesystem.\n\nOptions:\n -a, --all               mount all filesystems mentioned in fstab\n -t, --types <list>      limit the set of filesystem types\n -V, --version           display version\n -h, --help              display this help\n'); return 0; }
+    if (g.rest.length) {
+      if (!ctx.isRoot) { ctx.err('mount: ' + g.rest[g.rest.length - 1] + ': must be superuser to use mount.\n       dmesg(1) may have more information after failed mount system call.\n'); return 32; }
+      if (g.rest.length === 1) { ctx.err('mount: ' + g.rest[0] + ": can't find in /etc/fstab.\n"); return 32; }
+      const [dev, dir] = g.rest;
+      if (!ctx.fs.exists(dir)) { ctx.err('mount: ' + dir + ': mount point does not exist.\n       dmesg(1) may have more information after failed mount system call.\n'); return 32; }
+      ctx.err('mount: ' + dir + ': special device ' + dev + ' does not exist.\n       dmesg(1) may have more information after failed mount system call.\n');
+      return 32;
+    }
+    if (g.opts.a) return 0;
+    const types = g.opts.t && g.opts.t !== true ? g.opts.t.split(',') : null;
+    for (const [dev, dir, type, opts] of MOUNT_TABLE) if (!types || types.includes(type)) ctx.out(dev + ' on ' + dir + ' type ' + type + ' (' + opts + ')\n');
+    return 0;
+  }
+
+  K.cmd.register({
+    name: 'mount', pkg: 'mount', path: '/usr/bin/mount', section: 8, summary: 'mount a filesystem', synopsis: 'mount [-l|-h|-V]\n       mount [-t type] [-o options] device dir',
+    man: 'DESCRIPTION\n       All files accessible in a Unix system are arranged in one big tree. mount attaches a filesystem found on some device to that tree. Without arguments it lists the filesystems that are mounted now.\n\nOPTIONS\n       -t type   list or mount only this filesystem type\n       -a        mount everything in /etc/fstab\n       -V        print the version\n\nEXAMPLES\n       mount\n              List all mounted filesystems.\n       mount -t tmpfs\n              Only the tmpfs mounts.\n       sudo mount /dev/sdb1 /mnt\n              Attach a USB disk.',
+    run: async (ctx) => mountRun(ctx),
+  });
+
+  K.cmd.register({
+    name: 'sync', pkg: 'coreutils', section: 1, summary: 'synchronize cached writes to persistent storage', synopsis: 'sync [OPTION] [FILE]...',
+    man: 'DESCRIPTION\n       Synchronize cached writes to persistent storage. If one or more files are specified, sync only them; with no files it flushes everything.\n\nOPTIONS\n       -d, --data   sync only file data, no unneeded metadata\n       -f, --file-system   sync the file systems that contain the files\n\nEXAMPLES\n       sync\n              Flush all pending writes, for instance before pulling out a USB stick.',
+    run: async (ctx) => {
+      const g = K.getopt(ctx.args, { short: 'df', long: ['data', 'file-system', 'help', 'version'] });
+      if (g.err) { ctx.err('sync: ' + g.err + "\nTry 'sync --help' for more information.\n"); return 1; }
+      if (g.opts.version) { ctx.out(COREUTILS_VERSION('sync', 'Jim Meyering and Giuseppe Scrivano')); return 0; }
+      if (g.opts.help) { ctx.out('Usage: sync [OPTION] [FILE]...\nSynchronize cached writes to persistent storage\n\nIf one or more files are specified, sync only them,\nor their containing file systems.\n\n  -d, --data             sync only file data, no unneeded metadata\n  -f, --file-system      sync the file systems that contain the files\n      --help        display this help and exit\n      --version     output version information and exit\n'); return 0; }
+      let status = 0;
+      for (const f of g.rest) {
+        if (!ctx.fs.exists(f)) { ctx.err("sync: error opening '" + f + "': No such file or directory\n"); status = 1; }
+      }
+      return status;
+    },
+  });
+
+  async function shredRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'n:s:uvxzf', long: ['iterations=', 'size=', 'remove=?', 'verbose', 'zero', 'force', 'exact', 'help', 'version', 'random-source='], alias: { iterations: 'n', size: 's', verbose: 'v', zero: 'z', force: 'f', exact: 'x' } });
+    if (g.err) { ctx.err('shred: ' + g.err + "\nTry 'shred --help' for more information.\n"); return 1; }
+    const o = g.opts;
+    if (o.help) { ctx.out('Usage: shred [OPTION]... FILE...\nOverwrite the specified FILE(s) repeatedly, in order to make it harder\nfor even very expensive hardware probing to recover the data.\n\n  -f, --force    change permissions to allow writing if necessary\n  -n, --iterations=N  overwrite N times instead of the default (3)\n  -s, --size=N   shred this many bytes (suffixes like K, M, G accepted)\n  -u             deallocate and remove file after overwriting\n  -v, --verbose  show progress\n  -x, --exact    do not round file sizes up to the next full block;\n  -z, --zero     add a final overwrite with zeros to hide shredding\n'); return 0; }
+    if (o.version) { ctx.out(COREUTILS_VERSION('shred', 'Colin Plumb')); return 0; }
+    let passes = 3;
+    if (o.n !== undefined) {
+      passes = /^\d+$/.test(o.n) ? +o.n : NaN;
+      if (isNaN(passes)) { ctx.err("shred: invalid number of passes: '" + o.n + "'\n"); return 1; }
+    }
+    if (!g.rest.length) { ctx.err("shred: missing file operand\nTry 'shred --help' for more information.\n"); return 1; }
+    const remove = !!o.u || o.remove !== undefined;
+    const rnd = K.util.prng('shred:' + K.clock.now());
+    let status = 0;
+    for (const f of g.rest) {
+      ctx.checkAbort();
+      let st;
+      try { st = ctx.fs.stat(f); } catch (e) { if (!isFsErr(e)) throw e; ctx.err('shred: ' + f + ': failed to open for writing: ' + e.message + '\n'); status = 1; continue; }
+      if (st.isDir) { ctx.err('shred: ' + f + ': failed to open for writing: Is a directory\n'); status = 1; continue; }
+      if (o.f && !ctx.fs.can(f, 'w')) { try { ctx.fs.chmod(f, st.mode | 0o200); } catch (e) { if (!isFsErr(e)) throw e; } }
+      if (!ctx.fs.can(f, 'w')) { ctx.err('shred: ' + f + ': failed to open for writing: Permission denied\n'); status = 1; continue; }
+      const size = o.s && o.s !== true ? ddNumber(o.s) : st.size;
+      if (size == null) { ctx.err("shred: " + o.s + ': invalid file size\n'); return 1; }
+      const total = passes + (o.z ? 1 : 0);
+      let content = toBin(ctx.fs.read(f)).slice(0, st.size);
+      for (let p = 1; p <= total; p++) {
+        const zero = o.z && p === total;
+        content = zero ? '\0'.repeat(size) : Array.from({ length: size }, () => String.fromCharCode((rnd() * 127) | 0)).join('');
+        if (o.v) ctx.err('shred: ' + f + ': pass ' + p + '/' + total + ' (' + (zero ? '000000' : 'random') + ')...\n');
+        await ctx.sleep(5);
+      }
+      if (total) ctx.fs.write(f, content);
+      if (!remove) continue;
+      const dir = dirName(f) === '.' ? '' : joinPath(dirName(f), '');
+      const base = baseName(f);
+      if (o.v) ctx.err('shred: ' + f + ': removing\n');
+      let current = f;
+      for (let len = base.length; len >= 1; len--) {
+        const next = dir + '0'.repeat(len);
+        try { ctx.fs.rename(current, next); } catch (e) { if (!isFsErr(e)) throw e; break; }
+        if (o.v) ctx.err('shred: ' + current + ': renamed to ' + next + '\n');
+        current = next;
+      }
+      try { ctx.fs.unlink(current); } catch (e) { if (!isFsErr(e)) throw e; ctx.err('shred: ' + f + ': failed to remove: ' + e.message + '\n'); status = 1; continue; }
+      if (o.v) ctx.err('shred: ' + f + ': removed\n');
+    }
+    return status;
+  }
+
+  K.cmd.register({
+    name: 'shred', pkg: 'coreutils', section: 1, summary: 'overwrite a file to hide its contents, and optionally delete it', synopsis: 'shred [OPTION]... FILE...',
+    man: 'DESCRIPTION\n       Overwrite the specified FILE(s) repeatedly, in order to make it harder for even very expensive hardware probing to recover the data. Note that journaling and copy-on-write filesystems may keep old copies of the data.\n\nOPTIONS\n       -n N   overwrite N times instead of the default (3)\n       -u     remove the file after overwriting\n       -z     add a final overwrite with zeros to hide shredding\n       -v     show progress\n       -f     change permissions to allow writing if necessary\n       -s N   shred this many bytes\n\nEXAMPLES\n       shred -vzu secrets.txt\n              Overwrite with random data, then zeros, then delete the file.',
+    run: shredRun,
+  });
+
   K.cmdFs2 = { modeString, shellQuote, crc32, lzPack, lzUnpack, toBin, fromBin, compress, decompress };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
