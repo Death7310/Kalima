@@ -266,3 +266,98 @@ test('gzip error texts and stdin handling', async () => {
   assert.match((await sh('gzip -h')).out, /^Usage: gzip \[OPTION\]/);
   assert.equal(await out('gzip -c p | wc -c'), (await out('gzip -c p | wc -c')));
 });
+
+/* ------------------------------------------------------------ zip, unzip */
+
+const ZTREE = 'mkdir -p /tmp/z/p/q; cd /tmp/z; echo hi > p/a.txt; seq 1 300 > p/q/b; chmod 600 p/a.txt; touch -d "2026-03-04 05:06:07" p/a.txt';
+
+test('zip -r, unzip -l/-lv/-t/-p and the adding messages', async () => {
+  const { sh, out } = await setup();
+  await sh(ZTREE);
+  const z = await sh('zip -r x.zip p');
+  assert.match(z.out, /^  adding: p\/ \(stored 0%\)\n  adding: p\/a.txt \(stored 0%\)\n  adding: p\/q\/ \(stored 0%\)\n  adding: p\/q\/b \(deflated \d+%\)\n$/);
+  assert.equal((await sh('zip -r x.zip p')).out.split('\n')[0], 'updating: p/ (stored 0%)');
+  assert.match(await out('file x.zip'), /Zip archive data, at least v1\.0 to extract/);
+  const l = await out('unzip -l x.zip');
+  assert.match(l, /^Archive:  x.zip\n  Length      Date    Time    Name\n---------  ---------- -----   ----\n +0  \d{4}-\d\d-\d\d \d\d:\d\d   p\/\n +3  2026-03-04 05:06   p\/a.txt\n/);
+  assert.match(l, /\n---------                     -------\n +1095                     4 files\n$/);
+  assert.match(await out('unzip -lv x.zip'), /\n +3  Stored +3   0% 2026-03-04 05:06 [0-9a-f]{8}  p\/a.txt\n/);
+  assert.match(await out('unzip -t x.zip'), /^Archive:  x.zip\n    testing: p\/ {23}OK\n/);
+  assert.match(await out('unzip -t x.zip'), /No errors detected in compressed data of x.zip.\n$/);
+  assert.equal(await out('unzip -p x.zip p/a.txt'), 'hi\n');
+  assert.equal(await out('unzip -p x.zip "p/q/*" | wc -l'), '300\n');
+});
+
+test('unzip extracts with -d, restores modes and times, and handles existing files', async () => {
+  const { sh, out } = await setup();
+  await sh(ZTREE + '; zip -qr x.zip p');
+  const u = await sh('unzip x.zip -d out');
+  assert.equal(u.out, 'Archive:  x.zip\n   creating: out/p/\n extracting: out/p/a.txt' + ' '.repeat(13) + '\n   creating: out/p/q/\n  inflating: out/p/q/b' + ' '.repeat(15) + '\n');
+  assert.equal(await out('stat -c "%a %y" out/p/a.txt'), '600 2026-03-04 05:06:07.000000000 +0000\n');
+  assert.equal(await out('cat out/p/a.txt'), 'hi\n');
+  assert.equal((await sh('unzip -n x.zip -d out')).out, 'Archive:  x.zip\n');
+  assert.match((await sh('unzip -o x.zip -d out')).out, /extracting: out\/p\/a.txt/);
+  assert.match((await sh('unzip -q x.zip -d out2; ls out2')).out, /^p\n$/);
+  assert.equal((await sh('unzip x.zip nomatch')).out, 'Archive:  x.zip\ncaution: filename not matched:  nomatch\n');
+  assert.equal((await sh('unzip x.zip nomatch')).code, 11);
+  assert.equal(await out('unzip -j -q x.zip -d flat; ls flat'), 'a.txt\nb\n');
+  assert.equal(await out('unzip -q x.zip -x "p/q/*" -d only; find only -type f'), 'only/p/a.txt\n');
+});
+
+test('zip options: -j, -d, -x, -m and errors', async () => {
+  const { sh, out } = await setup();
+  await sh(ZTREE);
+  await sh('zip -qrj j.zip p');
+  assert.equal(await out('unzip -Z1 j.zip'), 'a.txt\nb\n');
+  await sh('zip -qr x.zip p -x "*.txt"');
+  assert.equal(await out('unzip -Z1 x.zip'), 'p/\np/q/\np/q/b\n');
+  assert.equal((await sh('zip -d x.zip "p/q/*"')).out, 'deleting: p/q/\ndeleting: p/q/b\n');
+  assert.equal((await sh('zip -q m.zip p/a.txt -m; ls p')).out, 'q\n');
+  const miss = await sh('zip y.zip nofile');
+  assert.equal(miss.err, '\tzip warning: name not matched: nofile\n\nzip error: Nothing to do! (y.zip)\n');
+  assert.equal(miss.code, 12);
+  assert.equal((await sh('zip -Q a.zip p')).err, "\nzip error: Invalid command arguments (short option 'Q' not supported)\n");
+  assert.match((await sh('zip')).out, /^Copyright \(c\) 1990-2008 Info-ZIP/);
+  assert.equal((await sh('zip -q noext p/q/b; ls noext.zip')).out, 'noext.zip\n');
+});
+
+test('unzip errors: missing and invalid archives', async () => {
+  const { sh } = await setup();
+  await sh('cd /tmp; echo junk > j');
+  const a = await sh('unzip nope.zip');
+  assert.equal(a.err, 'unzip:  cannot find or open nope.zip, nope.zip.zip or nope.zip.ZIP.\n');
+  assert.equal(a.code, 9);
+  assert.equal((await sh('unzip nope')).err, 'unzip:  cannot find or open nope, nope.zip or nope.ZIP.\n');
+  const b = await sh('unzip j');
+  assert.match(b.out, /^Archive:  j\n  End-of-central-directory signature not found/);
+  assert.equal(b.err, 'unzip:  cannot find zipfile directory in one of j or\n        j.zip, and cannot find j.ZIP, period.\n');
+  assert.equal(b.code, 9);
+  assert.match((await sh('unzip')).out, /^UnZip 6\.00/);
+});
+
+/* ------------------------------------------------------- locate, updatedb */
+
+test('locate fails before updatedb, needs root to build, and then finds files', async () => {
+  const { sim, sh, out } = await setup();
+  const r = await sh('locate passwd');
+  assert.equal(r.err, "locate: can not open `/var/lib/plocate/plocate.db': No such file or directory\n");
+  assert.equal(r.code, 1);
+  assert.equal((await sh('updatedb')).code, 1);
+  sim.term.feed('kali');
+  assert.equal((await sh('sudo updatedb')).code, 0);
+  assert.match(await out('locate -b passwd'), /^\/etc\/passwd\n/m);
+  assert.match(await out('locate passwd'), /\/etc\/passwd/);
+  await sh('echo x > /tmp/newfile_zz');
+  assert.equal((await sh('locate newfile_zz')).code, 1);
+  await sh('mkdir -p /home/kali/docs; echo x > /home/kali/docs/Report.PDF; sudo updatedb');
+  assert.equal(await out('locate -i report.pdf'), '/home/kali/docs/Report.PDF\n');
+  assert.equal(await out('locate report.pdf'), '');
+  assert.equal(await out('locate -c -i report.pdf'), '1\n');
+  assert.equal(await out('locate "/home/kali/docs/*.PDF"'), '/home/kali/docs/Report.PDF\n');
+  assert.equal(await out('locate -l 1 -b "*.conf" | wc -l'), '1\n');
+  assert.equal(await out('locate -r "docs/R.*PDF$"'), '/home/kali/docs/Report.PDF\n');
+  assert.equal(await out('locate -e Report | wc -l'), '1\n');
+  assert.equal((await sh('locate')).err, 'locate: no pattern to search for specified\n');
+  assert.match((await sh('locate --version')).out, /^plocate /);
+  assert.equal((await sh('locate zzznothing')).code, 1);
+});

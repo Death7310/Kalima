@@ -1020,5 +1020,379 @@
     });
   }
 
+  /* ======================================================================= zip */
+
+  const ZIP_HELP = "Copyright (c) 1990-2008 Info-ZIP - Type 'zip \"-L\"' for software license.\nZip 3.0 (July 5th 2008). Usage:\n" +
+    'zip [-options] [-b path] [-t mmddyyyy] [-n suffixes] [zipfile list] [-xi list]\n  The default action is to add or replace zipfile entries from list, which\n  can include the special name - to compress standard input.\n' +
+    '  If zipfile and list are omitted, zip compresses stdin to stdout.\n  -f   freshen: only changed files  -u   update: only changed or new files\n  -d   delete entries in zipfile    -m   move into zipfile (delete OS files)\n' +
+    "  -r   recurse into directories     -j   junk (don't record) directory names\n  -0   store only                   -l   convert LF to CR LF (-ll CR LF to LF)\n  -1   compress faster              -9   compress better\n" +
+    '  -q   quiet operation              -v   verbose operation/print version info\n  -c   add one-line comments        -z   add zipfile comment\n  -@   read names from stdin        -o   make zipfile as old as latest entry\n' +
+    '  -x   exclude the following names  -i   include only the following names\n  -F   fix zipfile (-FF try harder) -D   do not add directory entries\n  -A   adjust self-extracting exe   -J   junk zipfile prefix (unzipsfx)\n' +
+    '  -T   test zipfile integrity       -X   eXclude eXtra file attributes\n  -y   store symbolic links as the link instead of the referenced file\n' +
+    "  -e   encrypt                      -n   don't compress these suffixes\n  -h2  show more help\n";
+
+  const UNZIP_HELP = 'UnZip 6.00 of 20 April 2009, by Debian. Original by Info-ZIP.\n\nUsage: unzip [-Z] [-opts[modifiers]] file[.zip] [list] [-x xlist] [-d exdir]\n' +
+    '  Default action is to extract files in list, except those in xlist, to exdir;\n  file[.zip] may be a wildcard.  -Z => ZipInfo mode ("unzip -Z" for usage).\n\n' +
+    '  -p  extract files to pipe, no messages     -l  list files (short format)\n  -f  freshen existing files, create none    -t  test compressed archive data\n' +
+    '  -u  update files, create if necessary      -z  display archive comment only\n  -v  list verbosely/show version info       -T  timestamp archive to latest\n' +
+    '  -x  exclude files that follow (in xlist)   -d  extract files into exdir\nmodifiers:\n  -n  never overwrite existing files         -q  quiet mode (-qq => quieter)\n' +
+    '  -o  overwrite files WITHOUT prompting      -a  auto-convert any text files\n  -j  junk paths (do not make directories)   -aa treat ALL files as text\n' +
+    '  -U  use escapes for all non-ASCII Unicode  -UU ignore any Unicode fields\n  -C  match filenames case-insensitively     -L  make (some) names lowercase\n' +
+    '  -X  restore UID/GID info                   -V  retain VMS version numbers\n  -K  keep setuid/setgid/tacky permissions   -M  pipe through "more" pager\n' +
+    '  -O CHARSET  specify a character encoding for DOS, Windows and OS/2 archives\n  -I CHARSET  specify a character encoding for UNIX and other archives\n\n' +
+    'See "unzip -hh" or unzip.txt for more help.  Examples:\n  unzip data1 -x joe   => extract all files except joe from zipfile data1.zip\n' +
+    '  unzip -p foo | more  => send contents of foo.zip via pipe into program more\n  unzip -fo foo ReadMe => quietly replace existing ReadMe if archive file newer\n';
+
+  const dosStamp = (ms) => {
+    const d = new Date(ms); const y = Math.max(1980, d.getUTCFullYear());
+    return { time: (d.getUTCHours() << 11) | (d.getUTCMinutes() << 5) | (d.getUTCSeconds() >> 1), date: ((y - 1980) << 9) | ((d.getUTCMonth() + 1) << 5) | d.getUTCDate() };
+  };
+  const dosToMs = (time, date) => Date.UTC(1980 + (date >> 9), ((date >> 5) & 15) - 1, date & 31, time >> 11, (time >> 5) & 63, (time & 31) * 2);
+
+  /** Serialise entries {name, bin, mtime, mode, level} into a zip file (local headers, central directory, end record). */
+  function zipBuild(entries) {
+    let body = ''; let central = '';
+    for (const e of entries) {
+      const dir = e.name.endsWith('/'); const packed = dir || e.level === 0 ? null : lzPack(e.bin);
+      const deflate = packed != null && packed.length < e.bin.length;
+      const data = deflate ? packed : e.bin; const method = deflate ? 8 : 0; const need = dir ? 10 : deflate ? 20 : 10;
+      const st = dosStamp(e.mtime); const crc = crc32(e.bin);
+      const common = le(method, 2) + le(st.time, 2) + le(st.date, 2) + le(crc, 4) + le(data.length, 4) + le(e.bin.length, 4) + le(e.name.length, 2);
+      const attr = ((dir ? 0o040000 : 0o100000) | (e.mode & 0o7777)) * 65536 + (dir ? 0x10 : 0);
+      central += 'PK\x01\x02' + le(0x031e, 2) + le(need, 2) + le(0, 2) + common + le(0, 2) + le(0, 2) + le(0, 2) + le(0, 2) + le(attr, 4) + le(body.length, 4) + e.name;
+      body += 'PK\x03\x04' + le(need, 2) + le(0, 2) + common + le(0, 2) + e.name + data;
+    }
+    return body + central + 'PK\x05\x06' + le(0, 2) + le(0, 2) + le(entries.length, 2) + le(entries.length, 2) + le(central.length, 4) + le(body.length, 4) + le(0, 2);
+  }
+
+  /** Read a zip file back. Returns null when no end-of-central-directory record exists. */
+  function zipParse(bin) {
+    const end = bin.lastIndexOf('PK\x05\x06');
+    if (end < 0) return null;
+    const n = rd(bin, end + 10, 2); let off = rd(bin, end + 16, 4); const entries = [];
+    for (let i = 0; i < n; i++) {
+      if (bin.substr(off, 4) !== 'PK\x01\x02') return null;
+      const method = rd(bin, off + 10, 2); const stamp = dosToMs(rd(bin, off + 12, 2), rd(bin, off + 14, 2));
+      const nlen = rd(bin, off + 28, 2); const elen = rd(bin, off + 30, 2); const clen = rd(bin, off + 32, 2);
+      const attr = rd(bin, off + 38, 4); const lo = rd(bin, off + 42, 4);
+      const e = { name: bin.substr(off + 46, nlen), method, crc: rd(bin, off + 16, 4), csize: rd(bin, off + 20, 4), usize: rd(bin, off + 24, 4), mtime: stamp, mode: Math.floor(attr / 65536) & 0o7777 };
+      const start = lo + 30 + rd(bin, lo + 26, 2) + rd(bin, lo + 28, 2);
+      e.raw = bin.substr(start, e.csize);
+      e.isDir = e.name.endsWith('/');
+      entries.push(e);
+      off += 46 + nlen + elen + clen;
+    }
+    return entries;
+  }
+  /** Uncompressed bytes of a parsed entry, or null when it is damaged. */
+  function zipData(e) {
+    const bin = e.method === 8 ? lzUnpack(e.raw) : e.raw;
+    return bin != null && crc32(bin) === e.crc ? bin : null;
+  }
+
+  async function zipRun(ctx) {
+    const args = ctx.args; const flags = {}; const list = []; const excl = []; const incl = [];
+    let target = null;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-h' || a === '-h2' || a === '--help') { ctx.out(ZIP_HELP); return 0; }
+      if (a === '-x' || a === '-i') { const dest = a === '-x' ? excl : incl; while (i + 1 < args.length && !args[i + 1].startsWith('-')) dest.push(args[++i]); continue; }
+      if (a.startsWith('--')) { ctx.err("\nzip error: Invalid command arguments (long option '" + a.slice(2) + "' not supported)\n"); return 16; }
+      if (a.startsWith('-') && a.length > 1) {
+        for (const ch of a.slice(1)) {
+          if (!'rqjdmufDXyTkv0123456789'.includes(ch)) { ctx.err("\nzip error: Invalid command arguments (short option '" + ch + "' not supported)\n"); return 16; }
+          flags[ch] = true;
+          if (/\d/.test(ch)) flags.level = +ch;
+        }
+        continue;
+      }
+      if (target == null) target = a; else list.push(a);
+    }
+    if (target == null) { ctx.out(ZIP_HELP); return 0; }
+    if (!ctx.fs.exists(target) && !/\.[^/]*$/.test(baseName(target))) target += '.zip';
+    let entries = [];
+    if (ctx.fs.exists(target)) {
+      const parsed = zipParse(ctx.fs.read(target));
+      if (parsed) entries = parsed.map((e) => ({ name: e.name, bin: zipData(e) || '', mtime: e.mtime, mode: e.mode, level: 6 }));
+    }
+    const say = (s) => { if (!flags.q) ctx.out(s); };
+    const matches = (name, pats) => pats.some((p) => U.globToRe(p).test(name));
+    let warned = false;
+    const warn = (name) => { ctx.err('\tzip warning: name not matched: ' + name + '\n'); warned = true; };
+    const nothing = () => { ctx.err('\nzip error: Nothing to do! (' + target + ')\n'); return 12; };
+
+    if (flags.d) {
+      let removed = 0;
+      for (const p of list) {
+        const hit = entries.filter((e) => U.globToRe(p).test(e.name));
+        if (!hit.length) { warn(p); continue; }
+        for (const e of hit) { say('deleting: ' + e.name + '\n'); removed++; }
+        entries = entries.filter((e) => !hit.includes(e));
+      }
+      if (!removed) return nothing();
+      ctx.fs.write(target, zipBuild(entries));
+      return warned ? 18 : 0;
+    }
+    if (!list.length) return nothing();
+
+    const gather = (name, out) => {
+      ctx.checkAbort();
+      let st;
+      try { st = ctx.fs.stat(name); } catch (e) { if (!isFsErr(e)) throw e; return false; }
+      if (st.isDir) {
+        out.push({ name: name.replace(/\/*$/, '/'), st, path: name });
+        if (flags.r) for (const k of ctx.fs.readdir(name)) gather(joinPath(name, k), out);
+      } else out.push({ name, st, path: name });
+      return true;
+    };
+    let added = 0;
+    for (const arg of list) {
+      const found = []; const ok = gather(arg, found);
+      if (!ok) { warn(arg); continue; }
+      for (const f of found) {
+        let name = flags.j ? baseName(f.name) + (f.name.endsWith('/') ? '/' : '') : f.name;
+        if (flags.j && f.name.endsWith('/')) continue;
+        name = name.replace(/^\/+/, '');
+        if ((excl.length && matches(name, excl)) || (incl.length && !matches(name, incl))) continue;
+        if (flags.D && name.endsWith('/')) continue;
+        const dir = name.endsWith('/');
+        let content = '';
+        if (!dir) { try { content = toBin(ctx.fs.read(f.path)); } catch (e) { if (!isFsErr(e)) throw e; ctx.err('\tzip warning: ' + f.path + ': ' + e.message + '\n'); warned = true; continue; } }
+        const entry = { name, bin: content, mtime: f.st.mtime, mode: f.st.mode, level: flags.level == null ? 6 : flags.level };
+        const idx = entries.findIndex((e) => e.name === name);
+        const verb = idx >= 0 ? 'updating' : '  adding';
+        if (idx >= 0) entries[idx] = entry; else entries.push(entry);
+        const packed = dir || entry.level === 0 ? null : lzPack(content);
+        const pct = packed != null && packed.length < content.length ? 'deflated ' + Math.round((1 - packed.length / content.length) * 100) : 'stored 0';
+        say(verb + ': ' + name + ' (' + pct + '%)\n');
+        added++;
+      }
+    }
+    if (!added) return nothing();
+    ctx.fs.write(target, zipBuild(entries));
+    if (flags.m) for (const arg of list) { try { if (ctx.fs.isDir(arg)) ctx.fs.rmTree(arg); else ctx.fs.unlink(arg); } catch (e) { if (!isFsErr(e)) throw e; } }
+    return warned ? 18 : 0;
+  }
+
+  async function unzipRun(ctx) {
+    const args = ctx.args; const f = {}; const names = []; const xlist = []; let zipName = null; let dir = null; let inX = false;
+    if (!args.length) { ctx.out(UNZIP_HELP); return 0; }
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-h' || a === '--help') { ctx.out(UNZIP_HELP); return 0; }
+      if (a.startsWith('-') && a.length > 1) {
+        inX = false;
+        for (let j = 1; j < a.length; j++) {
+          const ch = a[j];
+          if (ch === 'd') { dir = a.slice(j + 1) || args[++i]; break; }
+          if (ch === 'x') { inX = true; continue; }
+          if (ch === 'Z') { f.Z = a.slice(j + 1); break; }
+          f[ch] = (f[ch] || 0) + 1;
+        }
+        continue;
+      }
+      if (inX) xlist.push(a); else if (zipName == null) zipName = a; else names.push(a);
+    }
+    if (zipName == null) { ctx.out(UNZIP_HELP); return 0; }
+    const candidates = zipName.endsWith('.zip') ? [zipName, zipName + '.zip', zipName + '.ZIP'] : [zipName, zipName + '.zip', zipName + '.ZIP'];
+    const found = candidates.find((c) => ctx.fs.isFile(c));
+    if (!found) {
+      ctx.err('unzip:  cannot find or open ' + candidates[0] + ', ' + candidates[1] + ' or ' + candidates[2] + '.\n');
+      return 9;
+    }
+    const entries = zipParse(ctx.fs.read(found));
+    if (!entries) {
+      ctx.out('Archive:  ' + found + '\n  End-of-central-directory signature not found.  Either this file is not\n  a zipfile, or it constitutes one disk of a multi-part archive.  In the\n  latter case the central directory and zipfile comment will be found on\n  the last disk(s) of this archive.\n');
+      ctx.err('unzip:  cannot find zipfile directory in one of ' + zipName + ' or\n        ' + zipName + '.zip, and cannot find ' + zipName + '.ZIP, period.\n');
+      return 9;
+    }
+    const quiet = f.q > 0 || f.p;
+    const say = (s) => { if (!quiet) ctx.out(s); };
+    if (f.Z === '1') { for (const e of entries) ctx.out(e.name + '\n'); return 0; }
+    say('Archive:  ' + found + '\n');
+    let status = 0;
+    const sel = [];
+    for (const p of names.length ? names : [null]) {
+      const re = p == null ? null : U.globToRe(p);
+      const hit = entries.filter((e) => (re ? re.test(e.name) : true) && !xlist.some((x) => U.globToRe(x).test(e.name)));
+      if (p != null && !hit.length) { ctx.out('caution: filename not matched:  ' + p + '\n'); status = 11; }
+      for (const e of hit) if (!sel.includes(e)) sel.push(e);
+    }
+    const when = (ms) => U.isoDate(ms).slice(0, 16);
+    if (f.l || f.v) {
+      const tot = sel.reduce((n, e) => n + e.usize, 0); const ctot = sel.reduce((n, e) => n + e.csize, 0);
+      const files = sel.length + ' file' + (sel.length === 1 ? '' : 's') + '\n';
+      const pct = (u, c) => (u ? Math.round((1 - c / u) * 100) : 0);
+      if (f.v) {
+        ctx.out(' Length   Method    Size  Cmpr    Date    Time   CRC-32   Name\n--------  ------  ------- ---- ---------- ----- --------  ----\n');
+        for (const e of sel) ctx.out(U.padStart(e.usize, 8) + '  ' + U.padEnd(e.method === 8 ? 'Defl:N' : 'Stored', 6) + ' ' + U.padStart(e.csize, 7) + ' ' + U.padStart(pct(e.usize, e.csize), 3) + '% ' + when(e.mtime) + ' ' + hex8(e.crc) + '  ' + e.name + '\n');
+        ctx.out('--------          -------  ---                            -------\n' + U.padStart(tot, 8) + '         ' + U.padStart(ctot, 7) + ' ' + U.padStart(pct(tot, ctot), 3) + '%                            ' + files);
+      } else {
+        ctx.out('  Length      Date    Time    Name\n---------  ---------- -----   ----\n');
+        for (const e of sel) ctx.out(U.padStart(e.usize, 9) + '  ' + when(e.mtime) + '   ' + e.name + '\n');
+        ctx.out('---------                     -------\n' + U.padStart(tot, 9) + '                     ' + files);
+      }
+      return status;
+    }
+    if (f.t) {
+      for (const e of sel) {
+        const ok = e.isDir || zipData(e) != null;
+        say('    testing: ' + U.padEnd(e.name, 24) + ' ' + (ok ? 'OK' : 'bad CRC') + '\n');
+        if (!ok) status = 2;
+      }
+      if (f.q === undefined) ctx.out(status === 2 ? 'At least one error was detected in ' + found + '.\n' : 'No errors detected in compressed data of ' + found + '.\n');
+      return status;
+    }
+    const root = dir == null ? '' : dir; let policy = f.o ? 'A' : f.n ? 'N' : null;
+    if (dir != null && !ctx.fs.isDir(dir)) { try { ctx.fs.mkdir(dir, { parents: true }); } catch (e) { if (!isFsErr(e)) throw e; ctx.err('checkdir:  cannot create extraction directory: ' + dir + '\n           ' + e.message + '\n'); return 1; } }
+    for (const e of sel) {
+      ctx.checkAbort();
+      const rel = f.j ? baseName(e.name) : e.name;
+      if (!rel) continue;
+      const path = root ? joinPath(root, rel) : rel;
+      const shown = path.replace(/\/$/, '') + (e.isDir ? '/' : '');
+      const data = e.isDir ? '' : zipData(e);
+      if (data == null) { ctx.err('error:  invalid compressed data to inflate\n'); status = 2; continue; }
+      if (f.p) { ctx.out(fromBin(data)); continue; }
+      try {
+        if (e.isDir) {
+          if (f.j) continue;
+          if (!ctx.fs.isDir(path)) { ctx.fs.mkdir(path, { parents: true }); say('   creating: ' + shown + '\n'); }
+          continue;
+        }
+        const parent = dirName(path);
+        if (parent !== '.' && !ctx.fs.exists(parent)) ctx.fs.mkdir(parent, { parents: true });
+        let target = path;
+        if (ctx.fs.exists(path)) {
+          if (policy == null) {
+            const ans = await ctx.readLine('replace ' + path + '? [y]es, [n]o, [A]ll, [N]one, [r]ename: ');
+            if (ans == null) { ctx.out('\n(EOF or read error, treating as "[N]one" ...)\n'); policy = 'N'; } else if (ans === 'A') policy = 'A'; else if (ans === 'N') policy = 'N';
+            else if (ans === 'r') target = (await ctx.readLine('new name: ')) || path; else if (ans !== 'y') continue;
+          }
+          if (policy === 'N') continue;
+        }
+        ctx.fs.write(target, fromBin(data), { mode: 0o666 });
+        ctx.fs.chmod(target, e.mode ? e.mode & 0o777 : 0o644 & ~ctx.fs._umask());
+        ctx.fs.utimes(target, e.mtime);
+        say((e.method === 8 ? '  inflating: ' : ' extracting: ') + U.padEnd(shown, 24) + '\n');
+      } catch (er) { if (!isFsErr(er)) throw er; ctx.err('error:  cannot create ' + shown + '\n        ' + er.message + '\n'); status = 1; }
+    }
+    return status;
+  }
+
+  K.cmd.register({
+    name: 'zip', pkg: 'zip', section: 1, summary: 'package and compress (archive) files',
+    synopsis: 'zip [-options] [-b path] [-t mmddyyyy] [-n suffixes] [zipfile list] [-xi list]',
+    man: 'DESCRIPTION\n       zip is a compression and file packaging utility. It stores the named files (and, with -r, whole directories) in zipfile, adding .zip when the name has no suffix, and replaces entries that are already there.\n\n' +
+      'OPTIONS\n       -r   recurse into directories\n       -j   junk the directory names, store only file names\n       -q   quiet operation\n       -d   delete the named entries from the archive\n       -m   move the files into the archive (delete the originals)\n       -0, -1 .. -9  store only, or compress faster .. better\n       -x list   exclude names matching the patterns that follow\n       -i list   include only names matching the patterns that follow\n\n' +
+      'EXAMPLES\n       zip -r site.zip /var/www/html\n              Archive a web root.\n       zip -d site.zip "*.bak"\n              Remove backup files from the archive.',
+    run: zipRun,
+  });
+  K.cmd.register({
+    name: 'unzip', pkg: 'unzip', section: 1, summary: 'list, test and extract compressed files in a ZIP archive',
+    synopsis: 'unzip [-Z] [-opts[modifiers]] file[.zip] [list] [-x xlist] [-d exdir]',
+    man: 'DESCRIPTION\n       unzip lists, tests and extracts files from a ZIP archive. By default every file is extracted into the current directory; existing files ask for confirmation.\n\n' +
+      'OPTIONS\n       -l   list the files (short format)\n       -v   list verbosely with method, sizes and CRC\n       -t   test the archive data\n       -p   extract to standard output, no messages\n       -d dir   extract into dir\n       -o   overwrite without prompting\n       -n   never overwrite\n       -j   junk paths, extract everything flat\n       -q   quiet\n       -x list   do not extract the names that follow\n\n' +
+      'EXAMPLES\n       unzip -l backup.zip\n              Show what the archive contains.\n       unzip -o backup.zip -d /tmp/restore\n              Extract into /tmp/restore, replacing files.',
+    run: unzipRun,
+  });
+
+  /* ============================================================ locate / updatedb */
+
+  const LOCATE_DB = '/var/lib/plocate/plocate.db';
+  const DB_MAGIC = '\0plocate\0kalima-db-1\n';
+  const PRUNE_PATHS = ['/tmp', '/var/spool', '/media', '/var/lib/os-prober', '/var/lib/ceph', '/home/.ecryptfs', '/var/lib/schroot', '/mnt', '/proc', '/sys', '/dev', '/run'];
+  const PLOCATE_VERSION = 'plocate 1.1.23\nCopyright 2020 Steinar H. Gunderson\nLicense GPLv2+: GNU GPL version 2 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n';
+
+  async function updatedbRun(ctx) {
+    const g = K.getopt(ctx.args, { short: 'o:U:vVhl:', long: ['output=', 'database-root=', 'verbose', 'version', 'help', 'require-visibility=', 'prune-bind-mounts=', 'prunefs=', 'prunepaths=', 'prunenames=', 'add-prunepaths='], alias: { output: 'o', 'database-root': 'U', verbose: 'v', version: 'V', help: 'h' } });
+    if (g.err) { ctx.err('updatedb: ' + g.err + "\nTry 'updatedb --help' for more information.\n"); return 1; }
+    if (g.opts.V) { ctx.out(PLOCATE_VERSION.replace('plocate', 'updatedb (plocate)')); return 0; }
+    if (g.opts.h) { ctx.out('Usage: updatedb [OPTION]...\n  -U, --database-root PATH   the subtree to index [/]\n  -o, --output FILE          the database to build [' + LOCATE_DB + ']\n  -v, --verbose              print paths of files as they are found\n  -h, --help                 print this help\n  -V, --version              print version information\n'); return 0; }
+    const out = g.opts.o && g.opts.o !== true ? g.opts.o : LOCATE_DB;
+    if (!ctx.isRoot) { ctx.err("updatedb: can not open a temporary file for `" + out + "'\n"); return 1; }
+    const start = g.opts.U && g.opts.U !== true ? g.opts.U : '/';
+    const paths = [];
+    const walk = (p) => {
+      ctx.checkAbort();
+      if (PRUNE_PATHS.includes(p) || /\/(\.git|\.bzr|\.hg|\.svn)$/.test(p)) return;
+      paths.push(p);
+      if (g.opts.v) ctx.out(p + '\n');
+      let st; try { st = ctx.fs.lstat(p); } catch (e) { if (!isFsErr(e)) throw e; return; }
+      if (!st.isDir) return;
+      let kids = []; try { kids = ctx.fs.readdir(p); } catch (e) { if (!isFsErr(e)) throw e; }
+      for (const k of kids) walk(joinPath(p, k));
+    };
+    walk(start);
+    try {
+      ctx.fs.mkdir(dirName(out), { parents: true });
+    } catch (e) { if (!isFsErr(e) || e.code !== 'EEXIST') throw e; }
+    ctx.fs.write(out, DB_MAGIC + paths.sort().join('\n') + '\n', { mode: 0o640 });
+    ctx.fs.chmod(out, 0o640);
+    return 0;
+  }
+
+  async function locateRun(ctx) {
+    const g = K.getopt(ctx.args, {
+      short: 'bcd:eil:n:0rsSwVhNLP', long: ['basename', 'count', 'database=', 'existing', 'ignore-case', 'limit=', 'null', 'regexp', 'regex', 'statistics', 'wholename', 'version', 'help', 'literal', 'follow', 'nofollow'],
+      alias: { basename: 'b', count: 'c', database: 'd', existing: 'e', 'ignore-case': 'i', limit: 'l', null: '0', regexp: 'r', statistics: 's', wholename: 'w', version: 'V', help: 'h', literal: 'N' },
+    });
+    if (g.err) { ctx.err('locate: ' + g.err + "\nTry 'locate --help' for more information.\n"); return 1; }
+    const o = g.opts;
+    if (o.V) { ctx.out(PLOCATE_VERSION); return 0; }
+    if (o.h) { ctx.out('Usage: locate [OPTION]... PATTERN...\n\n  -b, --basename         search only the file name portion of path names\n  -c, --count            print number of matches instead of the matches\n  -d, --database DBPATH  search for files in DBPATH\n  -e, --existing         print only names of files that currently exist\n  -i, --ignore-case      ignore case distinctions when matching patterns\n  -l, --limit LIMIT      limit output (or counting) to LIMIT entries\n  -0, --null             separate entries with NUL on output\n  -r, --regexp REGEX     search for basic regexp REGEX instead of patterns\n      --regex            patterns are extended regexps\n  -w, --wholename        search the whole path name (default)\n  -V, --version          print version information\n  -h, --help             print this help\n'); return 0; }
+    const dbPath = o.d && o.d !== true ? o.d : LOCATE_DB;
+    const limitArg = o.l !== undefined ? o.l : o.n;
+    const limit = limitArg === undefined ? Infinity : parseInt(limitArg, 10);
+    if (limitArg !== undefined && !(limit >= 0)) { ctx.err('locate: Invalid limit \'' + limitArg + "'\n"); return 1; }
+    let patterns = g.rest;
+    if (!patterns.length) { ctx.err('locate: no pattern to search for specified\n'); return 1; }
+    let db;
+    try { db = ctx.vfs.read(ctx.fs.abs(dbPath)); } catch (e) {
+      if (!isFsErr(e)) throw e;
+      ctx.err("locate: can not open `" + dbPath + "': " + e.message + '\n');
+      return 1;
+    }
+    if (!db.startsWith(DB_MAGIC.slice(0, 9))) { ctx.err('locate: ' + dbPath + ': not a plocate database\n'); return 1; }
+    const all = db.slice(DB_MAGIC.length).split('\n').filter(Boolean);
+    const flags = o.i ? 'i' : '';
+    const matchers = patterns.map((p) => {
+      if (o.r || o.regex) { try { return (s) => new RegExp(p, flags).test(s); } catch (e) { ctx.err('locate: Invalid regular expression\n'); return null; } }
+      if (!o.N && /[*?[]/.test(p)) { const re = U.globToRe(p, flags); return (s) => re.test(s); }
+      const needle = o.i ? p.toLowerCase() : p;
+      return (s) => (o.i ? s.toLowerCase() : s).includes(needle);
+    });
+    if (matchers.includes(null)) return 1;
+    const hits = [];
+    for (const p of all) {
+      const subject = o.b ? baseName(p) : p;
+      if (!matchers.some((m) => m(subject))) continue;
+      if (o.e && !lexists(ctx, p)) continue;
+      hits.push(p);
+      if (hits.length >= limit) break;
+    }
+    if (o.s) { ctx.out(U.padStart(all.length, 9) + ' files\n'); return 0; }
+    if (o.c) { ctx.out(hits.length + '\n'); return hits.length ? 0 : 1; }
+    ctx.out(hits.map((h) => h + (o['0'] ? '\0' : '\n')).join(''));
+    return hits.length ? 0 : 1;
+  }
+
+  K.cmd.register({
+    name: 'updatedb', pkg: 'plocate', path: '/usr/sbin/updatedb', aliases: [], section: 8, summary: 'create or update the database used by locate',
+    synopsis: 'updatedb [-U path] [-o file] [-v]',
+    man: 'DESCRIPTION\n       updatedb walks the filesystem and builds the file-name database that locate searches. It must run as root and is normally started once a day by a systemd timer. Files created after the last run are not found by locate until the next update.\n\n' +
+      'OPTIONS\n       -U, --database-root PATH   index only this subtree\n       -o, --output FILE          write the database to FILE\n       -v, --verbose              print every path as it is added\n\n' +
+      'EXAMPLES\n       sudo updatedb\n              Rebuild the default database.\n       sudo updatedb -U /home -o /tmp/home.db\n              Index only /home.',
+    run: updatedbRun,
+  });
+  K.cmd.register({
+    name: 'locate', aliases: ['plocate'], pkg: 'plocate', path: '/usr/bin/locate', section: 1, summary: 'find files by name, quickly, using a prebuilt database',
+    synopsis: 'locate [OPTION]... PATTERN...',
+    man: 'DESCRIPTION\n       locate searches the database built by updatedb for path names that contain PATTERN. A pattern with * ? or [ is a glob that must match the whole path. The result is only as fresh as the last updatedb run.\n\n' +
+      'OPTIONS\n       -i   ignore case\n       -b   match the base name only\n       -c   print only the number of matches\n       -l N   stop after N matches\n       -e   print only entries that still exist\n       -r   treat PATTERN as a regular expression\n       -0   separate output with NUL\n       -d FILE   use another database\n\n' +
+      'EXAMPLES\n       locate -i passwd\n              Every path with "passwd" in it, any case.\n       locate -b "*.conf" | head\n              Configuration files by name.',
+    run: locateRun,
+  });
+
   K.cmdFs2 = { modeString, shellQuote, crc32, lzPack, lzUnpack, toBin, fromBin, compress, decompress };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
