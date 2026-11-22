@@ -536,7 +536,11 @@
         case 'q': case 'Q': case 'l': case 'L': skipBlanks(); cmd.arg = readNumber(); readEnd(); break;
         case '=': case 'd': case 'D': case 'g': case 'G': case 'h': case 'H': case 'n': case 'N': case 'p': case 'P':
         case 'x': case 'z': case 'F': readEnd(); break;
-        case 'v': readLabel(); readEnd(); break;
+        case 'v': {
+          const version = readLabel().split('.').map(Number);
+          if (version[0] > 4 || (version[0] === 4 && version[1] > 9)) fail('expected newer version of sed');
+          readEnd(); break;
+        }
         default: fail('unknown command: `' + c + '\'');
       }
       cmds.push(cmd);
@@ -646,7 +650,7 @@
   function listLine(s, width) {
     let out = ''; let col = 0;
     const put = (piece) => {
-      if (width > 1 && col + piece.length > width - 1) { out += '\\\n'; col = 0; }
+      if (width > 0 && col + piece.length > width - 1) { out += '\\\n'; col = 0; }
       out += piece; col += piece.length;
     };
     for (const b of U.toBytes(s)) {
@@ -738,7 +742,7 @@
         if (!this.matchAddr(c.a1)) return false;
         if (a2.t === 'line') { if (a2.n <= l) return true; c.end = a2.n; }
         else if (a2.t === 'plus') { if (a2.n === 0) return true; c.end = l + a2.n; }
-        else if (a2.t === 'mult') { if (a2.n <= 0 || l % a2.n === 0) return true; c.end = Math.ceil(l / a2.n) * a2.n; }
+        else if (a2.t === 'mult') { if (a2.n <= 0) return true; c.end = (Math.floor(l / a2.n) + 1) * a2.n; }
         else if (a2.t === 'last' && this.input.isLast()) return true;
         c.active = true;
         return true;
@@ -1243,7 +1247,7 @@
       if (c !== '%') { out += c; continue; }
       if (fmt[i + 1] === '%') { out += '%'; i++; continue; }
       n++;
-      const m = /^%([-+ #0]*)(\*|\d+)?(?:\.(\*|\d*))?([a-zA-Z%]?)/.exec(fmt.slice(i));
+      const m = /^%([-+ #0]*)(\*|\d+)?(?:\.(\*|\d*))?[lhLqjzt]*([a-zA-Z%]?)/.exec(fmt.slice(i));
       const next = () => {
         if (ai >= args.length) throw printfError('not enough arguments passed to ' + who + '("' + fmt + '")', out);
         return args[ai++];
@@ -1252,6 +1256,7 @@
       if (width === '*') { width = toNum(next()); if (width < 0) { flags += '-'; width = -width; } } else width = width ? +width : 0;
       if (prec === '*') prec = Math.max(0, toNum(next())); else if (prec != null) prec = prec === '' ? 0 : +prec;
       const conv = m[4];
+      if (!conv && ai >= args.length) throw printfError('not enough arguments passed to ' + who + '("' + fmt + '")', out);
       if (!conv || !/[diouxXeEfFgGcs]/.test(conv)) throw printfError('improper conversion(number ' + n + ') in ' + who + '("' + fmt + '")', out);
       const r = convert(conv, { flags, prec }, next());
       let text = r.text;
@@ -1302,7 +1307,7 @@
     constructor(src) { this.src = src; this.i = 0; this.line = 1; }
     save() { return { i: this.i, line: this.line }; }
     restore(s) { this.i = s.i; this.line = s.line; }
-    error(msg) { throw new AwkSyntax(msg, this.line); }
+    error(msg, bare) { const e = new AwkSyntax(msg, this.line); e.bare = bare; throw e; }
 
     /** Read the regular expression literal whose opening slash is at `pos`; leaves the lexer after it. */
     regexAt(pos) {
@@ -1333,7 +1338,7 @@
         else break;
       }
       const pos = this.i; const c = src[pos];
-      if (c === undefined) return { t: 'eof', pos, line: this.line, text: 'end of file' };
+      if (c === undefined) return { t: 'eof', pos, line: this.line, text: 'end of line' };
       const tok = (t, v, len) => { this.i = pos + len; return { t, v, pos, line: this.line, text: src.slice(pos, pos + len) }; };
       if (c === '\n') { this.i++; const t = { t: 'nl', pos, line: this.line, text: 'end of line' }; this.line++; return t; }
       let m;
@@ -1351,7 +1356,7 @@
       }
       for (const p of PUNCT) if (src.startsWith(p, pos)) return tok('p', p, 2);
       if ('{}()[];,+-*/%^!<>|?:~$='.includes(c)) return tok('p', c, 1);
-      return this.error("unexpected character '" + c + "'");
+      return this.error("unexpected character '" + c + "'", true);
     }
 
     string(pos) {
@@ -1390,7 +1395,7 @@
       this.cur = this.lex.next();
       this.funcs = new Map(); this.locals = null; this.fn = null;
       this.begin = []; this.end = []; this.rules = []; this.calls = [];
-      this.arrays = new Set(); this.scalars = new Set();
+      this.kinds = new Map();
       this.noGt = false; this.where = 'rule';
     }
 
@@ -1406,7 +1411,7 @@
     syntaxError() { return this.fail('syntax error at or near ' + this.cur.text); }
     expect(v) {
       if (!this.is(v)) {
-        if (this.cur.t === 'eof' || this.cur.t === 'nl') this.fail('missing ' + v + ' near ' + this.cur.text);
+        if (v === ')') this.fail('missing ' + v + ' near ' + this.cur.text);
         this.syntaxError();
       }
       return this.advance();
@@ -1446,9 +1451,6 @@
           });
         }
       }
-      for (const name of this.arrays) {
-        if (this.scalars.has(name)) throw new AwkSyntax('illegal reference to array ' + name, 1);
-      }
     }
 
     parseItem() {
@@ -1478,12 +1480,14 @@
       this.advance();
       if (this.cur.t !== 'name' && this.cur.t !== 'funcname') this.syntaxError();
       const name = this.advance().v;
-      if (this.funcs.has(name)) this.fail('function ' + name + ' redefined');
+      if (this.funcs.has(name)) this.fail('redefinition of ' + name);
       this.expect('(');
       const params = [];
       while (!this.is(')')) {
         if (this.cur.t !== 'name') this.syntaxError();
-        params.push(this.advance().v);
+        const pname = this.advance().v;
+        if (params.includes(pname)) this.fail(pname + ' is duplicated in argument list');
+        params.push(pname);
         if (this.is(',')) { this.advance(); this.skipNl(); } else if (!this.is(')')) this.syntaxError();
       }
       this.advance(); this.skipNl();
@@ -1500,7 +1504,7 @@
       const body = [];
       this.skipTerminators();
       while (!this.is('}')) {
-        if (this.cur.t === 'eof') this.fail('missing } near end of file');
+        if (this.cur.t === 'eof') throw new AwkSyntax('missing } near end of file', this.cur.line + 1);
         body.push(this.parseStmt());
         this.skipTerminators();
       }
@@ -1631,13 +1635,11 @@
       let redir = null;
       if (this.is('>') || this.is('>>') || this.is('|')) {
         const op = this.advance().v;
-        this.noGt = true;
-        let target;
-        try { target = this.parseTernary(); } finally { this.noGt = false; }
+        const target = this.parseTernary();
         redir = { op, target };
       }
       this.endStmt();
-      if (kind === 'printf' && !args.length) this.syntaxError();
+      if (kind === 'printf' && !args.length) this.fail('no arguments in call to printf');
       return { type: kind, args, redir };
     }
 
@@ -1662,8 +1664,14 @@
     /** Mark a variable node as used as an array. */
     arrayRef(node) {
       if (node.type === 'local') this.fn.arrays.add(node.idx);
-      else this.arrays.add(node.name);
+      else this.useAs(node.name, 'array');
       return node;
+    }
+    /** A global name is either a scalar or an array; the clash is named after the kind it had first. */
+    useAs(name, kind) {
+      const first = this.kinds.get(name);
+      if (first && first !== kind) this.fail('illegal reference to ' + (first === 'array' ? 'array ' : 'variable ') + name);
+      this.kinds.set(name, kind);
     }
 
     parseSubscripts() {
@@ -1682,7 +1690,7 @@
       if (this.cur.t === 'p' && ASSIGN_OPS.has(this.cur.v) && isLvalue(left)) {
         const op = this.advance().v;
         this.skipNl();
-        if (left.type === 'var' && !left.special) this.scalars.add(left.name);
+        if (left.type === 'var' && !left.special) this.useAs(left.name, 'scalar');
         return { type: 'assign', op, lhs: left, rhs: this.parseExpr() };
       }
       return left;
@@ -1720,7 +1728,9 @@
       let left = this.parseComparison();
       while (this.is('~') || this.is('!~')) {
         const neg = this.advance().v === '!~';
-        left = { type: 'match', neg, l: left, r: this.parseComparison() };
+        const r = this.parseComparison();
+        if (r.type === 'str') r.pat = this.compileRe(r.v);
+        left = { type: 'match', neg, l: left, r };
       }
       return left;
     }
@@ -1737,7 +1747,8 @@
         if (c.v === '>=' && this.noGt && c.t === 'p') this.fail('syntax error at or near =');   // mawk reads `>` then `=` here
         if (c.t === 'p' && ['<', '<=', '==', '!=', '>=', '>'].includes(c.v) && !(c.v === '>' && this.noGt)) {
           this.advance();
-          return { type: 'cmp', op: c.v, l: left, r: this.parseConcat() };
+          left = { type: 'cmp', op: c.v, l: left, r: this.parseConcat() };
+          continue;
         }
         return left;
       }
@@ -1786,7 +1797,7 @@
       const e = this.parsePrimary();
       if (isLvalue(e) && (this.is('++') || this.is('--'))) {
         const op = this.advance().v;
-        if (e.type === 'var' && !e.special) this.scalars.add(e.name);
+        if (e.type === 'var' && !e.special) this.useAs(e.name, 'scalar');
         return { type: 'postinc', delta: op === '++' ? 1 : -1, e };
       }
       return e;
@@ -1837,13 +1848,14 @@
           else if (this.is('+')) { this.advance(); e = { type: 'plus', e: this.parsePrimary() }; }
           else if (this.is('!')) { this.advance(); e = { type: 'not', e: this.parsePrimary() }; }
           else e = this.parsePrimary();
+          if (e.type === 'num' && !Number.isInteger(e.v)) this.fail('$' + e.v + ' is invalid field index');
           return { type: 'field', e };
         }
         case '++': case '--': {
           this.advance();
           const target = this.parsePrimary();
           if (!isLvalue(target)) this.syntaxError();
-          if (target.type === 'var' && !target.special) this.scalars.add(target.name);
+          if (target.type === 'var' && !target.special) this.useAs(target.name, 'scalar');
           return { type: 'preinc', delta: c.v === '++' ? 1 : -1, e: target };
         }
         case '(': {
@@ -1901,7 +1913,7 @@
       else args = this.parseArgs();
       const [min, max] = AWK_BUILTINS[name];
       if (args.length < min || args.length > max) {
-        if (name === 'length') this.syntaxError();
+        if (name === 'length' || name === 'split') { if (args.length > max) this.cur = { text: ',', line: this.cur.line }; else this.cur = { text: ')', line: this.cur.line }; this.syntaxError(); }
         this.fail('wrong number of arguments in call to ' + name);
       }
       if (name === 'split') {
@@ -1910,6 +1922,8 @@
       }
       if ((name === 'sub' || name === 'gsub') && args[2] && !isLvalue(args[2]) && args[2].type !== 'group') this.fail('syntax error at or near )');
       if (name === 'length' && args[0] && (args[0].type === 'var' || args[0].type === 'local')) args[0].maybeArray = true;
+      const reArg = name === 'match' ? 1 : name === 'sub' || name === 'gsub' ? 0 : name === 'split' ? 2 : -1;
+      if (reArg >= 0 && args[reArg] && args[reArg].type === 'str' && (name !== 'split' || args[reArg].v.length > 1)) args[reArg].pat = this.compileRe(args[reArg].v);
       return { type: 'builtin', name, args };
     }
   }
@@ -2051,7 +2065,7 @@
       }
       return p;
     }
-    patternOf(node) { return node.type === 'regex' ? node.pat : this.regex(this.str(this.ev(node))); }
+    patternOf(node) { return node.pat || this.regex(this.str(this.ev(node))); }
 
     /* ---- variables */
     getVar(n) {
@@ -2211,7 +2225,7 @@
       n.args.forEach((a, i) => {
         frame[i] = (a.type === 'var' || a.type === 'local') && fn.arrays.has(i) ? this.arrayOf(a) : this.ev(a);
       });
-      if (++this.depth > 400) { this.depth = 0; throw new AwkRuntime('function call nesting too deep'); }
+      if (++this.depth > 600) { this.depth = 0; throw new AwkFatal('program limit exceeded: eval stack size=1024'); }
       const saved = this.frame; this.frame = frame;
       try {
         const r = this.runSync(this.exec(fn.body));
@@ -2675,7 +2689,7 @@
     try { prog = new AwkParser(toBin(source)).parseProgram(); }
     catch (e) {
       if (!(e instanceof AwkSyntax)) throw e;
-      ctx.err(name + ': line ' + e.line + ': ' + e.message.replace('{NAME}', name) + '\n');
+      ctx.err(name + ': ' + (e.bare ? '' : 'line ') + e.line + ': ' + e.message.replace('{NAME}', name) + '\n');
       return 2;
     }
 
@@ -2697,7 +2711,11 @@
         ctx.err(name + ': run time error: ' + e.message + '\n\tFILENAME="' + rt.str(rt.g.get('FILENAME')) + '" FNR=' + rt.fnr + ' NR=' + rt.nr + '\n');
         return 2;
       }
-      if (e instanceof AwkFatal) { sink.flush(); ctx.err(name + ': ' + e.message + '\n'); return 2; }
+      if (e instanceof AwkFatal || e instanceof RangeError) {   // a RangeError is runaway recursion in the awk program
+        sink.flush();
+        ctx.err(name + ': ' + (e instanceof RangeError ? 'program limit exceeded: eval stack size=1024' : e.message) + '\n');
+        return 2;
+      }
       throw e;
     } finally {
       rt.flushFiles();
