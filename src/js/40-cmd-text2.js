@@ -530,6 +530,7 @@
         case 'a': case 'i': case 'c': cmd.text = readText(); break;
         case 'b': case 't': case 'T': cmd.label = readLabel(); readEnd(); break;
         case 'r': case 'R': case 'w': case 'W': cmd.file = readFilename(); break;
+        case 'e': skipBlanks(); cmd.file = text.slice(i, (text.indexOf('\n', i) + 1 || n + 1) - 1); i += cmd.file.length; break;
         case 's': readSubstitute(cmd); break;
         case 'y': readTransliterate(cmd); readEnd(); break;
         case 'q': case 'Q': case 'l': case 'L': skipBlanks(); cmd.arg = readNumber(); readEnd(); break;
@@ -678,11 +679,11 @@
 
   class SedMachine {
     constructor(ctx, prog, o, input, out, files) {
-      Object.assign(this, { ctx, cmds: prog.cmds, o, input, out, files, ps: '', hs: '', replaced: false, lastRe: null, appends: [], quit: null, steps: 0, wfiles: new Map(), rfiles: new Map() });
+      Object.assign(this, { ctx, cmds: prog.cmds, o, input, out, files, ps: '', hs: '', psChomped: true, hsChomped: true, replaced: false, lastRe: null, appends: [], quit: null, steps: 0, wfiles: new Map(), rfiles: new Map() });
     }
     get sep() { return this.o.sep; }
     emit(s) { this.out.raw(s); }
-    printPs() { this.out.line(this.ps, this.input.chomped, this.sep); }
+    printPs() { this.out.line(this.ps, this.psChomped, this.sep); }
 
     flushAppends() {
       for (const a of this.appends) {
@@ -770,12 +771,21 @@
       return true;
     }
 
+    /** Output of a shell command (the e command and the s///e flag). */
+    async shell(cmd) {
+      this.o.flush();
+      const r = await this.ctx.run(['sh', '-c', cmd]);
+      if (r.err) this.ctx.err(r.err);
+      return r.out;
+    }
+
     /** Read the next line into the pattern space (n and N). Returns false at end of input. */
     nextLine(append) {
       if (this.input.isLast()) return false;
       this.flushAppends();
       const line = this.input.read();
       this.ps = append ? this.ps + '\n' + line : line;
+      this.psChomped = this.input.chomped;
       return true;
     }
 
@@ -787,7 +797,7 @@
         if (!restart) {
           const line = this.input.read();
           if (line == null) break;
-          this.ps = line; this.replaced = false;
+          this.ps = line; this.psChomped = this.input.chomped; this.replaced = false;
         }
         restart = false;
         let autoprint = !quiet; let pc = 0; let stop = false;
@@ -810,13 +820,21 @@
               if (nl >= 0) { this.ps = this.ps.slice(nl + 1); restart = true; }
               break;
             }
-            case 'e': break;
+            case 'e': {
+              const r = await this.shell(c.file || this.ps);
+              if (c.file) this.emit(r); else this.ps = r.replace(/\n$/, '');
+              break;
+            }
             case 'F': this.emit((this.input.fileName === '-' ? '-' : this.input.fileName) + '\n'); break;
-            case 'g': this.ps = this.hs; break;
-            case 'G': this.ps += '\n' + this.hs; break;
-            case 'h': this.hs = this.ps; break;
-            case 'H': this.hs += '\n' + this.ps; break;
-            case 'x': { const t = this.ps; this.ps = this.hs; this.hs = t; break; }
+            case 'g': this.ps = this.hs; this.psChomped = this.hsChomped; break;
+            case 'G': this.ps += '\n' + this.hs; this.psChomped = this.psChomped || this.hsChomped; break;
+            case 'h': this.hs = this.ps; this.hsChomped = this.psChomped; break;
+            case 'H': this.hs += '\n' + this.ps; this.hsChomped = this.hsChomped || this.psChomped; break;
+            case 'x': {
+              const t = this.ps; this.ps = this.hs; this.hs = t;
+              const k = this.psChomped; this.psChomped = this.hsChomped; this.hsChomped = k;
+              break;
+            }
             case 'l': this.emit(listLine(this.ps, c.arg != null ? c.arg : this.o.lineLen)); break;
             case 'n':
               if (this.input.isLast()) { stop = true; pc = cmds.length; break; }
@@ -846,6 +864,7 @@
             case 's':
               if (this.substitute(c)) {
                 this.replaced = true;
+                if (c.e) this.ps = (await this.shell(this.ps)).replace(/\n$/, '');
                 if (c.p) this.printPs();
                 if (c.wfile) this.wfile(c.wfile).line(this.ps, true, this.sep);
               }
@@ -947,7 +966,7 @@
       } catch (e) {
         if (!isFsError(e)) throw e;
         ctx.err('sed: couldn\'t open file ' + ch.file + ': ' + e.message + '\n');
-        return 1;
+        return 4;
       }
     }
     if (/^#n(\n|$)/.test(o.chunks[0].text)) o.quiet = true;
@@ -1042,10 +1061,10 @@
   const toBin = (s) => {
     if (!/[^\x00-\x7f]/.test(s)) return s;
     let r = '';
-    for (const b of U.toBytes(s)) r += String.fromCharCode(b);
+    for (const b of new TextEncoder().encode(s)) r += String.fromCharCode(b);
     return r;
   };
-  const fromBin = (s) => (/[^\x00-\x7f]/.test(s) ? U.fromBytes(Array.from(s, (c) => c.charCodeAt(0))) : s);
+  const fromBin = (s) => (/[^\x00-\x7f]/.test(s) ? new TextDecoder().decode(Uint8Array.from(s, (c) => c.charCodeAt(0))) : s);
 
   class AwkSyntax extends Error {
     constructor(msg, line) { super(msg); this.line = line; }
@@ -1318,7 +1337,7 @@
       const tok = (t, v, len) => { this.i = pos + len; return { t, v, pos, line: this.line, text: src.slice(pos, pos + len) }; };
       if (c === '\n') { this.i++; const t = { t: 'nl', pos, line: this.line, text: 'end of line' }; this.line++; return t; }
       let m;
-      if ((m = /^(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/.exec(src.slice(pos, pos + 64)))) {
+      if ((m = /^(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(src.slice(pos, pos + 64)))) {
         const v = strToNum(m[0]);
         if (!isFinite(v)) this.error(m[0] + ' : decimal overflow');
         return tok('num', v, m[0].length);
@@ -1614,7 +1633,7 @@
         const op = this.advance().v;
         this.noGt = true;
         let target;
-        try { target = this.parseConcat(); } finally { this.noGt = false; }
+        try { target = this.parseTernary(); } finally { this.noGt = false; }
         redir = { op, target };
       }
       this.endStmt();
@@ -1715,6 +1734,7 @@
           continue;
         }
         const c = this.cur;
+        if (c.v === '>=' && this.noGt && c.t === 'p') this.fail('syntax error at or near =');   // mawk reads `>` then `=` here
         if (c.t === 'p' && ['<', '<=', '==', '!=', '>=', '>'].includes(c.v) && !(c.v === '>' && this.noGt)) {
           this.advance();
           return { type: 'cmp', op: c.v, l: left, r: this.parseConcat() };
@@ -2216,10 +2236,9 @@
       return this.stdin;
     }
     getline(n) {
-      let rec; let counts = false;
-      if (n.kind === 'simple') {
-        rec = this.main.next(); counts = true;
-      } else {
+      let rec;
+      if (n.kind === 'simple') rec = this.main.next();
+      else {
         const name = this.str(this.ev(n.src));
         const key = (n.kind === 'cmd' ? '|' : '<') + name;
         let r = this.readers.get(key);
@@ -2233,10 +2252,9 @@
           this.readers.set(key, r);
         }
         rec = r.read(this.str(this.g.get('RS')), this);
-        counts = n.kind === 'cmd';
       }
       if (rec === null) return 0;
-      if (counts) { this.nr++; if (n.kind === 'simple') this.fnr++; }
+      if (n.kind === 'simple') { this.nr++; this.fnr++; }
       if (n.lhs) this.store(n.lhs, inputValue(rec)); else this.setRecord(rec);
       return 1;
     }
