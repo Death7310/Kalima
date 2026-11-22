@@ -1905,3 +1905,867 @@ EXAMPLES
     },
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
+
+/* ====================================================================== bc */
+;(function (root) {
+  'use strict';
+  const K = root.K;
+
+  /* A bc number is { v: BigInt, s: digits after the point }: value = v / 10^s. */
+  const pow10 = (n) => 10n ** BigInt(n);
+  const num = (v, s) => ({ v, s: s || 0 });
+  const ZERO = num(0n);
+  const ONE = num(1n);
+  const isZero = (a) => a.v === 0n;
+
+  /** Re-express with exactly `s` fractional digits (truncating toward zero). */
+  function rescale(a, s) {
+    if (s === a.s) return a;
+    return s > a.s ? num(a.v * pow10(s - a.s), s) : num(a.v / pow10(a.s - s), s);
+  }
+  const align = (a, b) => { const s = Math.max(a.s, b.s); return [rescale(a, s), rescale(b, s), s]; };
+  const add = (a, b) => { const [x, y, s] = align(a, b); return num(x.v + y.v, s); };
+  const sub = (a, b) => { const [x, y, s] = align(a, b); return num(x.v - y.v, s); };
+  const neg = (a) => num(-a.v, a.s);
+  const cmpNum = (a, b) => { const [x, y] = align(a, b); return x.v < y.v ? -1 : x.v > y.v ? 1 : 0; };
+  function mul(a, b, scale) {
+    const s = Math.min(a.s + b.s, Math.max(scale, a.s, b.s));
+    return rescale(num(a.v * b.v, a.s + b.s), s);
+  }
+  /** Division with `scale` fractional digits; the caller checks for zero. */
+  function div(a, b, scale) {
+    return num((a.v * pow10(scale + b.s)) / (b.v * pow10(a.s)), scale);
+  }
+  function mod(a, b, scale) {
+    const q = div(a, b, scale);
+    const prod = num(q.v * b.v, q.s + b.s);
+    const r = sub(a, prod);
+    return rescale(r, Math.max(a.s, scale + b.s));
+  }
+  function power(a, b, scale) {
+    let e = b.v / pow10(b.s);
+    const neg = e < 0n; if (neg) e = -e;
+    if (e > 100000n) throw new BcError('exponent too large in raise');
+    const n = Number(e);
+    let p = num(a.v ** e, a.s * n);
+    if (neg) return div(ONE, p, scale);
+    return rescale(p, Math.min(a.s * n, Math.max(scale, a.s)));
+  }
+  /** Integer square root by Newton iteration from an upper bound. */
+  function isqrt(n) {
+    if (n < 2n) return n;
+    let x = 1n << BigInt((n.toString(2).length >> 1) + 1);
+    for (;;) { const y = (x + n / x) >> 1n; if (y >= x) return x; x = y; }
+  }
+  function sqrtNum(a, scale) {
+    if (cmpNum(a, ONE) === 0) return ONE;
+    const rs = Math.max(scale, a.s);
+    // sqrt(v / 10^s) at rs digits = isqrt(v * 10^(2*rs - s)) / 10^rs
+    return num(isqrt(a.v * pow10(2 * rs - a.s)), rs);
+  }
+  const digitsOf = (a) => {
+    let n = (a.v < 0n ? -a.v : a.v).toString().length;
+    if (n < a.s) n = a.s;
+    return a.v === 0n ? a.s || 1 : n;
+  };
+
+  class BcError extends Error {}
+  class Flow { constructor(kind, value) { this.kind = kind; this.value = value; } }
+
+  /* ----------------------------------------------------- math library (-l) */
+  /** Fixed point helpers at P fractional decimal digits. */
+  function fixedLib(P) {
+    const one = pow10(P);
+    const m = (a, b) => (a * b) / one;
+    const atanInv = (n) => { // atan(1/n)
+      const nn = BigInt(n); const n2 = nn * nn;
+      let term = one / nn; let sum = term; let k = 1n; let sign = -1n;
+      while (term !== 0n) { term /= n2; k += 2n; sum += (sign * term) / k; sign = -sign; }
+      return sum;
+    };
+    const pi = () => 16n * atanInv(5) - 4n * atanInv(239);
+    const atanSmall = (x) => {
+      const x2 = m(x, x); let term = x; let sum = x; let k = 1n; let sign = -1n;
+      while (term !== 0n) { term = m(term, x2); k += 2n; sum += (sign * term) / k; sign = -sign; }
+      return sum;
+    };
+    const sqrtFx = (x) => isqrt(x * one);
+    const atan = (x) => {
+      if (x < 0n) return -atan(-x);
+      if (x > one) return pi() / 2n - atan((one * one) / x);
+      let halvings = 0;
+      while (x > one / 5n) { x = (x * one) / (one + sqrtFx(one + m(x, x))); halvings++; }
+      return atanSmall(x) << BigInt(halvings);
+    };
+    const sincos = (x, wantSin) => {
+      const twoPi = 2n * pi();
+      x %= twoPi;
+      const x2 = m(x, x);
+      let term = wantSin ? x : one; let sum = term; let k = wantSin ? 1n : 0n;
+      while (term !== 0n) { term = -m(term, x2) / ((k + 1n) * (k + 2n)); k += 2n; sum += term; }
+      return sum;
+    };
+    const exp = (x) => {
+      let halvings = 0;
+      while (x > one || x < -one) { x /= 2n; halvings++; }
+      let term = one; let sum = one; let k = 1n;
+      while (term !== 0n) { term = m(term, x) / k; k++; sum += term; }
+      for (let i = 0; i < halvings; i++) sum = m(sum, sum);
+      return sum;
+    };
+    const atanh = (z) => {
+      const z2 = m(z, z); let term = z; let sum = z; let k = 1n;
+      while (term !== 0n) { term = m(term, z2); k += 2n; sum += term / k; }
+      return sum;
+    };
+    const ln = (x) => {
+      let k = 0n;
+      while (x > 2n * one) { x /= 2n; k++; }
+      while (x < one / 2n) { x *= 2n; k--; }
+      const z = ((x - one) * one) / (x + one);
+      return 2n * atanh(z) + k * 2n * atanh(one / 3n);
+    };
+    return { one, atan, sincos, exp, ln };
+  }
+  /** Evaluate fn(fixed, lib) with enough guard digits and truncate to `scale` digits. */
+  function mathFn(x, scale, kind) {
+    const intDigits = Math.max(0, digitsOf(x) - x.s);
+    const P = scale + 30 + (kind === 'e' ? Math.ceil(Math.abs(Number(x.v) / 10 ** x.s) * 0.4343) + 10 : intDigits);
+    const lib = fixedLib(P);
+    const fx = rescale(x, P).v;
+    let r;
+    if (kind === 's') r = lib.sincos(fx, true);
+    else if (kind === 'c') r = lib.sincos(fx, false);
+    else if (kind === 'a') r = lib.atan(fx);
+    else if (kind === 'e') r = lib.exp(fx);
+    else r = lib.ln(fx);
+    return rescale(num(r, P), scale);
+  }
+
+  /* ------------------------------------------------------------- lexer */
+  const KEYWORDS = new Set(['auto', 'break', 'continue', 'define', 'else', 'for', 'halt', 'if', 'length', 'print', 'quit', 'return', 'scale', 'sqrt', 'while', 'ibase', 'obase', 'last', 'read', 'void', 'limits', 'warranty']);
+  class SyntaxErr extends Error { constructor(line, eof) { super('syntax'); this.line = line; this.eof = !!eof; } }
+
+  function lex(src, line0) {
+    const toks = []; const illegal = []; let i = 0; let line = line0;
+    const push = (t, v) => toks.push({ t, v, line, pc: 0 });
+    while (i < src.length) {
+      const c = src[i];
+      if (c === '\n') { line++; push('nl'); i++; continue; }
+      if (c === ' ' || c === '\t' || c === '\r') { i++; continue; }
+      if (c === '\\' && src[i + 1] === '\n') { i += 2; line++; continue; }
+      if (c === '#') { while (i < src.length && src[i] !== '\n') i++; continue; }
+      if (c === '/' && src[i + 1] === '*') {
+        const e = src.indexOf('*/', i + 2);
+        if (e < 0) return { toks, illegal, unterminated: 'comment' };
+        for (const ch of src.slice(i, e)) if (ch === '\n') line++;
+        i = e + 2; continue;
+      }
+      if (c === '"') {
+        const e = src.indexOf('"', i + 1);
+        if (e < 0) return { toks, illegal: [{ ch: '"', line }], unterminated: 'string' };
+        const text = src.slice(i + 1, e);
+        for (const ch of text) if (ch === '\n') line++;
+        push('str', text); i = e + 1; continue;
+      }
+      if (/[0-9A-Z.]/.test(c)) { let j = i; while (j < src.length && /[0-9A-Z.]/.test(src[j])) j++; push('num', src.slice(i, j)); i = j; continue; }
+      if (/[a-z]/.test(c)) {
+        let j = i; while (j < src.length && /[a-z0-9_]/.test(src[j])) j++;
+        const w = src.slice(i, j); push(KEYWORDS.has(w) ? 'kw' : 'name', w); i = j; continue;
+      }
+      const two = src.slice(i, i + 2);
+      if (['==', '<=', '>=', '!=', '++', '--', '&&', '||', '+=', '-=', '*=', '/=', '%=', '^='].includes(two)) { push('op', two); i += 2; continue; }
+      if ('+-*/%^<>=!(){}[],;&'.includes(c)) { push('op', c); i++; continue; }
+      illegal.push({ ch: c, line }); i++;
+    }
+    return { toks, line, illegal };
+  }
+
+  /* ------------------------------------------------------------ parser */
+  /**
+   * Builds an AST. Every node that raises a runtime error records `pc`, the
+   * position bc's bytecode would have reached, which appears in its messages.
+   */
+  class Parser {
+    constructor(toks, pcStart) { this.toks = toks; this.i = 0; this.pc = pcStart || 0; }
+    peek() { return this.toks[this.i]; }
+    line() {
+      const t = this.peek();
+      if (t) return t.line;
+      const last = this.toks[this.toks.length - 1];
+      return last ? last.line - (last.t === 'nl' ? 1 : 0) : 1;
+    }
+    is(t, v) { const k = this.peek(); return !!k && k.t === t && (v === undefined || k.v === v); }
+    op(v) { return this.is('op', v); }
+    kw(v) { return this.is('kw', v); }
+    err() { throw new SyntaxErr(this.line(), this.i >= this.toks.length); }
+    eatOp(v) { if (!this.op(v)) this.err(); this.i++; }
+    skipNl() { while (this.is('nl') || this.op(';')) this.i++; }
+    skipNlOnly() { while (this.is('nl')) this.i++; }
+
+    statements() {
+      const list = [];
+      this.skipNl();
+      while (this.i < this.toks.length) { list.push(this.statement()); this.skipNl(); }
+      return list;
+    }
+    /** One statement terminated by ; or newline (or followed by }). */
+    statement() {
+      const t = this.peek();
+      if (!t) this.err();
+      if (t.t === 'op' && t.v === '{') {
+        this.i++; const body = [];
+        this.skipNl();
+        while (!this.op('}')) { if (this.i >= this.toks.length) this.err(); body.push(this.statement()); this.skipNl(); }
+        this.i++;
+        return { t: 'block', body };
+      }
+      if (t.t === 'kw') {
+        switch (t.v) {
+          case 'if': return this.ifStmt();
+          case 'while': {
+            this.i++; this.eatOp('('); const cond = this.expr(); this.eatOp(')'); this.pc += 3;
+            this.skipNlOnly(); return { t: 'while', cond, body: this.bodyStmt() };
+          }
+          case 'for': return this.forStmt();
+          case 'break': case 'continue': this.i++; this.pc += 3; this.end(); return { t: t.v };
+          case 'halt': this.i++; this.end(); return { t: 'halt' };
+          case 'quit': this.i++; this.end(); return { t: 'quit' };
+          case 'return': {
+            this.i++;
+            let e = null;
+            if (this.op('(')) { this.i++; if (this.op(')')) this.i++; else { e = this.expr(); this.eatOp(')'); } } else if (!this.is('nl') && !this.op(';') && !this.op('}') && this.i < this.toks.length) e = this.expr();
+            this.pc += e ? 1 : 2; this.end();
+            return { t: 'return', e };
+          }
+          case 'print': {
+            this.i++; const items = [];
+            for (;;) {
+              if (this.is('str')) { const s = this.toks[this.i++]; this.pc += 2; items.push({ str: s.v }); } else items.push({ e: this.expr() });
+              if (this.op(',')) { this.i++; continue; }
+              break;
+            }
+            this.end(); return { t: 'print', items };
+          }
+          case 'define': return this.define();
+          case 'limits': this.i++; this.end(); return { t: 'limits' };
+          case 'warranty': this.i++; this.end(); return { t: 'warranty' };
+          default: break;
+        }
+      }
+      if (t.t === 'str') { this.i++; this.pc += 2; this.end(); return { t: 'string', text: t.v }; }
+      const e = this.expr();
+      this.end();
+      return { t: 'expr', e };
+    }
+    end() {
+      if (this.i >= this.toks.length || this.is('nl') || this.op(';') || this.op('}') || this.kw('else')) return;
+      this.err();
+    }
+    bodyStmt() { this.skipNlOnly(); return this.statement(); }
+    ifStmt() {
+      this.i++; this.eatOp('('); const cond = this.expr(); this.eatOp(')'); this.pc += 3;
+      this.skipNlOnly();
+      const then = this.statement();
+      let save = this.i;
+      this.skipNl();
+      let other = null;
+      if (this.kw('else')) { this.i++; this.skipNlOnly(); other = this.statement(); } else this.i = save;
+      return { t: 'if', cond, then, other };
+    }
+    forStmt() {
+      this.i++; this.eatOp('(');
+      const init = this.op(';') ? null : this.expr(); this.eatOp(';');
+      const cond = this.op(';') ? null : this.expr(); this.eatOp(';');
+      const step = this.op(')') ? null : this.expr(); this.eatOp(')');
+      this.pc += 6;
+      this.skipNlOnly();
+      return { t: 'for', init, cond, step, body: this.bodyStmt() };
+    }
+    define() {
+      this.i++;
+      let isVoid = false;
+      if (this.kw('void')) { this.i++; isVoid = true; }
+      if (!this.is('name')) this.err();
+      const name = this.toks[this.i++].v;
+      this.eatOp('(');
+      const params = [];
+      while (!this.op(')')) {
+        if (!this.is('name')) this.err();
+        const p = { name: this.toks[this.i++].v, array: false };
+        if (this.op('[')) { this.i++; this.eatOp(']'); p.array = true; }
+        params.push(p);
+        if (this.op(',')) this.i++; else if (!this.op(')')) this.err();
+      }
+      this.i++;
+      this.skipNlOnly();
+      this.eatOp('{');
+      const outer = this.pc; this.pc = 0;
+      this.skipNl();
+      const autos = [];
+      if (this.kw('auto')) {
+        this.i++;
+        for (;;) {
+          if (!this.is('name')) this.err();
+          const n = this.toks[this.i++].v; let array = false;
+          if (this.op('[')) { this.i++; this.eatOp(']'); array = true; }
+          autos.push({ name: n, array });
+          if (this.op(',')) { this.i++; continue; }
+          break;
+        }
+        this.end(); this.skipNl();
+      }
+      const body = [];
+      while (!this.op('}')) { if (this.i >= this.toks.length) this.err(); body.push(this.statement()); this.skipNl(); }
+      this.i++;
+      this.pc = outer;
+      return { t: 'define', name, params, autos, body, isVoid };
+    }
+
+    /* expressions, lowest precedence first */
+    expr() { return this.orExpr(); }
+    bin(op, l, r) { this.pc += 1; return { t: 'bin', op, l, r, pc: this.pc }; }
+    orExpr() {
+      let l = this.andExpr();
+      while (this.op('||')) { this.i++; l = this.bin('||', l, this.andExpr()); }
+      return l;
+    }
+    andExpr() {
+      let l = this.notExpr();
+      while (this.op('&&')) { this.i++; l = this.bin('&&', l, this.notExpr()); }
+      return l;
+    }
+    notExpr() {
+      if (this.op('!')) { this.i++; const e = this.notExpr(); this.pc += 1; return { t: 'not', e }; }
+      return this.relExpr();
+    }
+    relExpr() {
+      let l = this.addExpr();
+      for (;;) {
+        const t = this.peek();
+        if (t && t.t === 'op' && ['==', '<=', '>=', '!=', '<', '>'].includes(t.v)) { this.i++; l = this.bin(t.v, l, this.addExpr()); } else return l;
+      }
+    }
+    addExpr() {
+      let l = this.mulExpr();
+      for (;;) {
+        const t = this.peek();
+        if (t && t.t === 'op' && (t.v === '+' || t.v === '-')) { this.i++; l = this.bin(t.v, l, this.mulExpr()); } else return l;
+      }
+    }
+    mulExpr() {
+      let l = this.powExpr();
+      for (;;) {
+        const t = this.peek();
+        if (t && t.t === 'op' && (t.v === '*' || t.v === '/' || t.v === '%')) { this.i++; l = this.bin(t.v, l, this.powExpr()); } else return l;
+      }
+    }
+    powExpr() {
+      const l = this.unary();
+      if (this.op('^')) { this.i++; return this.bin('^', l, this.powExpr()); }
+      return l;
+    }
+    unary() {
+      if (this.op('-')) { this.i++; const e = this.unary(); this.pc += 1; return { t: 'neg', e }; }
+      return this.postfix();
+    }
+    postfix() {
+      const t = this.peek();
+      if (!t) this.err();
+      if (t.t === 'op' && (t.v === '++' || t.v === '--')) {
+        this.i++; const target = this.lvalue(); this.pc += 2;
+        return { t: 'incr', target, op: t.v, prefix: true };
+      }
+      const e = this.primary();
+      if (e.lv) {
+        const n = this.peek();
+        if (n && n.t === 'op') {
+          if (n.v === '++' || n.v === '--') { this.i++; this.pc += 2; return { t: 'incr', target: e, op: n.v, prefix: false }; }
+          if (['=', '+=', '-=', '*=', '/=', '%=', '^='].includes(n.v)) {
+            this.i++;
+            const r = this.orExpr();
+            this.pc += 2;
+            return { t: 'assign', op: n.v, target: e, e: r, pc: this.pc };
+          }
+        }
+      }
+      return e;
+    }
+    lvalue() {
+      const e = this.primary();
+      if (!e.lv) this.err();
+      return e;
+    }
+    primary() {
+      const t = this.peek();
+      if (!t) this.err();
+      if (t.t === 'num' && t.v === '.') { this.i++; this.pc += 1; return { t: 'special', name: 'last', lv: true }; }
+      if (t.t === 'num') {
+        if (/\..*\./.test(t.v)) this.err();
+        this.i++;
+        this.pc += constLen(t.v);
+        return { t: 'num', text: t.v };
+      }
+      if (t.t === 'op' && t.v === '(') { this.i++; const e = this.expr(); this.eatOp(')'); return { t: 'paren', e }; }
+      if (t.t === 'name') {
+        this.i++;
+        if (this.op('(')) {
+          this.i++;
+          const args = [];
+          if (!this.op(')')) for (;;) {
+            if (this.is('name') && this.toks[this.i + 1] && this.toks[this.i + 1].v === '[' && this.toks[this.i + 2] && this.toks[this.i + 2].v === ']') {
+              args.push({ t: 'arrayref', name: this.toks[this.i].v }); this.i += 3;
+            } else args.push(this.expr());
+            if (this.op(',')) { this.i++; continue; }
+            break;
+          }
+          this.eatOp(')');
+          this.pc += 2;
+          const pc = this.pc; this.pc += 1;
+          return { t: 'call', name: t.v, args, pc };
+        }
+        if (this.op('[')) {
+          this.i++; const idx = this.expr(); this.eatOp(']'); this.pc += 2;
+          return { t: 'elem', name: t.v, idx, lv: true, pc: this.pc };
+        }
+        this.pc += 2;
+        return { t: 'var', name: t.v, lv: true };
+      }
+      if (t.t === 'kw') {
+        if (t.v === 'scale' || t.v === 'ibase' || t.v === 'obase') {
+          this.i++;
+          if (t.v === 'scale' && this.op('(')) {
+            this.i++; const e = this.expr(); this.eatOp(')'); this.pc += 2;
+            return { t: 'builtin', name: 'scale', e };
+          }
+          this.pc += 1;
+          return { t: 'special', name: t.v, lv: true };
+        }
+        if (t.v === 'last') { this.i++; this.pc += 1; return { t: 'special', name: 'last', lv: true }; }
+        if (t.v === 'length' || t.v === 'sqrt') {
+          this.i++; this.eatOp('('); const e = this.expr(); this.eatOp(')');
+          this.pc += 2;
+          return { t: 'builtin', name: t.v, e, pc: this.pc };
+        }
+        if (t.v === 'read') { this.i++; this.eatOp('('); this.eatOp(')'); this.pc += 2; return { t: 'read' }; }
+      }
+      return this.err();
+    }
+  }
+  /** Bytes bc's compiler uses for a number constant: zero and one are single opcodes. */
+  function constLen(text) {
+    if (/^0*\.?0*$/.test(text) || /^0*1$/.test(text)) return 1;
+    return 2 + text.replace(/^0+(?=\d)/, '').replace(/^0\./, '.').length;
+  }
+  function parseLiteral(text, base) {
+    let intPart = text; let frac = '';
+    const dot = text.indexOf('.');
+    if (dot >= 0) { intPart = text.slice(0, dot); frac = text.slice(dot + 1); }
+    const digit = (ch) => { const d = parseInt(ch, 36); return d >= base ? base - 1 : d; };
+    const all = intPart + frac;
+    const digits = Array.from(all, (ch) => (all.length === 1 ? parseInt(ch, 36) : digit(ch)));
+    if (base === 10 && /^[0-9]*$/.test(all)) return num(BigInt(all || '0'), frac.length);
+    // other bases: the integer part is exact, the fraction is truncated to the same digit count
+    let v = 0n; const B = BigInt(base);
+    for (const d of digits.slice(0, intPart.length)) v = v * B + BigInt(d);
+    if (!frac) return num(v, 0);
+    let f = 0n; let den = 1n;
+    for (const d of digits.slice(intPart.length)) { f = f * B + BigInt(d); den *= B; }
+    const s = frac.length;
+    return num(v * pow10(s) + (f * pow10(s)) / den, s);
+  }
+
+  /* ------------------------------------------------------- interpreter */
+  class Bc {
+    constructor(ctx, opts) {
+      this.ctx = ctx; this.opts = opts;
+      this.scale = 0; this.ibase = 10; this.obase = 10;
+      this.vars = new Map(); this.arrays = new Map(); this.funcs = new Map();
+      this.last = ZERO; this.col = 0; this.buf = '';
+      this.func = '(main)'; this.pcBase = 0; this.depth = 0; this.ticks = 0;
+      if (opts.lib) this.scale = 20;
+    }
+    out(s) {
+      for (const ch of s) {
+        if (ch === '\n') { this.buf += ch; this.col = 0; continue; }
+        this.buf += ch; this.col++;
+      }
+    }
+    flush() { if (this.buf) { this.ctx.out(this.buf); this.buf = ''; } }
+    warn(msg, pc) { this.flush(); this.ctx.err('Runtime warning (func=' + this.func + ', adr=' + pc + '): ' + msg + '\n'); }
+    fail(msg, pc) { throw new BcError('Runtime error (func=' + this.func + ', adr=' + pc + '): ' + msg); }
+    async tick() { if (++this.ticks % 512 === 0) { await new Promise((r) => setTimeout(r, 0)); this.ctx.checkAbort(); } }
+
+    /** Print a number in obase with bc's 70 column wrapping. */
+    printNum(a) {
+      let text;
+      const neg = a.v < 0n; const av = neg ? -a.v : a.v;
+      const ip = av / pow10(a.s); const fp = av % pow10(a.s);
+      if (this.obase === 10) {
+        text = a.s ? (ip === 0n ? '' : ip.toString()) + '.' + fp.toString().padStart(a.s, '0') : ip.toString();
+        if (ip === 0n && fp === 0n) text = '0';
+        if (a.s && ip === 0n && fp !== 0n) text = '.' + fp.toString().padStart(a.s, '0');
+        return this.emitNum((neg && av !== 0n ? '-' : '') + text);
+      }
+      const B = BigInt(this.obase);
+      const digitText = (d) => (this.obase <= 16 ? d.toString(16).toUpperCase() : ' ' + d.toString().padStart(String(this.obase - 1).length, '0'));
+      let s = '';
+      if (ip === 0n) s = a.s && fp !== 0n ? '' : '0';
+      else { let x = ip; const ds = []; while (x > 0n) { ds.push(x % B); x /= B; } s = ds.reverse().map(digitText).join(''); }
+      if (a.s) {
+        let frac = fp; const limit = pow10(a.s); let f = '';
+        let n = 0; for (let q = 1n; q < limit; q *= B) n++;
+        for (let i = 0; i < n; i++) {
+          frac *= B; const d = frac / limit; frac %= limit;
+          f += i === 0 ? digitText(d).trimStart() : digitText(d);
+        }
+        s += '.' + f;
+      }
+      if (this.obase > 16 && !s.startsWith(' ') && s !== '0') s = ' ' + s;
+      return this.emitNum((neg && av !== 0n ? '-' : '') + s);
+    }
+    emitNum(text) {
+      for (const ch of text) {
+        if (this.col >= 68) { this.out('\\\n'); }
+        this.out(ch);
+      }
+    }
+
+    getVar(name) { return this.vars.has(name) ? this.vars.get(name) : ZERO; }
+    getElem(name, i) { const a = this.arrays.get(name); return a && a.has(i) ? a.get(i) : ZERO; }
+    toIndex(n, name, pc) {
+      const i = n.v / pow10(n.s);
+      if (i < 0n) this.fail('Array ' + name + ' subscript out of bounds.', pc);
+      return String(i);
+    }
+    setSpecial(name, val, pc) {
+      const n = val.v / pow10(val.s);
+      if (name === 'scale') {
+        if (n < 0n) { this.warn('negative scale, set to 0', pc); this.scale = 0; } else this.scale = Number(n);
+      } else if (name === 'ibase') {
+        if (n < 2n) { this.warn('ibase too small, set to 2', pc); this.ibase = 2; } else if (n > 16n) { this.warn('ibase too large, set to 16', pc); this.ibase = 16; } else this.ibase = Number(n);
+      } else if (name === 'obase') {
+        if (n < 2n) { this.warn('obase too small, set to 2', pc); this.obase = 2; } else if (n > 999n) { this.warn('obase too large, set to 999', pc); this.obase = 999; } else this.obase = Number(n);
+      } else this.last = val;
+    }
+    getSpecial(name) {
+      return name === 'scale' ? num(BigInt(this.scale)) : name === 'ibase' ? num(BigInt(this.ibase)) : name === 'obase' ? num(BigInt(this.obase)) : this.last;
+    }
+    async readTarget(t) {
+      if (t.t === 'var') return this.getVar(t.name);
+      if (t.t === 'special') return this.getSpecial(t.name);
+      return this.getElem(t.name, this.toIndex(await this.eval(t.idx), t.name, t.pc));
+    }
+    async writeTarget(t, val, pc, idxKey) {
+      if (t.t === 'var') this.vars.set(t.name, val);
+      else if (t.t === 'special') this.setSpecial(t.name, val, pc);
+      else {
+        if (!this.arrays.has(t.name)) this.arrays.set(t.name, new Map());
+        this.arrays.get(t.name).set(idxKey, val);
+      }
+    }
+    arith(op, a, b, pc) {
+      switch (op) {
+        case '+': return add(a, b);
+        case '-': return sub(a, b);
+        case '*': return mul(a, b, this.scale);
+        case '/': if (isZero(b)) this.fail('Divide by zero', pc); return div(a, b, this.scale);
+        case '%': if (isZero(b)) this.fail('Modulo by zero', pc); return mod(a, b, this.scale);
+        default: {
+          if (b.v % pow10(b.s) !== 0n) this.warn('non-zero scale in exponent', pc);
+          try { return power(a, b, this.scale); } catch (e) { if (e instanceof BcError) this.fail('exponent too large in raise', pc); throw e; }
+        }
+      }
+    }
+    async eval(n) {
+      switch (n.t) {
+        case 'num': return parseLiteral(n.text, this.ibase);
+        case 'paren': return this.eval(n.e);
+        case 'var': return this.getVar(n.name);
+        case 'special': return this.getSpecial(n.name);
+        case 'elem': return this.getElem(n.name, this.toIndex(await this.eval(n.idx), n.name, n.pc));
+        case 'neg': { const v = await this.eval(n.e); return neg(v); }
+        case 'not': return isZero(await this.eval(n.e)) ? ONE : ZERO;
+        case 'bin': {
+          if (n.op === '&&') { const l = await this.eval(n.l); if (isZero(l)) return ZERO; return isZero(await this.eval(n.r)) ? ZERO : ONE; }
+          if (n.op === '||') { const l = await this.eval(n.l); if (!isZero(l)) return ONE; return isZero(await this.eval(n.r)) ? ZERO : ONE; }
+          const a = await this.eval(n.l); const b = await this.eval(n.r);
+          if (['==', '<=', '>=', '!=', '<', '>'].includes(n.op)) {
+            const c = cmpNum(a, b);
+            const r = { '==': c === 0, '<=': c <= 0, '>=': c >= 0, '!=': c !== 0, '<': c < 0, '>': c > 0 }[n.op];
+            return r ? ONE : ZERO;
+          }
+          return this.arith(n.op, a, b, n.pc);
+        }
+        case 'assign': {
+          let key = null;
+          if (n.target.t === 'elem') key = this.toIndex(await this.eval(n.target.idx), n.target.name, n.pc - 2);
+          let val = await this.eval(n.e);
+          if (n.op !== '=') {
+            const cur = n.target.t === 'elem' ? this.getElem(n.target.name, key) : await this.readTarget(n.target);
+            val = this.arith(n.op.slice(0, -1), cur, val, n.pc);
+          }
+          if (n.target.t === 'special' && n.target.name === 'scale') val = rescale(val, 0);
+          await this.writeTarget(n.target, val, n.pc, key);
+          return val;
+        }
+        case 'incr': {
+          let key = null;
+          if (n.target.t === 'elem') key = this.toIndex(await this.eval(n.target.idx), n.target.name, n.target.pc);
+          const cur = n.target.t === 'elem' ? this.getElem(n.target.name, key) : await this.readTarget(n.target);
+          const nv = n.op === '++' ? add(cur, ONE) : sub(cur, ONE);
+          await this.writeTarget(n.target, nv, 0, key);
+          return n.prefix ? nv : cur;
+        }
+        case 'builtin': {
+          const v = await this.eval(n.e);
+          if (n.name === 'scale') return num(BigInt(v.s));
+          if (n.name === 'length') return num(BigInt(digitsOf(v)));
+          if (v.v < 0n) this.fail('Square root of a negative number', n.pc);
+          return sqrtNum(v, this.scale);
+        }
+        case 'read': return ZERO;
+        case 'call': return this.call(n);
+        default: throw new Error('bc: bad node ' + n.t);
+      }
+    }
+    async call(n) {
+      const lib = this.opts.lib && MATHFN[n.name];
+      if (lib && !this.funcs.has(n.name)) {
+        const args = []; for (const a of n.args) args.push(await this.eval(a));
+        if (args.length !== 1) this.fail('Parameter number mismatch', n.pc);
+        if (n.name === 'l' && args[0].v <= 0n) return div(sub(ONE, num(pow10(this.scale))), ONE, this.scale);
+        return mathFn(args[0], this.scale, lib);
+      }
+      const f = this.funcs.get(n.name);
+      if (!f) this.fail('Function ' + n.name + ' not defined.', n.pc);
+      if (f.params.length !== n.args.length) this.fail('Parameter number mismatch', n.pc);
+      if (++this.depth > 1000) { this.depth = 0; this.fail('Stack overflow', n.pc); }
+      const args = [];
+      for (let i = 0; i < n.args.length; i++) {
+        const a = n.args[i];
+        if (f.params[i].array) args.push(a.t === 'arrayref' ? new Map(this.arrays.get(a.name) || []) : new Map());
+        else args.push(await this.eval(a));
+      }
+      const saved = [];
+      const bindScalar = (name, v) => { saved.push([name, false, this.vars.has(name), this.vars.get(name)]); this.vars.set(name, v); };
+      const bindArray = (name, v) => { saved.push([name, true, this.arrays.has(name), this.arrays.get(name)]); this.arrays.set(name, v); };
+      f.params.forEach((p, i) => (p.array ? bindArray(p.name, args[i]) : bindScalar(p.name, args[i])));
+      for (const a of f.autos) (a.array ? bindArray(a.name, new Map()) : bindScalar(a.name, ZERO));
+      const prevFunc = this.func; this.func = n.name;
+      let result = ZERO;
+      try { await this.execList(f.body); } catch (e) {
+        if (!(e instanceof Flow && e.kind === 'return')) throw e;
+        result = e.value || ZERO;
+      } finally {
+        this.func = prevFunc; this.depth--;
+        for (const [name, isArr, had, old] of saved.reverse()) {
+          const store = isArr ? this.arrays : this.vars;
+          if (had) store.set(name, old); else store.delete(name);
+        }
+      }
+      return result;
+    }
+    async execList(list) { for (const s of list) await this.exec(s); }
+    async exec(s) {
+      await this.tick();
+      switch (s.t) {
+        case 'block': await this.execList(s.body); return;
+        case 'expr': {
+          const v = await this.eval(s.e);
+          if (s.e.t === 'assign') return;
+          this.printNum(v); this.out('\n'); this.last = v; return;
+        }
+        case 'string': this.out(s.text); return;
+        case 'print':
+          for (const it of s.items) {
+            if (it.str !== undefined) this.out(it.str.replace(/\\([abfnrqt\\])/g, (m, c) => ({ a: '\x07', b: '\b', f: '\f', n: '\n', r: '\r', q: '"', t: '\t', '\\': '\\' }[c])));
+            else { const v = await this.eval(it.e); this.printNum(v); this.last = v; }
+          }
+          return;
+        case 'if':
+          if (!isZero(await this.eval(s.cond))) await this.exec(s.then); else if (s.other) await this.exec(s.other);
+          return;
+        case 'while':
+          while (!isZero(await this.eval(s.cond))) {
+            try { await this.exec(s.body); } catch (e) { if (e instanceof Flow && e.kind === 'break') break; if (!(e instanceof Flow && e.kind === 'continue')) throw e; }
+          }
+          return;
+        case 'for':
+          if (s.init) await this.eval(s.init);
+          while (!s.cond || !isZero(await this.eval(s.cond))) {
+            try { await this.exec(s.body); } catch (e) { if (e instanceof Flow && e.kind === 'break') break; if (!(e instanceof Flow && e.kind === 'continue')) throw e; }
+            if (s.step) await this.eval(s.step);
+          }
+          return;
+        case 'break': case 'continue': throw new Flow(s.t);
+        case 'return': throw new Flow('return', s.e ? await this.eval(s.e) : ZERO);
+        case 'halt': case 'quit': throw new Flow('quit');
+        case 'define': this.funcs.set(s.name, s); return;
+        case 'limits':
+          this.out('BC_BASE_MAX     = 99\nBC_DIM_MAX      = 16777215\nBC_SCALE_MAX    = 2147483647\nBC_STRING_MAX   = 2147483647\nMAX Exponent   = 2147483647\nNumber of vars = 32767\n');
+          return;
+        default: return;
+      }
+    }
+  }
+  const MATHFN = { s: 's', c: 'c', a: 'a', l: 'l', e: 'e' };
+
+  /* ----------------------------------------------------------- command */
+  const USAGE = 'usage: bc [options] [file ...]\n  -h  --help         print this usage and exit\n  -i  --interactive  force interactive mode\n  -l  --mathlib      use the predefined math routines\n  -q  --quiet        don\'t print initial banner\n  -s  --standard     non-standard bc constructs are errors\n  -w  --warn         warn about non-standard bc constructs\n  -v  --version      print version information and exit\n';
+  const VERSION = 'bc 1.07.1\nCopyright 1991-1994, 1997, 1998, 2000, 2004, 2006, 2008, 2012-2017 Free Software Foundation, Inc.\n';
+
+  /** Does the text so far end inside an open { ( comment, string or after a backslash? */
+  function incomplete(text) {
+    const r = lex(text, 1);
+    if (r.unterminated) return true;
+    let depth = 0;
+    for (const t of r.toks) if (t.t === 'op') { if (t.v === '{' || t.v === '(') depth++; else if (t.v === '}' || t.v === ')') depth--; }
+    return depth > 0 || /\\\s*$/.test(text.replace(/\n$/, ''));
+  }
+
+  const MAN = `DESCRIPTION
+       bc is an arbitrary precision calculator language. It reads expressions
+       and statements from the files named on the command line and then from
+       standard input, evaluates them and prints the results.
+
+OPTIONS
+       -l, --mathlib       define the math library (s c a l e j) and set scale to 20
+       -q, --quiet         do not print the welcome banner
+       -s, --standard      treat non-standard bc constructs as errors
+       -w, --warn          warn about non-standard bc constructs
+       -v, --version       print the version and exit
+       -h, --help          print a usage message
+
+LANGUAGE
+       Numbers have an arbitrary number of digits; "scale" sets how many digits
+       follow the decimal point in division. ibase and obase set the input and
+       output base. Operators: + - * / % ^ and comparisons, && || !, ++ --.
+       Statements: if, while, for, break, continue, define, return, print,
+       quit. Variables are single names; arrays are written a[i]. With -l the
+       functions s(x), c(x), a(x), l(x) and e(x) are available.
+
+EXAMPLES
+       echo "scale=4; 22/7" | bc
+       echo "obase=2; 255" | bc
+       echo "scale=20; 4*a(1)" | bc -l`;
+
+  K.cmd.register({
+    name: 'bc',
+    pkg: 'bc',
+    summary: 'An arbitrary precision calculator language',
+    synopsis: 'bc [ -hlwsqv ] [long-options] [ file ... ]',
+    man: MAN,
+    async run(ctx) {
+      const opts = { lib: false, quiet: false, std: false, files: [] };
+      for (const a of ctx.args) {
+        if (a === '--help') { ctx.out(USAGE); return 0; }
+        if (a === '--version') { ctx.out(VERSION); return 0; }
+        if (a === '--mathlib') opts.lib = true;
+        else if (a === '--quiet') opts.quiet = true;
+        else if (a === '--standard') opts.std = true;
+        else if (a === '--warn' || a === '--interactive') continue;
+        else if (a.startsWith('--') && a.length > 2) { ctx.err('bc: unrecognized option ' + a + '\n' + USAGE); return 1; }
+        else if (a[0] === '-' && a.length > 1) {
+          for (const c of a.slice(1)) {
+            if (c === 'h') { ctx.out(USAGE); return 0; }
+            if (c === 'v') { ctx.out(VERSION); return 0; }
+            if (c === 'l') opts.lib = true;
+            else if (c === 'q') opts.quiet = true;
+            else if (c === 's') opts.std = true;
+            else if (c !== 'w' && c !== 'i') { ctx.err("bc: invalid option -- '" + c + "'\n" + USAGE); return 1; }
+          }
+        } else opts.files.push(a);
+      }
+      const bc = new Bc(ctx, opts);
+      const sources = [];
+      for (const f of opts.files) {
+        try { sources.push({ name: f, text: ctx.fs.read(f) }); } catch (e) {
+          if (!(e instanceof K.FsError)) throw e;
+          ctx.err('File ' + f + ' is unavailable.\n'); return 1;
+        }
+      }
+      let quit = false;
+      for (const src of sources) { quit = await feed(ctx, bc, src.text, src.name); if (quit) break; }
+      if (!quit) {
+        const interactive = ctx.stdin == null;
+        if (interactive && !opts.quiet) ctx.out(VERSION + 'This is free software with ABSOLUTELY NO WARRANTY.\nFor details type `warranty\'. \n');
+        let text = '';
+        if (ctx.stdin != null) text = ctx.stdin;
+        else {
+          // terminal: run line by line as typed
+          let pending = '';
+          for (;;) {
+            let line;
+            try { line = await ctx.readLine(''); } catch (e) { if (e instanceof K.Interrupt) { ctx.out('\n(interrupt) Use quit to exit.\n'); pending = ''; continue; } throw e; }
+            if (line == null) break;
+            pending += line + '\n';
+            if (incomplete(pending)) continue;
+            const q = await feed(ctx, bc, pending, '(standard_in)');
+            pending = '';
+            if (q) break;
+          }
+          bc.flush();
+          return 0;
+        }
+        await feed(ctx, bc, text, '(standard_in)');
+      }
+      bc.flush();
+      return 0;
+    },
+  });
+
+  /** Run program text chunk by chunk (a chunk is one input line, or a whole { } construct). Returns true after quit. */
+  async function feed(ctx, bc, text, where) {
+    const lines = text.split('\n');
+    if (lines[lines.length - 1] === '') lines.pop();
+    let lineNo = 0; let chunk = ''; let chunkStart = 1;
+    /** Returns 'quit', 'more' (the construct is not finished) or 'done'. */
+    const run = async (src, startLine, atEof) => {
+      const lexed = lex(src, startLine);
+      let list;
+      let failed = false;
+      try { list = new Parser(lexed.toks, 0).statements(); } catch (e) {
+        if (!(e instanceof SyntaxErr)) throw e;
+        if (e.eof && !atEof && !lexed.illegal.length) return 'more';
+        bc.flush();
+        for (const il of lexed.illegal) ctx.err(where + ' ' + il.line + ': illegal character: ' + il.ch + '\n');
+        ctx.err(where + ' ' + e.line + ': syntax error\n');
+        return 'done';
+      }
+      if (lexed.illegal.length) {
+        bc.flush();
+        for (const il of lexed.illegal) ctx.err(where + ' ' + il.line + ': illegal character: ' + il.ch + '\n');
+        failed = true;
+      }
+      if (failed) return 'done';
+      if (list.some((st) => st.t === 'quit')) return 'quit';
+      try { await bc.execList(list); } catch (e) {
+        if (e instanceof Flow && e.kind === 'quit') return 'quit';
+        if (e instanceof Flow) return 'done';
+        if (e instanceof BcError) { bc.flush(); ctx.err(e.message + '\n'); return 'done'; }
+        throw e;
+      }
+      bc.flush();
+      return 'done';
+    };
+    for (const line of lines) {
+      lineNo++;
+      if (!chunk) chunkStart = lineNo;
+      chunk += line + '\n';
+      if (incomplete(chunk)) continue;
+      const r = await run(chunk, chunkStart, false);
+      if (r === 'more') continue;
+      chunk = '';
+      if (r === 'quit') return true;
+    }
+    if (chunk) {
+      const r = lex(chunk, chunkStart);
+      bc.flush();
+      if (r.unterminated === 'comment') ctx.err('EOF encountered in a comment.\n');
+      else if (r.unterminated === 'string') ctx.err(where + ' ' + chunkStart + ': illegal character: "\n');
+      else await run(chunk, chunkStart, true);
+    }
+    return false;
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : this);
