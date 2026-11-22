@@ -387,12 +387,194 @@
     refs: ['ssh-keygen(1)', 'ssh-copy-id(1)', 'ssh(1)', 'sshd(8), AUTHORIZED_KEYS FILE FORMAT', 'RFC 4253', 'Kali Linux Revealed, ch. 5'],
   };
 
+  /* ------------------------------------------------------------ remote-scp */
+  const SCPDIR = '/home/kali/practice/remote/scp';
+  const hashes = (ev) => (outOf(ev).match(/^[0-9a-f]{64}(?=\s)/gm) || []);
+  const scpLesson = {
+    id: 'remote-scp',
+    title: 'Copying files with scp',
+    minutes: 11,
+    objectives: [
+      'Copy a file to a server and back with `scp`',
+      'Copy a whole directory with `scp -r`',
+      'Confirm that a copy is identical by comparing `sha256sum` on both ends',
+    ],
+    intro: T(
+      '`scp` copies files over the same encrypted channel as ssh, with the same accounts and the same host key checks. You use it to put a tool or a script on a server and to bring back logs and output for your notes.',
+      '',
+      'Moving a file is not the same as knowing it arrived intact. A checksum answers that: if the SHA-256 of two files is equal, their contents are equal. On an engagement it also lets you show that the evidence you report is the file you collected. In this lesson you send a file to `web01` and back, and compare.'
+    ),
+    steps: [
+      {
+        id: 'workdir',
+        prompt: T(
+          'Make a working directory for this lesson and go into it:',
+          '',
+          '```',
+          'mkdir -p ~/practice/remote/scp && cd ~/practice/remote/scp',
+          '```'
+        ),
+        hint: 'Use `mkdir -p` and `cd`, joined with `&&`.',
+        solution: 'mkdir -p ~/practice/remote/scp && cd ~/practice/remote/scp',
+        check: { cwd: SCPDIR },
+      },
+      {
+        id: 'sample',
+        prompt: T(
+          'Take a sample file to send. Copy the practice shift log into your working directory:',
+          '',
+          '```',
+          'cp /usr/share/kalima/text/shift-log.txt .',
+          '```'
+        ),
+        hint: 'Use `cp` with the source file and `.` as the destination.',
+        solution: 'cp /usr/share/kalima/text/shift-log.txt .',
+        check: { file: { path: SCPDIR + '/shift-log.txt', exists: true, type: 'file' } },
+      },
+      {
+        id: 'upload',
+        prompt: T(
+          'Copy it to `web01`:',
+          '',
+          '```',
+          'scp shift-log.txt student@web01.halcyon.lab:/tmp/shift-log.txt',
+          '```',
+          '',
+          'The argument order is *source*, then *destination*, as with `cp`. A colon after the host separates it from the path on that host. Here the destination is `/tmp/shift-log.txt` on `web01`, a directory every user can write to. Answer the host key question and give the password if asked.',
+          '',
+          'scp prints one progress line per file: its name, the percentage, the size, the speed and the time.'
+        ),
+        hint: 'Syntax: `scp SOURCE USER@HOST:DESTINATION`.',
+        solution: 'scp shift-log.txt student@web01.halcyon.lab:/tmp/shift-log.txt',
+        input: SSHIN,
+        check: { cmd: 'scp', argsRe: /shift-log\.txt\s+\S+@web01\S*:/, out: /shift-log\.txt\s+100%/, exit: 0 },
+      },
+      {
+        id: 'download',
+        prompt: T(
+          'Now bring it back under a different name. Put the remote file first and the local name last:',
+          '',
+          '```',
+          'scp student@web01.halcyon.lab:/tmp/shift-log.txt returned.txt',
+          '```'
+        ),
+        hint: 'Same syntax, with source and destination swapped: the remote path comes first.',
+        solution: 'scp student@web01.halcyon.lab:/tmp/shift-log.txt returned.txt',
+        input: SSHIN,
+        check: { cmd: 'scp', out: /shift-log\.txt\s+100%/, exit: 0, file: { path: SCPDIR + '/returned.txt', exists: true, type: 'file' } },
+      },
+      {
+        id: 'local-hash',
+        prompt: T(
+          'Compare the two local files by their SHA-256 checksums:',
+          '',
+          '```',
+          'sha256sum shift-log.txt returned.txt',
+          '```',
+          '',
+          'Each line is a 64-character checksum followed by the file name. The checksums are equal when the files are identical, and a one-bit difference gives a completely different checksum.'
+        ),
+        hint: 'Give `sha256sum` both file names.',
+        solution: 'sha256sum shift-log.txt returned.txt',
+        check: { cmd: 'sha256sum', out: /returned\.txt/, fn: (ev) => { const h = hashes(ev); return h.length === 2; } },
+      },
+      {
+        id: 'remote-hash',
+        prompt: T(
+          'That shows the file survived the round trip. To see what actually sits on the server, run `sha256sum` there:',
+          '',
+          '```',
+          'ssh student@web01.halcyon.lab sha256sum /tmp/shift-log.txt',
+          '```',
+          '',
+          'Compare the first characters of this checksum with the ones above.'
+        ),
+        hint: 'Use the `ssh user@host command` form with `sha256sum /tmp/shift-log.txt`.',
+        solution: 'ssh student@web01.halcyon.lab sha256sum /tmp/shift-log.txt',
+        input: SSHIN,
+        check: { cmd: 'sha256sum', host: 'web01', out: /^[0-9a-f]{64}\s+\/tmp\/shift-log\.txt/m },
+      },
+      {
+        id: 'same',
+        prompt: 'Are the checksum on `web01` and the checksums of your two local files identical? Type yes or no.',
+        hint: 'Compare the 64 characters of each. A copy that went wrong would show different checksums.',
+        solution: 'yes',
+        answer: ['yes', 'y', 'identical', 'they are identical', 'the same'],
+      },
+      {
+        id: 'mkdir',
+        prompt: T(
+          'To copy a directory you need `-r`, for recursive. Prepare one first, with the log inside:',
+          '',
+          '```',
+          'mkdir -p reports && cp shift-log.txt reports/',
+          '```'
+        ),
+        hint: 'Create the directory `reports`, then copy `shift-log.txt` into it.',
+        solution: 'mkdir -p reports && cp shift-log.txt reports/',
+        check: { file: { path: SCPDIR + '/reports/shift-log.txt', exists: true, type: 'file' } },
+      },
+      {
+        id: 'recursive',
+        prompt: T(
+          'Send the whole directory to `/tmp` on the server:',
+          '',
+          '```',
+          'scp -r reports student@web01.halcyon.lab:/tmp/',
+          '```',
+          '',
+          'Without `-r`, scp refuses to copy a directory and says `not a regular file`. When it works it lists every file inside. The trailing slash on `/tmp/` says that the destination is a directory, so `reports` is created inside it.'
+        ),
+        hint: 'Add `-r` before the source: `scp -r reports ...`.',
+        solution: 'scp -r reports student@web01.halcyon.lab:/tmp/',
+        input: SSHIN,
+        check: { cmd: 'scp', args: ['-r'], out: /shift-log\.txt\s+100%/, exit: 0 },
+      },
+    ],
+    quiz: [
+      {
+        q: 'What does `scp notes.txt student@web01.halcyon.lab:` do?',
+        choices: [
+          'Copies the file to the home directory of `student` on web01',
+          'Copies it to `/tmp` on web01',
+          'Fails, because a destination path is required',
+          'Copies it to your own home directory',
+        ],
+        answer: 0,
+        why: 'After the colon an empty path means the home directory of the account on the remote side.',
+      },
+      {
+        q: 'You copy a 2 GB evidence file from a server and the checksum of your copy differs from the checksum on the server. What do you do?',
+        choices: [
+          'Use it anyway; one differing byte does not matter',
+          'Copy it again and compare again, and do not report from the damaged copy',
+          'Delete the file on the server',
+          'Compare file sizes instead; they are the same thing',
+        ],
+        answer: 1,
+        why: 'A different checksum means the contents differ, even if the size is equal. Evidence you cannot show to be intact is not evidence. Repeat the transfer.',
+      },
+      {
+        q: 'Which command copies the file `/var/log/app.log` from web01 to your current directory?',
+        choices: [
+          'scp /var/log/app.log student@web01.halcyon.lab:.',
+          'scp student@web01.halcyon.lab:/var/log/app.log .',
+          'scp -r student@web01.halcyon.lab /var/log/app.log',
+          'scp . student@web01.halcyon.lab:/var/log/app.log',
+        ],
+        answer: 1,
+        why: 'The source comes first. The remote path has the `host:` prefix, and the local destination `.` is the current directory.',
+      },
+    ],
+    refs: ['scp(1)', 'sha256sum(1)', 'ssh(1)', 'NIST SP 800-115', 'Kali Linux Revealed, ch. 5'],
+  };
+
   K.lessons.register({
     id: 'remote',
     title: 'Remote access and file transfer',
     order: 90,
     summary: 'Log in to servers with ssh, use keys instead of passwords, copy files with scp, and recognize the clear-text FTP protocol for what it is.',
-    lessons: [sshLesson, keysLesson],
+    lessons: [sshLesson, keysLesson, scpLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
