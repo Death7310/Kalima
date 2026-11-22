@@ -142,6 +142,16 @@
 
   const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
 
+  /** A copy of the list in random order (seeded, so a test run repeats). */
+  function shuffled(list) {
+    const out = list.slice();
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(K.net.rand() * (i + 1));
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  }
+
   /** Nmap's num_to_string_sigdigits: 0.000523 -> "0.00052". */
   function sigDigits(x, digits) {
     if (x === 0) return x.toFixed(digits);
@@ -376,8 +386,6 @@
     return level;
   }
 
-  const ILLEGAL_PORTS = 'Your port specifications are illegal.  Example of proper form: "-100,200-1024,T:3000-4000,U:60000-"';
-
   /** -p argument -> { tcp: [...], udp: [...], named: {T, U}, duplicates, zero } with sorted, unique ports. */
   function parsePortSpec(text) {
     const lists = { tcp: [], udp: [] }; const named = {}; let into = ['tcp', 'udp']; let duplicates = false; let zero = false;
@@ -397,7 +405,7 @@
         const want = U.globToRe(item);
         ports = Object.keys(TCP_NAMES).filter((p) => want.test(TCP_NAMES[p])).map(Number);
         if (!ports.length) throw quit("Found no matches for the service mask '" + item + "' and your specified protocols");
-      } else throw quit(ILLEGAL_PORTS);
+      } else throw quit('Your port specifications are illegal.  Example of proper form: "-100,200-1024,T:3000-4000,U:60000-"');
       for (const proto of into) lists[proto].push.apply(lists[proto], ports);
     }
     for (const proto of ['tcp', 'udp']) {
@@ -580,7 +588,6 @@
   /* ---------------------------------------------------------- nmap: port scan */
 
   const SCAN_NAMES = { syn: 'SYN Stealth Scan', connect: 'Connect Scan', udp: 'UDP Scan' };
-  const SCAN_TYPES = { syn: 'syn', connect: 'connect', udp: 'udp' };
   const CHUNK = 2048; // ports probed between two chances to press Ctrl-C
   const UDP_BURST = 6;       // ICMP port-unreachable replies a Linux host sends before it starts rate limiting
   const UDP_LIMITED = 900;   // ms per closed UDP port once the target limits its ICMP errors
@@ -623,18 +630,17 @@
     let unreachables = 0;
     t.scans.push(scan);
     for (let i = 0; i < ports.length; i += CHUNK) {
-      let silent = 0; let limited = 0; const end = Math.min(ports.length, i + CHUNK);
+      let silent = 0; let limited = 0; const end = Math.min(ports.length, i + CHUNK); const found = [];
       for (let j = i; j < end; j++) {
         const r = probePort(run, t, kind, ports[j]);
         const group = scan.states[r.state] || (scan.states[r.state] = { state: r.state, reason: r.reason, ttl: r.ttl, ports: [] });
         group.ports.push(ports[j]);
         if (!r.answered) silent++;
         if (kind === 'udp' && r.state === 'closed' && ++unreachables > UDP_BURST) limited++;
-        if (r.state === 'open') {
-          scan.services.set(ports[j], r.service);
-          run.verbose('Discovered open port ' + ports[j] + '/' + scan.proto + ' on ' + t.ip);
-        }
+        if (r.state === 'open') { scan.services.set(ports[j], r.service); found.push(ports[j]); }
       }
+      // Nmap probes ports in random order unless -r is given, and -v reports them as they turn up.
+      if (run.o.verbose) for (const port of run.o.sequential ? found : shuffled(found)) run.verbose('Discovered open port ' + port + '/' + scan.proto + ' on ' + t.ip);
       const waitForErrors = run.o.timing > 2 ? limited * UDP_LIMITED : 0;
       await run.wait((portScanCost(run.o, end - i - silent, silent, ports.length) + waitForErrors) * share);
     }
@@ -1156,7 +1162,7 @@
     const out = ['<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE nmaprun>', '<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>',
       '<!-- ' + initiated(run) + ' -->',
       '<nmaprun' + attrs({ scanner: 'nmap', args: commandLine(run), start: Math.floor(run.started / 1000), startstr: ctime(run.started), version: NMAP_VERSION, xmloutputversion: '1.05' }) + '>'];
-    for (const scan of scansOf(o)) out.push('<scaninfo' + attrs({ type: SCAN_TYPES[scan.kind], protocol: scan.proto, numservices: scan.ports.length, services: formatRanges(scan.ports) }) + '/>');
+    for (const scan of scansOf(o)) out.push('<scaninfo' + attrs({ type: scan.kind, protocol: scan.proto, numservices: scan.ports.length, services: formatRanges(scan.ports) }) + '/>');
     out.push('<verbose level="' + o.verbose + '"/>', '<debugging level="0"/>');
     for (const t of run.hosts) out.push.apply(out, xmlHost(run, t));
     out.push('<runstats><finished' + attrs({ time: Math.floor(end / 1000), timestr: ctime(end), summary: 'Nmap done at ' + ctime(end) + '; ' + stats, elapsed: (run.elapsed / 1000).toFixed(2), exit: 'success' }) +
@@ -1562,7 +1568,8 @@
     const say = (line) => { if (!g.opts.x) ctx.out(line + '\n'); };
     say('Interface: ' + iface.name + ', type: EN10MB, MAC: ' + iface.mac + ', IPv4: ' + (iface.ip || '(none)'));
     say('Starting arp-scan ' + ARPSCAN_VERSION + ' with ' + specs.reduce((n, sp) => n + sp.count, 0) + ' hosts (' + ARPSCAN_URL + ')');
-    let hosts = 0; let responded = 0; let elapsed = 0; let batch = 0;
+    let hosts = 0; let elapsed = 0; let batch = 0;
+    const answers = new Map(); // address -> replies seen so far (a target named twice answers twice)
     const wait = (ms) => { elapsed += ms; return ctx.sleep(ms); };
     const sendBatch = () => { const ms = batch * ARPSCAN_PACKET_MS; batch = 0; return wait(ms); };
     for (const spec of specs) {
@@ -1570,8 +1577,9 @@
         hosts++;
         const host = arpNeighbour(iface, ip);
         if (host) {
-          responded++;
-          ctx.out(ip + '\t' + host.mac + (g.opts.q ? '' : '\t' + (IEEE_NAMES[host.macVendor] || host.macVendor || '(Unknown)')) + '\n');
+          const nth = (answers.get(ip) || 0) + 1;
+          answers.set(ip, nth);
+          ctx.out(ip + '\t' + host.mac + (g.opts.q ? '' : '\t' + (IEEE_NAMES[host.macVendor] || host.macVendor || '(Unknown)')) + (nth > 1 ? ' (DUP: ' + nth + ')' : '') + '\n');
         }
         if (++batch === 64) await sendBatch();
       }

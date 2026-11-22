@@ -672,11 +672,236 @@
     refs: ['dig(1)', 'host(1)', 'nslookup(1)', 'resolv.conf(5)', 'RFC 1034', 'RFC 9499 (DNS Terminology)'],
   };
 
+  /* ----------------------------------------------------------- dns-records */
+  const NOTES = '/home/kali/engagement/notes.md';
+  /** A notes line that records the transfer: it names the operation and the server. */
+  const TRANSFER_NOTE = /^(?=.*(axfr|transfer))(?=.*(10\.10\.10\.53|ns1)).+$/im;
+
+  const recordsLesson = {
+    id: 'dns-records',
+    title: 'Public records and zone transfers',
+    minutes: 12,
+    objectives: [
+      'Read a WHOIS record for a domain: registrar, dates, name servers, organization and redacted fields',
+      'Find out which network an address belongs to with `whois`',
+      'Explain why looking up public records is passive, and where your scope draws the line',
+      'Say what a zone transfer is for, recognize one that is allowed and one that is refused, and record the observation in your notes',
+    ],
+    intro: T(
+      'Some of the most useful facts about an organization\'s network are published on purpose: who registered its domain, which servers hold its DNS zone, which block of addresses its servers sit in. Reading these records is the usual first step of an assessment, and it is *passive*: you consult registries, and the organization\'s own systems are left alone.',
+      '',
+      'The second half of this lesson looks at how a DNS zone is copied between the servers that publish it. A zone transfer hands over every record in one reply. You will see the lab server allow one, see what a refusal looks like, and write the observation into your engagement notes.'
+    ),
+    steps: [
+      {
+        id: 'whois',
+        prompt: T(
+          'DNS says where a name leads. WHOIS says who registered it. Halcyon Freight\'s public website lives under the domain `halcyonfreight.example`. Ask for its registration record:',
+          '',
+          '```',
+          'whois halcyonfreight.example',
+          '```',
+          '',
+          'The record is long, so scroll back to its start and look for these fields:',
+          '',
+          '- `Registrar` is the company through which the domain was registered.',
+          '- `Creation Date` and `Registry Expiry Date` show how long the domain has existed and when the registration runs out.',
+          '- `Name Server` lists the servers that hold the DNS zone, the same names an `NS` query returns.',
+          '- Many contact fields read `REDACTED FOR PRIVACY`.',
+          '',
+          'Names that end in `.example` are reserved for documentation, so this record is invented. Its layout is the one a real registry uses.'
+        ),
+        hint: 'Type `whois` followed by the domain name, without `www` and without `http://`.',
+        solution: 'whois halcyonfreight.example',
+        check: { cmd: 'whois', argsRe: /halcyonfreight\.example/i, out: /Registrar:|Registry Expiry Date:/ },
+      },
+      {
+        id: 'expiry',
+        prompt: T(
+          'Find the `Registry Expiry Date` in the record. On which date does the registration run out? Give the date in the form YYYY-MM-DD.',
+          '',
+          'The date is worth reading. A domain that is allowed to lapse can be registered by somebody else, who then receives its web traffic and its mail.'
+        ),
+        hint: 'The field holds a date, the letter `T` and a time. Type only the date part before the `T`.',
+        solution: '2027-03-14',
+        answer: /^(2027-03-14(T[\d:]+Z?)?|14(th)? (of )?march,? 2027|march 14(th)?,? 2027)$/i,
+      },
+      {
+        id: 'ns',
+        prompt: T(
+          'You rarely need all sixty lines. Print only the lines of the record that name the name servers, by sending the output of `whois` through `grep`.',
+          '',
+          'WHOIS records are plain text made of `Field: value` lines, which makes `grep` the natural way to pull out the part you want.'
+        ),
+        hint: 'Pipe the `whois` command into `grep -i "name server"`. The `-i` makes the match ignore upper and lower case.',
+        solution: 'whois halcyonfreight.example | grep -i "name server"',
+        check: { cmd: 'whois', argsRe: /halcyonfreight\.example/i, fn: (ev) => { const o = outOf(ev); return /Name Server: NS1\.HALCYONFREIGHT\.EXAMPLE/i.test(o) && !/Registrar:/.test(o); } },
+      },
+      {
+        id: 'org',
+        prompt: T(
+          'Since 2018 most registries hide the personal details of the people behind a domain, which is why the registrant\'s name, street and email are all redacted. Some fields usually stay visible all the same.',
+          '',
+          'Look at the lines that begin with `Registrant`. Which organization is named as the registrant?'
+        ),
+        hint: 'Run `whois halcyonfreight.example | grep Registrant` and read the `Registrant Organization` line.',
+        solution: 'Halcyon Freight Ltd.',
+        answer: /^halcyon freight(,? (ltd\.?|limited))?$/i,
+      },
+      {
+        id: 'whois-ip',
+        prompt: T(
+          'Addresses are registered as well. They are handed out in blocks by five regional registries, and `whois` finds the right one by itself. The public website resolves to 203.0.113.10. Ask who holds that address:',
+          '',
+          '```',
+          'whois 203.0.113.10',
+          '```',
+          '',
+          'The reply has a different layout, because it comes from an address registry. `inetnum` is the block the address belongs to, and `netname` and `descr` say who holds it. Here the block is `TEST-NET-3`, a range set aside for documentation, as you would expect of a fictional company.',
+          '',
+          'In real work this lookup tells you whether a server stands in the organization\'s own network or at a hosting company. That decides whose permission a test of it would need.'
+        ),
+        hint: 'Give `whois` the address in place of a domain name.',
+        solution: 'whois 203.0.113.10',
+        check: { cmd: 'whois', argsRe: /203\.0\.113\.\d+/, out: /netname:\s+TEST-NET-3/i },
+      },
+      {
+        id: 'scope',
+        prompt: T(
+          'Everything so far was *passive*. Your questions went to registries, and the answers are public records that anyone may read. Nothing was sent to a machine that Halcyon Freight runs, and nobody there can tell that you looked.',
+          '',
+          'Your scope file draws the line in the same place. Read what it says:',
+          '',
+          '```',
+          'grep -i passive ~/engagement/scope.txt',
+          '```',
+          '',
+          'Lookups of public records are permitted. *Active* testing, where you send something to a system to see how it reacts, is limited to the addresses and names listed as in scope. The public domain `halcyonfreight.example` is not among them.'
+        ),
+        hint: 'Type the `grep` command as shown. `cat ~/engagement/scope.txt` shows the whole file, which is short.',
+        solution: 'grep -i passive ~/engagement/scope.txt',
+        check: { line: /scope\.txt/, out: /Passive lookups/ },
+      },
+      {
+        id: 'axfr',
+        prompt: T(
+          'Now return to the lab, which is in scope. Until now you asked DNS for one record at a time. There is also an operation that hands over a whole zone at once: the *zone transfer*, query type `AXFR`. It exists so that the secondary name servers of a zone can copy its data from the primary.',
+          '',
+          'Request a transfer of the lab zone from its name server:',
+          '',
+          '```',
+          'dig axfr halcyon.lab @10.10.10.53',
+          '```',
+          '',
+          'The reply is the complete zone. It opens and closes with the `SOA` record, and between them is every record there is: an `A` record for each host, the aliases, the mail server. The lab server gives this to any machine on the lab network that asks.',
+          '',
+          'Read the host names as a description of the network. `db01`, `backup01`, `dc01` and `printer` each say what a machine is for.'
+        ),
+        hint: 'The word `axfr` takes the place of a record type such as `MX`. The `@` names the server to ask, as in the previous lesson.',
+        solution: 'dig axfr halcyon.lab @10.10.10.53',
+        check: { any: [
+          { cmd: 'dig', argsRe: /\baxfr\b/i, out: /XFR size: \d+ records|backup01\.halcyon\.lab\.\s+\d+\s+IN\s+A\s/ },
+          { cmd: 'host', args: ['-l'], out: /backup01\.halcyon\.lab has address/ },
+        ] },
+      },
+      {
+        id: 'count',
+        prompt: 'The last comment line of the transfer begins `;; XFR size:`. How many records did the server send?',
+        hint: 'Run the transfer again if it has scrolled away. The number stands between `XFR size:` and the word `records`.',
+        solution: '21',
+        answer: /^21(\s*records)?$/i,
+      },
+      {
+        id: 'refused',
+        prompt: T(
+          'A name server gives out a transfer only to those it has been told to trust. To see a refusal, send the same request to the public resolver 8.8.8.8, which gives zone transfers to nobody:',
+          '',
+          '```',
+          'dig axfr halcyon.lab @8.8.8.8',
+          '```',
+          '',
+          '`; Transfer failed.` is all you get. A carefully run name server gives the same reply to everyone except its own secondary servers. Administrators restrict transfers because the full zone is a ready-made inventory of the network. Single lookups keep working for everybody, since a restriction only stops the wholesale copy.',
+          '',
+          'The lab server allows transfers to the whole lab network, which is more than its job requires. That is worth reporting to the client.',
+          '',
+          'Do not try this against the name servers of `halcyonfreight.example`. A transfer request goes to the client\'s own server, so it is not a passive lookup, and those servers are out of scope.'
+        ),
+        hint: 'Keep the command and change only the server after the `@`.',
+        solution: 'dig axfr halcyon.lab @8.8.8.8',
+        check: { all: [{ cmd: 'dig', argsRe: /\baxfr\b/i }, { cmd: 'dig', argsRe: AT_PUBLIC }], out: /Transfer failed/ },
+      },
+      {
+        id: 'note',
+        prompt: T(
+          'An observation that is not written down is lost by the time the report is due. Record this one in your engagement notes: what you asked, which server you asked, and what came back.',
+          '',
+          '```',
+          'echo "- dig axfr halcyon.lab @10.10.10.53: zone transfer allowed from the lab network, 21 records" >> ~/engagement/notes.md',
+          '```',
+          '',
+          'Use `>>`, which appends. A single `>` would replace all your notes with this one line. You may word the note differently, as long as it mentions the transfer and the server.',
+          '',
+          'Check the result with `tail -n 3 ~/engagement/notes.md`. With the command and the outcome on record, you or a colleague can repeat the observation later, and the client can verify it.'
+        ),
+        hint: 'Type the `echo` command with two `>` characters. The step looks for a line in `~/engagement/notes.md` that contains `axfr` or `transfer` together with `10.10.10.53` or `ns1`.',
+        solution: 'echo "- dig axfr halcyon.lab @10.10.10.53: zone transfer allowed from the lab network, 21 records" >> ~/engagement/notes.md',
+        check: { line: /notes\.md/, fn: (ev) => TRANSFER_NOTE.test(readFile(NOTES) || '') && !/(^|[^>])>\s*\S*notes\.md/.test(ev.line || '') },
+      },
+    ],
+    quiz: [
+      {
+        q: 'Why does a WHOIS lookup of a client\'s public domain count as passive?',
+        choices: [
+          'Because `whois` sends its packets more slowly than other tools',
+          'Because the query goes to a registry\'s database and not to any system the client runs',
+          'Because the client is notified and can object',
+          'Because WHOIS data is encrypted',
+        ],
+        answer: 1,
+        why: 'The record is held by the registry or registrar, and that is where your query goes. The client\'s servers receive nothing, so the lookup cannot affect them or be noticed by them.',
+      },
+      {
+        q: 'Your scope lists 10.10.10.0/24 and `*.halcyon.lab`. While reading public records you learn that the company\'s public name server is `ns1.halcyonfreight.example`. What is the right way to proceed?',
+        choices: [
+          'Request a zone transfer from it, because DNS is a public service',
+          'Scan it, because it belongs to the same company',
+          'Note it, and ask the client whether it should be added to the scope before sending it anything unusual',
+          'Remove it from your notes, because it is out of scope',
+        ],
+        answer: 2,
+        why: 'Belonging to the client does not put a system in scope. Only the written scope does. What you learned from public records belongs in your notes, and extending the scope is the client\'s decision.',
+      },
+      {
+        q: 'An administrator restricts zone transfers to the zone\'s secondary servers. What changes for an ordinary user who looks up `www` in that zone?',
+        choices: [
+          'Nothing: single lookups are answered as before',
+          'The lookup now fails with `NXDOMAIN`',
+          'The lookup now requires a password',
+          'The answer arrives without a time to live',
+        ],
+        answer: 0,
+        why: 'The restriction applies only to requests for the complete zone. Questions about individual names are still answered, which is why restricting transfers costs nothing in normal use.',
+      },
+      {
+        q: 'Why is a zone transfer to anyone who asks regarded as a weakness, when every record in it could also be looked up one at a time?',
+        choices: [
+          'Because a transfer changes the records on the server',
+          'Because a transfer stops the server from answering other clients',
+          'Because the transferred records are more accurate than the individual ones',
+          'Because looking records up one at a time requires knowing the names first, and the transfer hands over the full list',
+        ],
+        answer: 3,
+        why: 'To look up a name you have to know it or guess it. A transfer removes the guessing: it lists every host, including the ones nobody was meant to find.',
+      },
+    ],
+    refs: ['whois(1)', 'dig(1)', 'RFC 3912 (WHOIS)', 'RFC 5936 (AXFR)', 'RFC 5737', 'NIST SP 800-115, section 4.1 (Network Discovery)'],
+  };
+
   K.lessons.register({
     id: 'dns',
     title: 'Names: DNS and WHOIS',
     order: 70,
     summary: 'How a name becomes an address on your workstation, how to question DNS servers with dig, host and nslookup, and what public records such as WHOIS and a zone reveal about a network.',
-    lessons: [resolveLesson, digLesson, serversLesson],
+    lessons: [resolveLesson, digLesson, serversLesson, recordsLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

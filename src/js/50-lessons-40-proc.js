@@ -470,12 +470,225 @@
     refs: ['zshbuiltins(1), for `jobs` and `kill`', 'zshmisc(1), section JOBS', 'kill(1)', 'signal(7)', 'sleep(1)'],
   };
 
+  /* -------------------------------------------------------------- services */
+  /** Is the SSH server unit running on the Kali machine? */
+  const sshActive = () => { const u = K.sys && K.sys.unit(K.kali, 'ssh.service'); return !!u && u.active === 'active'; };
+  const SSH_UNIT = /(^|\s)sshd?(\.service)?(\s|$)/;
+
+  const servicesLesson = {
+    id: 'proc-services',
+    title: 'Services: systemctl and listening ports',
+    minutes: 12,
+    objectives: [
+      'Read the state of a service from `systemctl status`',
+      'Start and stop a service with `sudo systemctl start` and `stop`',
+      'Tell apart *started now* and *enabled at boot*',
+      'Confirm with `ss -tln` which ports are open on your machine, and explain why Kali leaves network services off',
+    ],
+    intro: T(
+      'A *service* is a program that runs in the background with no terminal, usually from boot: the scheduler, the logging system, an SSH or web server. On Kali, as on most Linux distributions, services are managed by systemd, and `systemctl` is the command for talking to it.',
+      '',
+      'This matters to you in two ways. A service that listens on the network is a door into a machine. On your own workstation you decide which doors exist, and on a system you review, the list of services is the list of what it offers to others. In this lesson you start the SSH server of your Kali machine, see what that changes, and switch it off again.'
+    ),
+    steps: [
+      {
+        id: 'status',
+        prompt: T(
+          'Ask systemd about the SSH server. Its unit is called `ssh`:',
+          '',
+          '```',
+          'systemctl status ssh',
+          '```',
+          '',
+          'Read two lines.',
+          '',
+          '- `Loaded:` shows the file that defines the service, then whether it is started at boot. Here that is `disabled`. The last part, `preset: disabled`, is the default this distribution gives the service.',
+          '- `Active:` shows what it is doing now: `inactive (dead)`, which means not running.',
+          '',
+          'Looking is free. Any user may ask for the status of a service.'
+        ),
+        hint: 'Type `systemctl status ssh`.',
+        solution: 'systemctl status ssh',
+        check: { cmd: ['systemctl', 'service'], argsRe: /status/, out: /ssh\.service[\s\S]*Active:/ },
+      },
+      {
+        id: 'listen-before',
+        prompt: T(
+          'A network service waits for connections on a numbered *port*. `ss` shows the sockets of this machine. Ask it for the listening ones:',
+          '',
+          '```',
+          'ss -tln',
+          '```',
+          '',
+          '- `-t` shows TCP sockets',
+          '- `-l` shows only sockets that are listening, which means waiting for someone to connect',
+          '- `-n` prints port numbers instead of looking up service names',
+          '',
+          'On a fresh Kali the answer is a header line and nothing below it. No program on this machine is accepting connections from the network.',
+          '',
+          'That is deliberate. Kali is made to be taken onto networks you do not control, so it installs network services switched off, and a service you add later stays off until you start it. A machine on which nothing listens offers nothing to connect to.'
+        ),
+        hint: 'Type `ss -tln`: one dash, then the three letters.',
+        solution: 'ss -tln',
+        check: { any: [
+          { cmd: 'ss', args: ['-l'], out: /Local Address:Port/ },
+          { cmd: 'netstat', args: ['-l'], out: /Local Address/ },
+        ] },
+      },
+      {
+        id: 'start',
+        prompt: T(
+          'Now start the service. Starting and stopping services changes the machine for everyone who uses it, so it needs root:',
+          '',
+          '```',
+          'sudo systemctl start ssh',
+          '```',
+          '',
+          '`sudo` asks for your password, which is `kali` in this lab. After that the command prints nothing. `systemctl` reports only when something goes wrong, so silence means the service started.'
+        ),
+        hint: 'Put `sudo` in front of `systemctl start ssh` and type your password when asked.',
+        solution: 'sudo systemctl start ssh',
+        input: ['kali'],
+        check: { cmd: ['systemctl', 'service'], user: 'root', argsRe: /\b(re)?start\b|--now/, fn: sshActive },
+      },
+      {
+        id: 'status-running',
+        prompt: T(
+          'Do not take silence on trust. Look at the status of the unit again, with the same command you used in the first step.',
+          '',
+          'The `Active:` line now reads `active (running)`, with the time it started. `Main PID:` is the process that does the work, and `ps` would show it under the same number. The lines at the bottom are the latest messages the service has logged. Two of them say which addresses and which port the server is listening on.'
+        ),
+        hint: '`systemctl status` followed by the name of the unit.',
+        solution: 'systemctl status ssh',
+        check: { cmd: ['systemctl', 'service'], argsRe: /status/, out: /ssh\.service[\s\S]*Active: active \(running\)/ },
+      },
+      {
+        id: 'listen-after',
+        prompt: 'The log lines say that the server listens on port 22. Confirm it from the outside of the service: list the listening TCP sockets again, as you did before you started it.',
+        hint: 'The same `ss` command as before, with `-t`, `-l` and `-n`.',
+        solution: 'ss -tln',
+        check: { any: [
+          { cmd: 'ss', args: ['-l'], out: /^LISTEN\s.*:(22|ssh)\s/m },
+          { cmd: 'netstat', args: ['-l'], out: /:(22|ssh)\s.*LISTEN/ },
+        ] },
+      },
+      {
+        id: 'address',
+        prompt: T(
+          'Two lines have appeared, one for IPv4 and one for IPv6. Each `LISTEN` line is an open door, and the column `Local Address:Port` says where the door is.',
+          '',
+          'What does that column show on the first `LISTEN` line?'
+        ),
+        hint: 'It is the fourth item on the line: an address, a colon and a port number.',
+        solution: '0.0.0.0:22',
+        answer: /^0\.0\.0\.0\s*(:\s*(22|ssh))?$/i,
+      },
+      {
+        id: 'enabled',
+        prompt: T(
+          'The address `0.0.0.0` stands for every address this machine has, so the SSH server can now be reached from the network, not only from the machine itself. A service that listened on `127.0.0.1` would be reachable only locally. This is the first thing to read in any list of listening ports.',
+          '',
+          'The service is running. Will it be running after the next restart of the machine? That is a separate question with its own command:',
+          '',
+          '```',
+          'systemctl is-enabled ssh',
+          '```',
+          '',
+          'It answers `disabled`. `start` and `stop` act now and are forgotten at the next boot. `enable` and `disable` decide what happens at boot and change nothing now. The two are independent, so a service can be running but disabled, as this one is, or enabled but stopped.',
+          '',
+          '`sudo systemctl enable ssh` would make the server start at every boot. Do not run it here. A Kali machine that offers SSH on every network it joins, perhaps still with the well-known password `kali`, is exactly what the default is meant to prevent.'
+        ),
+        hint: 'Type `systemctl is-enabled ssh`. No `sudo` is needed to ask.',
+        solution: 'systemctl is-enabled ssh',
+        check: { cmd: 'systemctl', args: ['is-enabled'], argsRe: SSH_UNIT, out: /^(disabled|enabled)\s*$/m },
+      },
+      {
+        id: 'stop',
+        prompt: T(
+          'You started the service to look at it, and the look is over. Close the door again: stop the SSH server.',
+          '',
+          'The command has the same shape as the one that started it.'
+        ),
+        hint: 'Replace `start` with `stop`. It needs `sudo` for the same reason.',
+        solution: 'sudo systemctl stop ssh',
+        input: ['kali'],
+        check: { cmd: ['systemctl', 'service'], user: 'root', argsRe: /\bstop\b|--now/, fn: () => !sshActive() },
+      },
+      {
+        id: 'confirm',
+        prompt: T(
+          'Confirm that it worked. You know three ways to ask, and any of them completes this step:',
+          '',
+          '- `systemctl is-active ssh` answers in one word, which is convenient in scripts',
+          '- `systemctl status ssh` shows the full picture',
+          '- `ss -tln` shows whether port 22 is still open',
+          '',
+          'Checking the result of a change, and not assuming it, is a habit worth keeping. Before you connect a testing workstation to a network that is not yours, `ss -tln` tells you in one line what that network will be able to reach on your machine.'
+        ),
+        hint: 'For example `systemctl is-active ssh`. The step completes when the answer shows that the service is no longer running.',
+        solution: 'systemctl is-active ssh',
+        check: { any: [
+          { cmd: 'systemctl', args: ['is-active'], argsRe: SSH_UNIT, out: /^inactive\s*$/m },
+          { cmd: ['systemctl', 'service'], argsRe: /status/, out: /ssh\.service[\s\S]*Active: inactive/ },
+          { cmd: 'ss', args: ['-l'], out: /Local Address:Port/, fn: (ev) => !sshActive() && !/:(22|ssh)\s/.test(outOf(ev)) },
+        ] },
+      },
+    ],
+    quiz: [
+      {
+        q: 'You run `sudo systemctl start apache2` and later restart the machine. Is the web server running after the restart?',
+        choices: [
+          'Yes, a service that has been started stays started',
+          'Only if nobody has run `systemctl stop apache2` in the meantime',
+          'No: `start` acts only on the running system. Starting at boot is what `enable` is for',
+          'No, because `start` needs the option `--boot`',
+        ],
+        answer: 2,
+        why: '`start` and `stop` change the present, `enable` and `disable` change what happens at boot. To get both at once there is `sudo systemctl enable --now apache2`.',
+      },
+      {
+        q: '`ss -tln` on a server shows `127.0.0.1:5432` on one line and `0.0.0.0:80` on another. Which of the two services can other machines on the network connect to?',
+        choices: [
+          'Only the one on port 80: `0.0.0.0` means every address of the machine, `127.0.0.1` means the machine itself only',
+          'Only the one on port 5432',
+          'Both, because both are in the state `LISTEN`',
+          'Neither, until a firewall rule opens the ports',
+        ],
+        answer: 0,
+        why: 'A service bound to `127.0.0.1` accepts connections only from programs on the same machine. One bound to `0.0.0.0` accepts them on every network interface.',
+      },
+      {
+        q: '`systemctl is-active ssh` prints `inactive` and `systemctl is-enabled ssh` prints `enabled`. What is the situation?',
+        choices: [
+          'The service is broken, because the two answers contradict each other',
+          'The service is not running now, and it will be started at the next boot',
+          'The service is running, and it will not be started at the next boot',
+          'The service is not installed',
+        ],
+        answer: 1,
+        why: 'The two commands answer different questions: what is happening now, and what will happen at boot. Somebody stopped the service without disabling it, so it comes back after a restart.',
+      },
+      {
+        q: 'Why does Kali install network services switched off?',
+        choices: [
+          'To make the machine start faster',
+          'Because the services are trial versions that have to be activated',
+          'Because systemd cannot start services on a desktop system',
+          'Because a testing workstation is often on networks that are not trusted, and every listening service is something others can connect to',
+        ],
+        answer: 3,
+        why: 'Kali disables network services by default, including services you install later. You start what you need, for as long as you need it, and nothing listens without your decision.',
+      },
+    ],
+    refs: ['systemctl(1)', 'systemd.unit(5)', 'ss(8)', 'sshd(8)', 'Kali Linux Revealed, ch. 5 (Managing Services)', 'kali.org/docs/policy/kali-linux-network-service-policy'],
+  };
+
   K.lessons.register({
     id: 'proc',
     title: 'Processes, services and logs',
     order: 40,
     summary: 'See what is running on a system and what started it, control jobs and services, and read the logs that record what happened.',
-    lessons: [psLesson, jobsLesson],
+    lessons: [psLesson, jobsLesson, servicesLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);

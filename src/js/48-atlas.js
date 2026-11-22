@@ -15,6 +15,7 @@
   const PLAIN = { head: identity, key: identity, ok: identity, warn: identity, bad: identity, dim: identity };
   const COLOUR = { head: K.c.bold, key: K.c.cyan, ok: K.c.green, warn: K.c.yellow, bad: K.c.red, dim: K.c.gray };
   const pen = (ctx) => (ctx.isTTY ? COLOUR : PLAIN);
+  const errPen = (ctx) => (ctx.errTTY ? COLOUR : PLAIN);
 
   const textWidth = (ctx) => Math.max(40, Math.min(ctx.cols || 80, 100));
 
@@ -28,8 +29,8 @@
     return lines;
   }
 
-  /** A paragraph wrapped to the terminal, every line indented. */
-  const para = (ctx, text, indent) => wrap(text, textWidth(ctx) - indent).map((l) => ' '.repeat(indent) + l).join('\n') + '\n';
+  /** A paragraph wrapped to the terminal, every line indented and, if asked, coloured. */
+  const para = (ctx, text, indent, paint) => wrap(text, textWidth(ctx) - indent).map((l) => ' '.repeat(indent) + (paint || identity)(l)).join('\n') + '\n';
 
   /** Label and text in two columns; long text wraps with a hanging indent. */
   function rows(ctx, pairs, paint) {
@@ -295,7 +296,7 @@
     const p = pen(ctx); const found = seenHosts();
     const hosts = labHosts().sort(byAddress);
     const body = hosts.map((h) => [h.ip, hostName(h), h.kind || 'host', found.has(h.ip) ? 'yes' : 'no', portList(found.get(h.ip))]);
-    return wrap('Spoiler: this is the whole lab, including hosts you have not found yet.', textWidth(ctx)).map(p.warn).join('\n') + '\n\n' +
+    return para(ctx, 'Spoiler: this is the whole lab, including hosts you have not found yet.', 0, p.warn) + '\n' +
       table(ctx, ['ADDRESS', 'NAME', 'ROLE', 'FOUND', 'OPEN PORTS SEEN'], body, [p.key, null, null, (cell) => (cell.trim() === 'yes' ? p.ok(cell) : cell)]) + '\n' +
       para(ctx, plural(hosts.filter((h) => found.has(h.ip)).length, 'host') + ' of ' + hosts.length + ' found. Open ports are still listed only where you have seen them.', 0);
   }
@@ -693,6 +694,45 @@
     return ctx.fail("atlas: no category or tool named '" + g.rest[0] + "'\n" +
       (hit.similar.length ? 'Tools with a similar name: ' + names(hit.similar, 'name') : "Run 'kalima atlas' for the list of categories."));
   }
+
+  /* ------------------------------------------------------------------ stubs
+   * Catalogue tools that no pack simulates still get an executable, so that a
+   * learner who runs one is told plainly where the simulation ends. A pack
+   * that registers the real command later simply replaces the placeholder.
+   */
+  const SBIN = ['netdiscover', 'hping3', 'lynis', 'airmon-ng', 'airodump-ng', 'wifite', 'arpspoof', 'dsniff', 'responder', 'netsniff-ng'];
+
+  function stubNotice(ctx, tool, p) {
+    return para(ctx, '[kalima] ' + tool.name + ' is a real Kali Linux tool, but this build does not simulate it.', 0, p.warn) + rows(ctx, [
+      ['What it is', tool.summary],
+      ['Category', categoryOf(tool).title],
+      ['Catalogue entry', 'kalima atlas ' + tool.name],
+    ], p.key);
+  }
+
+  function registerStub(tool) {
+    const sbin = SBIN.includes(tool.name);
+    K.cmd.register({
+      name: tool.name,
+      pkg: tool.pkg,
+      path: (sbin ? '/usr/sbin/' : '/usr/bin/') + tool.name,
+      section: sbin ? 8 : 1,
+      only: 'kali',
+      installed: tool.installed,
+      stub: true,
+      summary: tool.summary,
+      man: 'DESCRIPTION\n       ' + tool.name + ' is a real Kali Linux tool from the ' + categoryOf(tool).title + ' category, shipped in the package ' + tool.pkg + '. This build of the Kalima simulator lists it in its catalogue but does not simulate it: running ' + tool.name + ' here prints a notice and does nothing else.\n\n' +
+        '       This page stands in for the manual page of the real tool, which is not reproduced.\n\n' +
+        'SEE ALSO\n       kalima atlas ' + tool.name + '\n       ' + tool.url,
+      run(ctx) {
+        const help = ctx.args.includes('--help') || ctx.args.includes('-h');
+        if (help) ctx.out(stubNotice(ctx, tool, pen(ctx))); else ctx.err(stubNotice(ctx, tool, errPen(ctx)));
+        return help ? 0 : 1;
+      },
+    });
+  }
+
+  for (const tool of K.atlas.list()) if (!K.cmd.has(tool.name)) registerStub(tool);
 
   /* ---------------------------------------------------------------- kalima */
   const TRY_HELP = "Try 'kalima help' for a list of commands.";
