@@ -1,0 +1,103 @@
+// Tests for the calculators, JSON and assorted filters (40-cmd-text3.js).
+// Expected output was checked against the real tools where they are installed.
+import { test, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { boot } from './harness.mjs';
+
+let sim;
+before(async () => {
+  sim = await boot();
+  await sim.run('cd /tmp');
+});
+const run = (line) => sim.run(line);
+const out = async (line) => (await run(line)).out;
+
+/** [command line, stdout, stderr, status] rows, run in one shell. */
+function table(name, rows) {
+  test(name, async () => {
+    for (const [line, stdout, stderr = '', status = 0] of rows) {
+      const r = await run(line);
+      assert.deepEqual([r.out, r.err, r.code], [stdout, stderr, status], line);
+    }
+  });
+}
+
+/* ------------------------------------------------------------------- jq */
+const J1 = `echo '{"a":[1,{"b":null,"c":true,"d":"x"}],"e":{},"f":[],"g":1.5}'`;
+table('jq: pretty printing, compact output and paths', [
+  [`${J1} | jq .`, '{\n  "a": [\n    1,\n    {\n      "b": null,\n      "c": true,\n      "d": "x"\n    }\n  ],\n  "e": {},\n  "f": [],\n  "g": 1.5\n}\n'],
+  [`${J1} | jq -c .`, '{"a":[1,{"b":null,"c":true,"d":"x"}],"e":{},"f":[],"g":1.5}\n'],
+  [`${J1} | jq -c '.a[1].d, .a[0], .g'`, '"x"\n1\n1.5\n'],
+  [`${J1} | jq --tab '.a'`, '[\n\t1,\n\t{\n\t\t"b": null,\n\t\t"c": true,\n\t\t"d": "x"\n\t}\n]\n'],
+  [`${J1} | jq --indent 1 '.e, .a[:1]'`, '{}\n[\n 1\n]\n'],
+  [`echo '{"b":1,"a":{"d":1,"c":2}}' | jq -S -c .`, '{"a":{"c":2,"d":1},"b":1}\n'],
+  [`echo '"é☃"' | jq -a .`, '"\\u00e9\\u2603"\n'],
+  [`echo '["a","b c",1,null]' | jq -r '.[]'`, 'a\nb c\n1\nnull\n'],
+  [`echo '["a",1,"b"]' | jq -j '.[]'`, 'a1b'],
+]);
+
+table('jq: operators, builtins and pipelines', [
+  [`echo '[3,1,2,3]' | jq -c 'sort, sort_by(-.), unique, add, first, last, reverse, min, max'`, '[1,2,3,3]\n[3,3,2,1]\n[1,2,3]\n9\n3\n3\n[3,2,1,3]\n1\n3\n'],
+  [`echo '[{"n":1,"name":"x"},{"n":2,"name":"y"},{"n":3,"name":"z"}]' | jq -c '.[] | select(.n > 1 and .n < 3) | .name'`, '"y"\n'],
+  [`echo '{"b":1,"a":"s"}' | jq -c 'keys, length, map(type), to_entries'`, '["a","b"]\n2\n["number","string"]\n[{"key":"b","value":1},{"key":"a","value":"s"}]\n'],
+  [`echo '[1,"a",null,true]' | jq 'join(",")'`, '"1,a,,true"\n'],
+  [`echo '{"a":1,"b":2}' | jq -c 'with_entries(.value += 1), has("a"), (to_entries | map(select(.value > 1)) | from_entries)'`, '{"a":2,"b":3}\ntrue\n{"b":2}\n'],
+  [`echo '[1,2,3]' | jq -c 'reduce .[] as $x (0; . + $x), [foreach .[] as $x (0; . + $x)], [.[] | if . > 1 then "big" else "small" end]'`, '6\n[1,3,6]\n["small","big","big"]\n'],
+  [`echo '{"a":1,"b":2}' | jq -c '.a = 5 | .b |= . + 1 | .c += 2 | del(.a)'`, '{"b":3,"c":2}\n'],
+  [`echo '[1,2,3]' | jq -c '(.[] | select(. > 1)) |= . * 10'`, '[1,20,30]\n'],
+  [`echo '"abc"' | jq -c 'test("B";"i"), sub("b";"X"), gsub("[ac]";"-"), [scan("[a-c]")], capture("(?<x>b)"), ascii_upcase, length'`, 'true\n"aXc"\n"-b-"\n["a","b","c"]\n{"x":"b"}\n"ABC"\n3\n'],
+  [`jq -nc '[limit(3;range(10))], [range(0;10;3)], ("a,b"|split(",")), (1 + 2 * 3), ("ab" * 2), ({a:1} + {b:2})'`, '[0,1,2]\n[0,3,6,9]\n["a","b"]\n7\n"abab"\n{"a":1,"b":2}\n'],
+  [`jq -nc '{a:(1,2),b:(3,4)}, "\\(1,2)-\\(3,4)"'`, '{"a":1,"b":3}\n{"a":1,"b":4}\n{"a":2,"b":3}\n{"a":2,"b":4}\n"1-3"\n"2-3"\n"1-4"\n"2-4"\n'],
+  [`echo '[1,"a b","<&>"]' | jq -r '@csv, @tsv, @sh, @json, @uri, @base64'`, '1,"a b","<&>"\n1\ta b\t<&>\n1 \'a b\' \'<&>\'\n[1,"a b","<&>"]\n%5B1%2C%22a%20b%22%2C%22%3C%26%3E%22%5D\nWzEsImEgYiIsIjwmPiJd\n'],
+  [`jq -nc 'def f(x): x * 2; def fac: if . <= 1 then 1 else . * (. - 1 | fac) end; [f(3), (5 | fac)], (label $out | 1, 2, break $out, 3)'`, '[6,120]\n1\n2\n'],
+  [`echo '[[1,2],[3,[4]]]' | jq -c 'flatten, transpose, [paths]'`, '[1,2,3,4]\n[[1,3],[2,[4]]]\n[[0],[0,0],[0,1],[1],[1,0],[1,1],[1,1,0]]\n'],
+]);
+
+table('jq: -n, -s, -R, -e, --arg and multiple inputs', [
+  [`echo '1 2 3' | jq -c -s .`, '[1,2,3]\n'],
+  [`echo '1 2 3' | jq -nc '[inputs]'`, '[1,2,3]\n'],
+  [`printf 'a\\nb\\n' | jq -R .`, '"a"\n"b"\n'],
+  [`printf 'a\\nb\\n' | jq -Rs .`, '"a\\nb\\n"\n'],
+  [`jq -nc --arg x 1 --argjson y '{"a":2}' '[$x, $y, $ARGS.named]'`, '["1",{"a":2},{"x":"1","y":{"a":2}}]\n'],
+  [`jq -nc '$ARGS.positional' --args a b`, '["a","b"]\n'],
+  [`jq -nc '$ARGS.positional' --jsonargs 1 '"x"'`, '[1,"x"]\n'],
+  [`echo null | jq -e .`, 'null\n', '', 1],
+  [`echo 1 | jq -e empty`, '', '', 4],
+  [`echo 1 | jq -e .`, '1\n'],
+  [`echo '{"a":1}' > j.json; jq -c . j.json j.json`, '{"a":1}\n{"a":1}\n'],
+  [`jq -n '"bye\\n" | halt_error(1)'`, '', 'bye\n', 1],
+  [`echo '"x"' | jq -r '@base64 "v=\\(.)"'`, 'v=eA==\n'],
+  [`echo '"aGk="' | jq -r '@base64d'`, 'hi\n'],
+  [`echo '{"a":1}' | jq -r '.a as $x | "n=\\($x)"'`, 'n=1\n'],
+  [`echo '{"a":{"b":2}}' | jq -c 'tojson, (tojson | fromjson), [paths], [..]'`, '"{\\"a\\":{\\"b\\":2}}"\n{"a":{"b":2}}\n[["a"],["a","b"]]\n[{"a":{"b":2}},{"b":2},2]\n'],
+]);
+
+table('jq: errors and exit codes', [
+  [`echo '{"a":1}' | jq '.a.b'`, '', 'jq: error (at <stdin>:1): Cannot index number with string "b"\n', 5],
+  [`printf '{"a":1}\\n{"a":2}\\n[1]\\n' | jq '.a'`, '1\n2\n', 'jq: error (at <stdin>:3): Cannot index array with string "a"\n', 5],
+  [`echo 1 | jq 'error("boom")'`, '', 'jq: error (at <stdin>:1): boom\n', 5],
+  [`echo '{"a":1}' | jq error`, '', 'jq: error (at <stdin>:1) (not a string): {"a":1}\n', 5],
+  [`echo 1 | jq -c '[.[]?], (try error("x") catch .), ((1/0)? // "z")'`, '[]\n"x"\n"z"\n'],
+  [`echo 1 | jq '.a b'`, '', 'jq: error: syntax error, unexpected IDENT, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:\n.a b\njq: 1 compile error\n', 3],
+  [`echo 1 | jq foo`, '', 'jq: error: foo/0 is not defined at <top-level>, line 1:\nfoo\njq: 1 compile error\n', 3],
+  [`echo 1 | jq '$y'`, '', 'jq: error: $y is not defined at <top-level>, line 1:\n$y\njq: 1 compile error\n', 3],
+  [`echo '{a' | jq .`, '', 'jq: parse error: Invalid numeric literal at line 2, column 0\n', 5],
+  [`echo '{"a":1,}' | jq .`, '', 'jq: parse error: Expected another key-value pair at line 1, column 8\n', 5],
+  [`echo '[1 2]' | jq .`, '', 'jq: parse error: Expected separator between values at line 1, column 5\n', 5],
+  [`echo '[1,2' | jq .`, '', 'jq: parse error: Unfinished JSON term at EOF at line 2, column 0\n', 5],
+  [`jq . /nonexistent`, '', 'jq: error: Could not open /nonexistent: No such file or directory\n', 2],
+  [`jq --bogus . < /dev/null`, '', 'jq: Unknown option --bogus\nUse jq --help for help with command-line options,\nor see the jq manpage, or online docs  at https://jqlang.github.io/jq\n', 2],
+  [`jq --version`, 'jq-1.7.1\n'],
+]);
+
+test('jq: colours on a terminal match the real tool and are off in pipes', async () => {
+  const r = await run(`${J1} | jq -C -c '.a'`);
+  assert.equal(r.out, '\x1b[1;39m[\x1b[0;39m1\x1b[0m\x1b[1;39m,\x1b[1;39m{\x1b[0m\x1b[1;34m"b"\x1b[0m\x1b[1;39m:\x1b[0m\x1b[0;90mnull\x1b[0m\x1b[1;39m,\x1b[0m\x1b[1;34m"c"\x1b[0m\x1b[1;39m:\x1b[0m\x1b[0;39mtrue\x1b[0m\x1b[1;39m,\x1b[0m\x1b[1;34m"d"\x1b[0m\x1b[1;39m:\x1b[0m\x1b[0;32m"x"\x1b[0m\x1b[1;39m\x1b[1;39m}\x1b[0m\x1b[1;39m\x1b[1;39m]\x1b[0m\n');
+  const t = await sim.type(`${J1} | jq -c .e`);
+  assert.equal(t.output.trim(), '{}');
+});
+
+test('jq: help and man page', async () => {
+  assert.match(await out('jq --help'), /^jq - commandline JSON processor/);
+  assert.match(await out('man jq'), /DESCRIPTION/);
+});
