@@ -144,3 +144,125 @@ test('find output feeds pipelines and xargs', async () => {
   assert.equal(await out('find src -type f | wc -l'), '2\n');
   assert.equal(await out('find src -type f -print0 | xargs -0 cat'), 'a\nbb\n');
 });
+
+/* ------------------------------------------------------------ tar, gzip */
+
+const FILES = 'mkdir -p /tmp/a/d/e; cd /tmp/a; echo hi > d/a; echo hello > d/e/b; chmod 600 d/e/b; ln -s a d/l; touch -d "2026-01-02 03:04:05" d/a';
+
+test('tar -c / -t / -x round-trip names, modes, contents and symlinks', async () => {
+  const { sh, out } = await setup();
+  await sh(FILES);
+  const c = await sh('tar -cvf x.tar d');
+  assert.equal(c.out, 'd/\nd/a\nd/e/\nd/e/b\nd/l\n');
+  assert.equal(await out('tar -tf x.tar'), 'd/\nd/a\nd/e/\nd/e/b\nd/l\n');
+  assert.equal(await out('tar -tf x.tar d/e'), 'd/e/\nd/e/b\n');
+  const v = await out('tar -tvf x.tar');
+  assert.match(v, /^drwxr-xr-x kali\/kali {9}0 \d{4}-\d\d-\d\d \d\d:\d\d d\/\n/);
+  assert.match(v, /-rw-r--r-- kali\/kali +3 2026-01-02 03:04 d\/a\n/);
+  assert.match(v, /-rw------- kali\/kali +6 .* d\/e\/b\n/);
+  assert.match(v, /lrwxrwxrwx kali\/kali +0 .* d\/l -> a\n/);
+  await sh('mkdir out; tar -xvf x.tar -C out');
+  assert.equal(await out('cat out/d/e/b'), 'hello\n');
+  assert.equal(await out('readlink out/d/l'), 'a\n');
+  assert.equal(await out('stat -c "%a %y" out/d/e/b out/d/a'), '600 ' + (await out('stat -c %y d/e/b')).trim() + '\n644 2026-01-02 03:04:05.000000000 +0000\n');
+  assert.equal(await out('file x.tar'), 'x.tar: POSIX tar archive (GNU)\n');
+  assert.equal(await out('wc -c < x.tar'), '10240\n');
+});
+
+test('tar -z, -j, -J, -a and automatic detection on read', async () => {
+  const { sh, out } = await setup();
+  await sh(FILES);
+  await sh('tar -czf x.tgz d; tar -cjf x.tbz d; tar -cJf x.txz d; tar -caf y.tar.gz d');
+  assert.match(await out('file x.tgz'), /gzip compressed data/);
+  assert.match(await out('file x.tbz'), /bzip2 compressed data/);
+  assert.match(await out('file x.txz'), /XZ compressed data/);
+  assert.match(await out('file y.tar.gz'), /gzip compressed data/);
+  for (const f of ['x.tgz', 'x.tbz', 'x.txz']) assert.equal(await out('tar -tf ' + f + ' | wc -l'), '5\n');
+  assert.equal(await out('tar -xzOf x.tgz d/e/b'), 'hello\n');
+  await sh('mkdir /tmp/sc; tar xf x.tgz --strip-components=1 -C /tmp/sc');
+  assert.equal(await out('cat /tmp/sc/a'), 'hi\n');
+  assert.equal(await out('tar -cf - d | tar -tf -'), 'd/\nd/a\nd/e/\nd/e/b\nd/l\n');
+  assert.equal(await out('tar -czf - d | gunzip | tar -tf - | wc -l'), '5\n');
+});
+
+test('tar excludes, member lists and the error paths', async () => {
+  const { sim, sh, out } = await setup();
+  await sh(FILES);
+  assert.equal(await out('tar -cf - --exclude=e d | tar -tf -'), 'd/\nd/a\nd/l\n');
+  await sh('tar -cf x.tar d');
+  assert.equal((await sh('tar -xf x.tar nothere')).err, 'tar: nothere: Not found in archive\ntar: Exiting with failure status due to previous errors\n');
+  assert.equal((await sh('tar -xf x.tar nothere')).code, 2);
+  const r = await sh('tar -tf nope.tar');
+  assert.equal(r.err, 'tar: nope.tar: Cannot open: No such file or directory\ntar: Error is not recoverable: exiting now\n');
+  assert.equal(r.code, 2);
+  assert.equal((await sh('tar -cf y.tar d/zz')).err, 'tar: d/zz: Cannot stat: No such file or directory\ntar: Exiting with failure status due to previous errors\n');
+  assert.equal((await sh('tar')).err, "tar: You must specify one of the '-Acdtrux', '--delete' or '--test-label' options\nTry 'tar --help' or 'tar --usage' for more information.\n");
+  assert.equal((await sh('tar --foo')).code, 64);
+  assert.equal((await sh('tar -cf y.tar')).err.split('\n')[0], 'tar: Cowardly refusing to create an empty archive');
+  assert.equal((await sh('echo junk > j; tar -tf j')).err, 'tar: This does not look like a tar archive\ntar: Skipping to next header\ntar: Exiting with failure status due to previous errors\n');
+  assert.match((await sh('tar -tzf x.tar')).err, /gzip: stdin: not in gzip format\ntar: Child returned status 1/);
+  assert.equal((await sh('tar -cf x.tar x.tar d')).err, 'tar: x.tar: file is the archive; not dumped\ntar: Exiting with failure status due to previous errors\n');
+  assert.match((await sim.type('tar -c d')).output, /^tar: Refusing to write archive contents to terminal \(missing -f option\?\)\n/);
+  assert.equal((await sh('tar -cf /y.tar d')).err.split('\n')[0], 'tar: /y.tar: Cannot open: Permission denied');
+  assert.match((await sh('tar --version')).out, /^tar \(GNU tar\) 1\.35/);
+});
+
+test('tar strips a leading slash and preserves root ownership when extracting as root', async () => {
+  const { sim, sh, out } = await setup();
+  await sh(FILES);
+  const r = await sh('tar -cf abs.tar /tmp/a/d/a');
+  assert.equal(r.err, "tar: Removing leading `/' from member names\n");
+  assert.equal(await out('tar -tf abs.tar'), 'tmp/a/d/a\n');
+  sim.term.feed('kali');
+  await sh('sudo tar -cf /tmp/root.tar -C /etc hostname; mkdir /tmp/rx');
+  assert.match(await out('tar -tvf /tmp/root.tar'), /^-rw-r--r-- root\/root +\d+ \d{4}-/);
+  await sh('sudo tar -xf /tmp/root.tar -C /tmp/rx');
+  assert.equal(await out('stat -c %U /tmp/rx/hostname'), 'root\n');
+  assert.equal(await out('tar -xf /tmp/root.tar -C /tmp/rx; stat -c %U /tmp/rx/hostname'), 'kali\n');
+});
+
+test('gzip, gunzip, zcat: in place, -k, -c, -d, -l, -t, -v and error texts', async () => {
+  const { sh, out } = await setup();
+  await sh('cd /tmp; seq 1 1000 > big; echo hello > a; chmod 640 a');
+  assert.equal((await sh('gzip -k a')).code, 0);
+  assert.equal(await out('ls a a.gz'), 'a\na.gz\n');
+  assert.match(await out('file a.gz'), /gzip compressed data, was "a", last modified: .*, from Unix, original size modulo 2\^32 6/);
+  assert.equal(await out('stat -c %a a.gz'), '640\n');
+  assert.equal((await sh('gzip -k a')).err, 'gzip: a.gz already exists;\tnot overwritten\n');
+  assert.equal((await sh('gzip -f a')).code, 0);
+  assert.equal(await out('ls a a.gz'.replace('a a.gz', 'a.gz')), 'a.gz\n');
+  assert.equal(await out('zcat a.gz'), 'hello\n');
+  assert.equal(await out('gzip -dc a.gz'), 'hello\n');
+  assert.equal(await out('gunzip a.gz; cat a'), 'hello\n');
+  assert.equal((await sh('gzip a.gz')).err, 'gzip: a.gz: No such file or directory\n');
+  await sh('gzip big');
+  assert.equal(await out('zcat big.gz | tail -1'), '1000\n');
+  assert.equal(await out('zcat big.gz | md5sum'), await out('seq 1 1000 | md5sum'));
+  const l = await out('gzip -l big.gz');
+  assert.match(l, /^ +compressed +uncompressed +ratio uncompressed_name\n +\d+ +3893 +\d+\.\d% big\n$/);
+  assert.match(await out('gzip -lv big.gz'), /^method  crc     date  time  +compressed +uncompressed +ratio uncompressed_name\ndefla [0-9a-f]{8} \w{3} [ \d]\d [\d:]{5} +\d+ +3893/);
+  assert.equal((await sh('gzip -tv big.gz')).err, 'big.gz:\t OK\n');
+  const v = await sh('gzip -vk big.gz'); assert.equal(v.err, 'gzip: big.gz already has .gz suffix -- unchanged\n'.replace('gzip: ', 'gzip: '));
+  assert.match((await sh('gunzip -vk big.gz')).err, /^big.gz:\t +\d+\.\d% -- replaced with big\n$/);
+});
+
+test('gzip error texts and stdin handling', async () => {
+  const { sh, out } = await setup();
+  await sh('cd /tmp; echo plain > p; mkdir dd');
+  assert.equal((await sh('gzip -d p')).err, 'gzip: p: unknown suffix -- ignored\n');
+  assert.equal((await sh('gzip -d p')).code, 2);
+  assert.equal((await sh('gzip -t p')).err, 'gzip: p: not in gzip format\n');
+  assert.equal((await sh('gunzip nope')).err, 'gzip: nope.gz: No such file or directory\n');
+  assert.equal((await sh('gzip nope')).err, 'gzip: nope: No such file or directory\n');
+  assert.equal((await sh('gzip nope')).code, 1);
+  assert.equal((await sh('gzip dd')).err, 'gzip: dd is a directory -- ignored\n');
+  assert.equal((await sh('gzip --foo')).err, "gzip: unrecognized option '--foo'\nTry `gzip --help' for more information.\n");
+  assert.match((await sh('gzip')).err, /^gzip: compressed data not written to a terminal/);
+  assert.equal(await out('echo piped | gzip | zcat'), 'piped\n');
+  assert.equal(await out('echo piped | gzip -c | gzip -dc'), 'piped\n');
+  assert.equal((await sh('echo plain | gunzip')).err, 'gzip: stdin: not in gzip format\n');
+  assert.equal(await out('cd dd; echo x > f; gzip -r ..; ls'), 'f.gz\n'.replace('f.gz', 'f.gz'));
+  assert.match((await sh('gzip --version')).out, /^gzip 1\.12/);
+  assert.match((await sh('gzip -h')).out, /^Usage: gzip \[OPTION\]/);
+  assert.equal(await out('gzip -c p | wc -c'), (await out('gzip -c p | wc -c')));
+});
