@@ -301,12 +301,201 @@
     refs: ['base64(1)', 'xxd(1)', 'ascii(7)', 'RFC 4648 (Base16, Base32 and Base64 encodings)', 'RFC 7617 (HTTP Basic authentication)'],
   };
 
+  /* ------------------------------------------------------------------ hash */
+  const hashLesson = {
+    id: 'data-hash',
+    title: 'Hashing: a fingerprint for data',
+    minutes: 11,
+    objectives: [
+      'Compute MD5 and SHA-256 digests of files and of text with `md5sum` and `sha256sum`',
+      'Show that identical content gives an identical digest and that a one-character change gives a completely different one',
+      'Compare a computed digest with a published one',
+      'Explain why MD5 and SHA-1 are no longer trusted for security and SHA-256 is',
+    ],
+    intro: T(
+      'A cryptographic hash function reads any amount of data and produces a short, fixed-length digest. The same input always gives the same digest, and changing even one character gives a completely different one. That makes a digest a fingerprint: a way to tell whether two files are identical, or whether a file changed, without comparing them byte by byte.',
+      '',
+      'On a security workstation you use digests to check downloads, to record that evidence was not altered, and to recognize known files. Unlike an encoding, a digest cannot be turned back into the original data. You practice on small files under `' + HASHING + '`. Nothing here changes any file.'
+    ),
+    steps: [
+      {
+        id: 'md5',
+        prompt: T(
+          'Start with the older tool. Move to the practice folder and fingerprint the load manifest with `md5sum`:',
+          '',
+          '```',
+          'cd ' + HASHING,
+          'md5sum manifest.txt',
+          '```',
+          '',
+          'The output has two columns: the digest, then the file name. An MD5 digest is 32 hexadecimal characters. You will use the digest of this file again in a moment.'
+        ),
+        hint: 'Change into the folder with `cd`, then give `md5sum` the file name. `&&` lets you do both on one line.',
+        solution: 'cd ' + HASHING + ' && md5sum manifest.txt',
+        check: { cmd: 'md5sum', out: /da65ee49163377b7264cd0390999fd02\s+manifest\.txt/ },
+      },
+      {
+        id: 'sha256',
+        prompt: T(
+          'Now the same file with `sha256sum`, the algorithm you should prefer today:',
+          '',
+          '```',
+          'sha256sum manifest.txt',
+          '```',
+          '',
+          'Same layout, but a longer digest. The digest length depends on the algorithm and never on the size of the file: a one-line file and a four-gigabyte image both produce a digest of the same length.'
+        ),
+        hint: 'Use the same pattern as before with `sha256sum` instead of `md5sum`.',
+        solution: 'sha256sum manifest.txt',
+        check: { cmd: 'sha256sum', out: /6071f1dff00e87b5ca3f26e5144c93520bb00e5ec7def7cbbb2dc79c1e111c2c\s+manifest\.txt/ },
+      },
+      {
+        id: 'length',
+        prompt: 'Count the hexadecimal characters in the SHA-256 digest on your screen. How many are there?',
+        hint: 'MD5 gave 32 characters. SHA-256 is twice as long, because its name states its size in bits and every hex character is 4 bits.',
+        solution: '64',
+        answer: /^64( characters| hex characters| hex digits)?$/i,
+      },
+      {
+        id: 'same',
+        prompt: T(
+          'Two files can have different names and the same content. `manifest-copy.txt` is a copy of `manifest.txt`. Fingerprint both with one command:',
+          '',
+          '```',
+          'sha256sum manifest.txt manifest-copy.txt',
+          '```',
+          '',
+          'Compare the first column of the two lines. The digest depends only on the content, never on the file name, the date or the owner. This is how you confirm that a copy is exact.'
+        ),
+        hint: 'Give `sha256sum` both file names, separated by a space.',
+        solution: 'sha256sum manifest.txt manifest-copy.txt',
+        check: { cmd: ['sha256sum', 'md5sum'], argsRe: /manifest-copy\.txt/, out: /\b([0-9a-f]{32,64})\s+manifest\.txt\s+\1\s+manifest-copy\.txt/ },
+      },
+      {
+        id: 'diff',
+        prompt: T(
+          '`manifest-edited.txt` is a third version in which someone changed one character. Find out which with `diff`, which lists the lines that differ:',
+          '',
+          '```',
+          'diff manifest.txt manifest-edited.txt',
+          '```',
+          '',
+          '`<` marks the line in the first file and `>` the line in the second. Only the pallet count changed, from 12 to 13: a single character in a file of about a hundred.'
+        ),
+        hint: 'Give `diff` the original file first and the edited one second.',
+        solution: 'diff manifest.txt manifest-edited.txt',
+        check: { cmd: 'diff', out: /Pallets: 12[\s\S]*Pallets: 13/ },
+      },
+      {
+        id: 'avalanche',
+        prompt: T(
+          'Now fingerprint the original and the edited file together:',
+          '',
+          '```',
+          'sha256sum manifest.txt manifest-edited.txt',
+          '```',
+          '',
+          'One character changed, and the two digests look unrelated. They are not a little different; they differ almost everywhere, with no way to see from the digests where or how much the files differ. Any change at all, from one character to one byte in a large image, gives a new digest. That is what makes a digest useful as a seal.'
+        ),
+        hint: 'List the original file and the edited one after `sha256sum`.',
+        solution: 'sha256sum manifest.txt manifest-edited.txt',
+        check: { cmd: 'sha256sum', out: /6071f1df[0-9a-f]{56}\s+manifest\.txt\s+90f4dbb0[0-9a-f]{56}\s+manifest-edited\.txt/ },
+      },
+      {
+        id: 'newline',
+        prompt: T(
+          'A common trap when you hash text typed on the command line: `echo` adds a newline at the end, and the newline is part of the data. Run both forms and compare:',
+          '',
+          '```',
+          'echo "hello" | md5sum; echo -n "hello" | md5sum',
+          '```',
+          '',
+          'The option `-n` leaves the newline out. The two digests differ because the two inputs differ by one byte. When your digest does not match a published one, check the invisible characters first.',
+          '',
+          'Digests also cannot be reversed. Nothing can turn `5d41402a...` back into `hello` except guessing inputs and hashing them to see which matches, which is why short, guessable inputs such as simple passwords are weak even when hashed.'
+        ),
+        hint: 'Put both pipelines on one line with `;` between them. `echo -n` suppresses the newline.',
+        solution: 'echo "hello" | md5sum; echo -n "hello" | md5sum',
+        check: { cmd: 'md5sum', out: /b1946ac92492d2347c6235b4d2611184[\s\S]*5d41402abc4b2a76b9719d911017c592/ },
+      },
+      {
+        id: 'published',
+        prompt: T(
+          'Vendors often publish a digest next to a download so you can check what you received. `agent.conf` came with a note, `published.txt`. Compute the SHA-1 digest of the file and read the published value in the same command:',
+          '',
+          '```',
+          'sha1sum agent.conf && cat published.txt',
+          '```',
+          '',
+          'SHA-1 digests are 40 hex characters. Compare them carefully: with a digest, a match must be complete, character for character.'
+        ),
+        hint: '`sha1sum` takes a file name just like the other tools. Join it to `cat published.txt` with `&&`.',
+        solution: 'sha1sum agent.conf && cat published.txt',
+        check: { cmd: 'sha1sum', out: /44e27d840124242a76647996eb5fc4d3f01fb028\s+agent\.conf[\s\S]*digest:\s+44e27d84/ },
+      },
+      {
+        id: 'match',
+        prompt: 'Does the digest you computed match the published one? Answer `yes` or `no`.',
+        hint: 'Both lines start with `44e27d84`. Compare them to the end.',
+        solution: 'yes',
+        answer: /^(yes|match(es)?|they match|same|identical)\.?$/i,
+      },
+    ],
+    quiz: [
+      {
+        q: 'You hash a 2 GB disk image with SHA-256. How long is the digest?',
+        choices: [
+          'About 2 GB, a complete copy',
+          'About 64 characters, the same length as for a one-line file',
+          'It grows with the file, a few kilobytes for 2 GB',
+          'It depends on the file type',
+        ],
+        answer: 1,
+        why: 'A hash function compresses any input to a fixed length. For SHA-256 that is 256 bits, written as 64 hexadecimal characters.',
+      },
+      {
+        q: 'Two files have exactly the same SHA-256 digest but different names and dates. What do you conclude?',
+        choices: [
+          'They are different files that happen to be related',
+          'Their contents are identical, and the name and date do not matter',
+          'One of them has been encrypted',
+          'The digest is broken and cannot be trusted',
+        ],
+        answer: 1,
+        why: 'The digest is computed from the content alone. With a trusted algorithm such as SHA-256, equal digests mean equal content in practice.',
+      },
+      {
+        q: 'Someone changes one letter in a 500 MB file and hashes it again. What does the new digest look like next to the old one?',
+        choices: [
+          'Almost identical, with a few characters changed',
+          'The same length but completely different, with no resemblance to the old one',
+          'Longer by one character',
+          'Identical, because one letter is too small to matter',
+        ],
+        answer: 1,
+        why: 'Hash functions are built so that any change spreads through the whole digest. That is why a digest detects even the smallest alteration.',
+      },
+      {
+        q: 'Why should you use SHA-256 rather than MD5 or SHA-1 to protect against tampering?',
+        choices: [
+          'MD5 and SHA-1 digests are too short to store',
+          'Practical collisions, two different inputs with the same digest, have been demonstrated for MD5 and SHA-1, so an attacker could craft a changed file with a matching digest',
+          'MD5 and SHA-1 can be decoded back to the original file',
+          'SHA-256 is faster than the others',
+        ],
+        answer: 1,
+        why: 'Collision attacks against MD5 and SHA-1 are practical, so they no longer prove a file is the intended one against an attacker. They still catch accidental corruption. Hashes cannot be decoded at all, and SHA-256 is slower, not faster.',
+      },
+    ],
+    refs: ['md5sum(1)', 'sha256sum(1)', 'sha1sum(1)', 'diff(1)', 'NIST FIPS 180-4 (Secure Hash Standard)', 'RFC 6151 (updated security considerations for MD5)'],
+  };
+
   K.lessons.register({
     id: 'data',
     title: 'Encoding, hashing and integrity',
     order: 120,
     summary: 'Read Base64 and hex for what they are, fingerprint files with cryptographic hashes, and verify that a download or a piece of evidence is exactly what it should be.',
-    lessons: [encodeLesson],
+    lessons: [encodeLesson, hashLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
