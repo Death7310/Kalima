@@ -537,11 +537,228 @@
     refs: ['curl(1)', 'RFC 8446 (TLS 1.3)', 'RFC 5280 (X.509 certificates)'],
   };
 
+  /* ----------------------------------------------------------- web-transfer */
+  const transferLesson = {
+    id: 'web-transfer',
+    title: 'Moving files and speaking protocols by hand',
+    minutes: 12,
+    objectives: [
+      'Download a file with `curl -O` and with `wget`',
+      'Share a directory over HTTP with `python3 -m http.server`, fetch from it, and stop it',
+      'Read the greeting of an SSH and an SMTP server with `nc` and explain why protocols that are plain text can be spoken by hand',
+    ],
+    intro: T(
+      'Moving files between machines is routine work: tool output to your notes, a script from a lab server, evidence to a teammate. Three small tools cover most of it. `curl` and `wget` download, and Python can serve a folder over HTTP in one command.',
+      '',
+      'The last part shows why all of this works. Many network protocols are lines of text, so with `nc` (netcat) you can connect to a service and read what it says, the same words a mail program or SSH client sees first. Only connect to hosts that are in your scope. Everything here is in the lab.'
+    ),
+    steps: [
+      {
+        id: 'dirs',
+        prompt: T(
+          'Make a folder for downloads and one for sharing, then move into the download folder:',
+          '',
+          '```',
+          'mkdir -p ~/practice/web/downloads ~/practice/web/share',
+          'cd ~/practice/web/downloads',
+          '```',
+          '',
+          'Keeping fetched files in one place makes them easy to find, list and delete when the work is done. You can type both commands on one line, joined with `&&`.'
+        ),
+        hint: '`mkdir -p` accepts several directory names at once. Then use `cd`.',
+        solution: 'mkdir -p ~/practice/web/downloads ~/practice/web/share && cd ~/practice/web/downloads',
+        check: { cwd: WEB + '/downloads', file: { path: WEB + '/share', exists: true, type: 'dir' } },
+      },
+      {
+        id: 'curl-o',
+        prompt: T(
+          'Earlier you chose a file name with `-o`. The option `-O` (capital letter) saves the file under the name it has on the server. Download the intranet\'s `robots.txt` into the current folder:',
+          '',
+          '```',
+          'curl -O http://web01.halcyon.lab/robots.txt',
+          '```',
+          '',
+          'Because the output goes to a file, `curl` draws a progress table instead of printing the content. Check the result with `ls -l` and `cat robots.txt`.'
+        ),
+        hint: 'Use a capital `-O`, followed by the URL that ends in `robots.txt`.',
+        solution: 'curl -O http://web01.halcyon.lab/robots.txt',
+        check: { cmd: 'curl', args: ['-O'], file: { path: WEB + '/downloads/robots.txt', exists: true, type: 'file', contains: /Disallow/ } },
+      },
+      {
+        id: 'wget',
+        prompt: T(
+          '`wget` is the other common downloader. Its default is to save to a file named after the URL, and it prints a short report about the transfer. Download the sitemap:',
+          '',
+          '```',
+          'wget http://web01.halcyon.lab/sitemap.xml',
+          '```',
+          '',
+          'Look at the report. `Resolving` shows the name lookup, `Connecting` the connection, `200 OK` the status, and `Saving to` the file name. Pick `wget` for downloading several files or a whole directory tree, and `curl` when you want control over the request itself, such as headers and methods.'
+        ),
+        hint: 'Type `wget` followed by the URL. No options are needed.',
+        solution: 'wget http://web01.halcyon.lab/sitemap.xml',
+        check: { cmd: 'wget', out: /200 OK/, file: { path: WEB + '/downloads/sitemap.xml', exists: true, type: 'file', contains: /<urlset/ } },
+      },
+      {
+        id: 'make-share',
+        prompt: T(
+          'Now the other direction. Python includes a small web server that publishes the current directory. Put a file in the sharing folder first:',
+          '',
+          '```',
+          'cd ~/practice/web/share',
+          'echo "shared by kali" > note.txt',
+          '```'
+        ),
+        hint: 'Change into the `share` folder, then redirect the output of `echo` into `note.txt`.',
+        solution: 'cd ~/practice/web/share && echo "shared by kali" > note.txt',
+        check: { cwd: WEB + '/share', file: { path: WEB + '/share/note.txt', exists: true, contains: /shared by kali/ } },
+      },
+      {
+        id: 'serve',
+        prompt: T(
+          'Start the server on port 8000 and put it in the background with `&`, so you keep the prompt:',
+          '',
+          '```',
+          'python3 -m http.server 8000 &',
+          '```',
+          '',
+          '`-m http.server` runs the standard-library module as a program. The shell prints a job number such as `[1]` and a process id. From now on the server prints one log line for each request it receives, and those lines may appear between your commands.',
+          '',
+          'The server has no login and publishes every file in the folder it was started in, to everyone who can reach the port. Use it only for the files you mean to share, and stop it when you are finished.'
+        ),
+        hint: 'Run the module with `python3 -m http.server 8000`, and end the line with `&`.',
+        solution: 'python3 -m http.server 8000 &',
+        check: { line: /python3\s+(-\w+\s+)*-m\s+http\.server\b.*&\s*$/, out: /^\[\d+\] \d+/m },
+      },
+      {
+        id: 'fetch-local',
+        prompt: T(
+          'Fetch the file from your own server. The address is `localhost`, which always means this machine, and the port goes after a colon:',
+          '',
+          '```',
+          'curl http://localhost:8000/note.txt',
+          '```',
+          '',
+          'You should see the text you wrote. A request line from the server, such as `GET /note.txt HTTP/1.1" 200`, may print next to it. That is the same status code you read in the first lesson of this module. Fetching `http://localhost:8000/` alone returns a directory listing.'
+        ),
+        hint: 'Use `curl` with the URL `http://localhost:8000/note.txt`.',
+        solution: 'curl http://localhost:8000/note.txt',
+        check: { cmd: 'curl', argsRe: /localhost:8000|127\.0\.0\.1:8000/, out: /shared by kali/ },
+      },
+      {
+        id: 'stop',
+        prompt: T(
+          'Stop the server. `jobs` lists the background jobs of this shell, and `kill %1` ends job number 1. Use the number that `jobs` shows for your server. The special variable `$!` always holds the process id of the most recent background job, so this also works right after you started it:',
+          '',
+          '```',
+          'jobs',
+          'kill %1',
+          '```'
+        ),
+        hint: 'Run `jobs` to find the number, then `kill %N`. As an alternative, `kill $!` stops the most recent background job.',
+        solution: 'kill $!',
+        check: { cmd: 'kill', exit: 0 },
+      },
+      {
+        id: 'confirm',
+        prompt: T(
+          'Confirm that the server is gone. Ask for the file again. This time the connection should be refused, because nothing is listening on port 8000:',
+          '',
+          '```',
+          'curl http://localhost:8000/note.txt',
+          '```',
+          '',
+          '`curl` exits with status 7, "failed to connect". Checking that a service you started has really stopped is part of cleaning up after yourself.'
+        ),
+        hint: 'Repeat the command from the earlier step.',
+        solution: 'curl http://localhost:8000/note.txt',
+        check: { cmd: 'curl', argsRe: /localhost:8000|127\.0\.0\.1:8000/, exit: 7 },
+      },
+      {
+        id: 'nc-ssh',
+        prompt: T(
+          'HTTP is text, and so are many other protocols. `nc` (netcat) opens a TCP connection and connects it to your terminal. Connect to the SSH port of web01 and send nothing:',
+          '',
+          '```',
+          'nc -w 3 10.10.10.10 22 < /dev/null',
+          '```',
+          '',
+          '`-w 3` gives up after three seconds, and `< /dev/null` sends an empty input. The server speaks first. Its one line, `SSH-2.0-OpenSSH_...`, is the SSH *banner*: the protocol version, then the software name and version. The same line is what scanners record when they identify a service.'
+        ),
+        hint: 'Give `nc` the address and the port number 22, and send it nothing with `< /dev/null`.',
+        solution: 'nc -w 3 10.10.10.10 22 < /dev/null',
+        check: { cmd: 'nc', args: ['22'], out: /^SSH-2\.0-OpenSSH/m },
+      },
+      {
+        id: 'nc-smtp',
+        prompt: T(
+          'Mail is text as well. The mail server `mail01` accepts mail on port 25 with SMTP. Send two commands, a greeting and a quit, through a pipe from `printf`. The `\\r\\n` at the end of each line is the line ending that SMTP expects:',
+          '',
+          '```',
+          'printf \'HELO kali.lab\\r\\nQUIT\\r\\n\' | nc -w 3 mail01.halcyon.lab 25',
+          '```',
+          '',
+          'Each line of the reply starts with a three-digit code. `220` is the greeting, `250` means a command was accepted, and `221` means the server is closing the connection. These are the same kinds of numbers you saw in HTTP, because many text protocols were designed this way. You sent no mail: `HELO` only introduces you and `QUIT` ends the session.'
+        ),
+        hint: 'Pipe `printf` into `nc -w 3`, with the host name `mail01.halcyon.lab` and port 25.',
+        solution: 'printf \'HELO kali.lab\\r\\nQUIT\\r\\n\' | nc -w 3 mail01.halcyon.lab 25',
+        check: { cmd: 'nc', args: ['25'], out: /^220 mail01\.halcyon\.lab[\s\S]*^221 /m },
+      },
+    ],
+    quiz: [
+      {
+        q: 'You run `curl -O http://web01.halcyon.lab/robots.txt`. Where does the content go?',
+        choices: [
+          'To the terminal',
+          'Into a file named robots.txt in the current directory',
+          'Into a file named index.html',
+          'Nowhere, because `-O` discards the body',
+        ],
+        answer: 1,
+        why: 'Capital `-O` saves the body under the file name taken from the URL. Lowercase `-o` lets you pick the name yourself.',
+      },
+      {
+        q: 'You start `python3 -m http.server 8000 &` in your home directory and leave it running. What is the risk?',
+        choices: [
+          'None, because it only serves files you have chosen',
+          'It serves the whole directory, with no login, to anyone who can reach port 8000',
+          'It deletes files as they are downloaded',
+          'It stops by itself after one request',
+        ],
+        answer: 1,
+        why: 'The server publishes everything under the directory it was started in and has no authentication. Start it in a dedicated folder and stop it when done.',
+      },
+      {
+        q: 'After `kill %1`, what does `curl http://localhost:8000/` do, and why?',
+        choices: [
+          'It still returns the directory listing from memory',
+          'It fails with a connection error, because nothing is listening on the port',
+          'It returns a 404 status',
+          'It starts the server again',
+        ],
+        answer: 1,
+        why: 'Once the process ends, the port is closed and connection attempts are refused, so curl exits with status 7.',
+      },
+      {
+        q: 'Why can you read the banner of an SSH or SMTP server with just `nc`?',
+        choices: [
+          'Because nc contains a copy of the SSH and SMTP software',
+          'Because these protocols send plain text lines, so a raw connection is enough to see and type them',
+          'Because nc decrypts the traffic',
+          'Because the servers send their banners only to nc',
+        ],
+        answer: 1,
+        why: 'The first line from both services is ordinary text. A plain TCP connection reads it, and an SMTP session can be typed by hand. Later parts of SSH are encrypted, but the banner is not.',
+      },
+    ],
+    refs: ['curl(1)', 'wget(1)', 'nc(1)', 'RFC 5321 (SMTP)', 'RFC 4253, section 4.2 (SSH protocol version exchange)'],
+  };
+
   K.lessons.register({
     id: 'web',
     title: 'HTTP from the command line',
     order: 80,
     summary: 'Read what web servers actually say: requests, status codes, headers, TLS certificates and plain-text protocols, using curl, wget, a throwaway python web server and nc.',
-    lessons: [curlLesson, headersLesson, tlsLesson],
+    lessons: [curlLesson, headersLesson, tlsLesson, transferLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
