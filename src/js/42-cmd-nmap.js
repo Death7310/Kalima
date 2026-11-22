@@ -1568,7 +1568,7 @@
     const say = (line) => { if (!g.opts.x) ctx.out(line + '\n'); };
     say('Interface: ' + iface.name + ', type: EN10MB, MAC: ' + iface.mac + ', IPv4: ' + (iface.ip || '(none)'));
     say('Starting arp-scan ' + ARPSCAN_VERSION + ' with ' + specs.reduce((n, sp) => n + sp.count, 0) + ' hosts (' + ARPSCAN_URL + ')');
-    let hosts = 0; let elapsed = 0; let batch = 0;
+    let hosts = 0; let responded = 0; let elapsed = 0; let batch = 0;
     const answers = new Map(); // address -> replies seen so far (a target named twice answers twice)
     const wait = (ms) => { elapsed += ms; return ctx.sleep(ms); };
     const sendBatch = () => { const ms = batch * ARPSCAN_PACKET_MS; batch = 0; return wait(ms); };
@@ -1579,6 +1579,7 @@
         if (host) {
           const nth = (answers.get(ip) || 0) + 1;
           answers.set(ip, nth);
+          responded++;
           ctx.out(ip + '\t' + host.mac + (g.opts.q ? '' : '\t' + (IEEE_NAMES[host.macVendor] || host.macVendor || '(Unknown)')) + (nth > 1 ? ' (DUP: ' + nth + ')' : '') + '\n');
         }
         if (++batch === 64) await sendBatch();
