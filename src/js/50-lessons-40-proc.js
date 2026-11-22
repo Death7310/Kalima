@@ -683,12 +683,206 @@
     refs: ['systemctl(1)', 'systemd.unit(5)', 'ss(8)', 'sshd(8)', 'Kali Linux Revealed, ch. 5 (Managing Services)', 'kali.org/docs/policy/kali-linux-network-service-policy'],
   };
 
+  /* ------------------------------------------------------------------ logs */
+  const logsLesson = {
+    id: 'proc-logs',
+    title: 'Logs: journalctl and auth.log',
+    minutes: 11,
+    objectives: [
+      'Read the journal with `journalctl`, limiting it by unit (`-u`), count (`-n`) and priority (`-p`)',
+      'Read a log line as time, host, program and message',
+      'Find the record of your own `sudo` use in `/var/log/auth.log` and in the journal',
+      'Explain why logs matter to administrators and to testers alike',
+    ],
+    intro: T(
+      'A log is the diary of a system: services, logins, and every use of `sudo` leave a line with a time stamp. Administrators read logs to find out what went wrong and who did what. Testers read them for the same reason, and because every action you take on a target leaves marks that the owner can find. Working in a way you can explain afterwards starts with knowing what you leave behind.',
+      '',
+      'On Kali the journal, collected by systemd, is one source. Some programs also write plain text files under `/var/log`. In this lesson you read both, and you find the record of a command you run yourself.'
+    ),
+    steps: [
+      {
+        id: 'recent',
+        prompt: T(
+          'Print the ten most recent entries of the journal. `--no-pager` prints them straight to the screen instead of opening a scrolling viewer:',
+          '',
+          '```',
+          'journalctl -n 10 --no-pager',
+          '```',
+          '',
+          'Each line has the same parts: the time, the name of the machine (`kali`), the program that wrote the line with its process ID in brackets, and the message.'
+        ),
+        hint: 'The option `-n 10` limits the output to ten lines. Add `--no-pager`.',
+        solution: 'journalctl -n 10 --no-pager',
+        check: { cmd: 'journalctl', args: ['-n'], out: /\bkali \S+\[\d+\]: / },
+      },
+      {
+        id: 'oldest',
+        prompt: T(
+          'Without `-n` the journal starts with its oldest entry, from the moment the machine booted. Show only that first line by piping the output to `head`:',
+          '',
+          '```',
+          'journalctl --no-pager | head -n 1',
+          '```',
+          '',
+          'The first line is written by the kernel, which is why the program name is `kernel` and has no process ID.'
+        ),
+        hint: 'Run `journalctl --no-pager` and pipe it to `head -n 1`.',
+        solution: 'journalctl --no-pager | head -n 1',
+        check: { cmd: 'journalctl', out: /kernel: Linux version/, fn: (ev) => outOf(ev).trim().split('\n').length === 1 },
+      },
+      {
+        id: 'kernel-version',
+        prompt: 'Read the kernel version from that line. It follows the words `Linux version`. What is it? Type the version number, for example `6.12.1`.',
+        hint: 'Look for the number just after `Linux version`, before `-kali1-amd64`. Run the previous command again if you need to.',
+        solution: '7.1.5',
+        answer: /^7\.1\.5(-kali1(-amd64)?)?$/,
+      },
+      {
+        id: 'unit',
+        prompt: T(
+          'The journal holds the messages of every service together. To read the messages of one service, name its *unit* with `-u`. The scheduler `cron` runs jobs every hour on this machine:',
+          '',
+          '```',
+          'journalctl -u cron --no-pager',
+          '```',
+          '',
+          'Look at the message part of the lines. `session opened` and `session closed` bracket each job, and the line between them shows the command that was run.'
+        ),
+        hint: 'Use `journalctl -u cron`, with `--no-pager` if you like.',
+        solution: 'journalctl -u cron --no-pager',
+        check: { cmd: 'journalctl', argsRe: /(-u|--unit)\W*cron/, out: /CRON\[\d+\]/ },
+      },
+      {
+        id: 'cron-user',
+        prompt: 'Look at the `CMD` line from cron. Which account runs the hourly jobs? Type the user name.',
+        hint: 'The line reads `(account) CMD (...)`. The account is in the first parentheses.',
+        solution: 'root',
+        answer: ['root'],
+      },
+      {
+        id: 'priority',
+        prompt: T(
+          'Most lines are routine. Every journal entry has a *priority*, from `debug` up through `info`, `notice`, `warning`, `err`, `crit`, `alert` and `emerg`. `-p` shows the entries at that priority or worse. To see only the trouble since boot:',
+          '',
+          '```',
+          'journalctl -b -p warning --no-pager',
+          '```',
+          '',
+          'On this machine the answer is `-- No entries --`: nothing at warning or worse was logged since boot. On a system with a problem, this is the first filter to try. The same command with `-p err` narrows it further.'
+        ),
+        hint: 'Combine `-b` (this boot) with `-p warning`.',
+        solution: 'journalctl -b -p warning --no-pager',
+        check: { cmd: 'journalctl', argsRe: /(-p|--priority)\W*(warning|4|err|3|crit|alert|emerg)/, exit: 0 },
+      },
+      {
+        id: 'sudo-run',
+        prompt: T(
+          'Now make something happen that a log will record. Run a harmless command through `sudo`:',
+          '',
+          '```',
+          'sudo id',
+          '```',
+          '',
+          'Type the password `kali` when asked. Nothing appears on screen while you type it. Afterwards the output shows `uid=0(root)`: for this one command you were root.'
+        ),
+        hint: 'Type `sudo id` and enter the password `kali`.',
+        solution: 'sudo id',
+        input: ['kali'],
+        check: { cmd: 'id', user: 'root', out: /uid=0\(root\)/ },
+      },
+      {
+        id: 'authlog',
+        prompt: T(
+          'That command left a record. Services that handle logins and privileges write to `/var/log/auth.log`. Your account is a member of the group `adm`, which is allowed to read it. Search it for the word `COMMAND`, which `sudo` writes for every command it runs:',
+          '',
+          '```',
+          'grep COMMAND /var/log/auth.log',
+          '```',
+          '',
+          'Find your `sudo id`. The line says who ran sudo (`kali`), from which terminal (`TTY`), in which directory (`PWD`), as which account (`USER=root`), and what was run (`COMMAND=`).'
+        ),
+        hint: 'Use `grep COMMAND /var/log/auth.log`. No `sudo` is needed to read this file.',
+        solution: 'grep COMMAND /var/log/auth.log',
+        check: { cmd: 'grep', out: /sudo:\s+kali : TTY=\S+ ; PWD=\S+ ; USER=root ; COMMAND=\/usr\/bin\/id\b/ },
+      },
+      {
+        id: 'who',
+        prompt: 'In that line, the name after `sudo:` is the account that ran `sudo`. The `USER=` field is the account the command ran as. Which account ran `sudo`? Type the name.',
+        hint: 'It is not `root`. Read the text just after `sudo:`.',
+        solution: 'kali',
+        answer: ['kali'],
+      },
+      {
+        id: 'journal-sudo',
+        prompt: T(
+          'The same record is also in the journal. `-t` selects entries by the name of the program that wrote them, here `sudo`. Look for the same line there:',
+          '',
+          '```',
+          'journalctl -t sudo --no-pager',
+          '```',
+          '',
+          'A record that appears in two places is harder to lose, and a reviewer can use whichever is more convenient. Reading what your own tools log is good practice: when you write up a test, your notes should agree with what the owner finds in their logs.'
+        ),
+        hint: 'Use `journalctl -t sudo`, with `--no-pager`.',
+        solution: 'journalctl -t sudo --no-pager',
+        check: { cmd: 'journalctl', argsRe: /(-t|--identifier)\W*sudo/, out: /COMMAND=\/usr\/bin\/id\b/ },
+      },
+    ],
+    quiz: [
+      {
+        q: 'You run `journalctl -u ssh -n 20`. What do you see?',
+        choices: [
+          'The twenty most recent entries of the SSH server unit',
+          'Every entry of the last twenty minutes',
+          'Entries of all services whose name contains `ssh`, from the last twenty days',
+          'The twenty users who logged in most often',
+        ],
+        answer: 0,
+        why: '`-u` limits the output to one unit and `-n` limits the number of lines, counted from the newest entry.',
+      },
+      {
+        q: 'A server logs a failed login for the account `admin` in `/var/log/auth.log` every few seconds, from one address, for an hour. What is the most reasonable reading?',
+        choices: [
+          'Normal background noise that needs no attention',
+          'Someone is guessing passwords, and the owner should know',
+          'The log file is corrupt',
+          'The account `admin` has been deleted',
+        ],
+        answer: 1,
+        why: 'Repeated failures from one source are what an administrator looks for. As a tester you would report such a pattern if you found it unexpectedly, and you would expect your own tests to leave similar traces.',
+      },
+      {
+        q: '`journalctl -p err` prints `-- No entries --`. What does that mean?',
+        choices: [
+          'The journal is empty',
+          'The command is wrong',
+          'Nothing at priority `err` or worse was logged in the period the command covers',
+          'Only root may read the journal',
+        ],
+        answer: 2,
+        why: 'The filter matched nothing. The journal still holds entries at lower priorities, which `journalctl` without `-p` shows.',
+      },
+      {
+        q: 'Why do testers care that their actions appear in logs?',
+        choices: [
+          'Logs let the client check what the test did, and let the tester explain it afterwards',
+          'Logs make the target machine faster',
+          'Logs are only written when a test fails',
+          'Testers should always delete logs when the test ends',
+        ],
+        answer: 0,
+        why: 'Logs are evidence of what happened during the engagement. Altering or deleting them on a client system is outside the rules of an authorized test unless the agreement says otherwise.',
+      },
+    ],
+    refs: ['journalctl(1)', 'systemd.journal-fields(7)', 'sudo(8)', 'Kali Linux Revealed, ch. 5', 'NIST SP 800-92'],
+  };
+
   K.lessons.register({
     id: 'proc',
     title: 'Processes, services and logs',
     order: 40,
     summary: 'See what is running on a system and what started it, control jobs and services, and read the logs that record what happened.',
-    lessons: [psLesson, jobsLesson, servicesLesson],
+    lessons: [psLesson, jobsLesson, servicesLesson, logsLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
