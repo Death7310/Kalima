@@ -248,29 +248,30 @@
       o = o || {};
       const rt = this.route(machine, dstIp);
       if (!rt.ok) return { state: 'filtered', reason: rt.err === 'ENETUNREACH' ? 'net-unreach' : 'host-unreach', route: rt, hostDown: true, rtt: 0 };
-      this.packet({ src: rt.src, dst: dstIp, proto: 'TCP', sport: o.sport || 40000 + Math.floor(this.rand() * 20000), dport: port, flags: 'S', info: 'Flags [S]', len: 60, dev: rt.dev });
+      const sport = o.sport || 40000 + Math.floor(this.rand() * 20000);
+      this.packet({ src: rt.src, dst: dstIp, proto: 'TCP', sport, dport: port, flags: 'S', info: 'Flags [S]', len: 60, dev: rt.dev });
       const host = rt.host;
       if (rt.blackhole || !host || !host.up) return { state: 'filtered', reason: 'no-response', route: rt, hostDown: true, rtt: 0 };
       const rtt = this.jitter(rt.rtt, host.latency.jitter == null ? 0.3 : host.latency.jitter);
       const svc = this.servicesOf(host).find((s) => s.port === port && (s.proto || 'tcp') === 'tcp' && !(s.bind === '127.0.0.1' && !rt.self));
       const fw = host.firewall || {};
       if (svc && svc.state !== 'filtered' && !(fw.filtered || []).includes(port)) {
-        this.packet({ src: dstIp, dst: rt.src, proto: 'TCP', sport: port, dport: 0, flags: 'S.', info: 'Flags [S.]', len: 60, dev: rt.dev, ts: K.clock.now() + rtt });
+        this.packet({ src: dstIp, dst: rt.src, proto: 'TCP', sport: port, dport: sport, flags: 'S.', info: 'Flags [S.]', len: 60, dev: rt.dev, ts: K.clock.now() + rtt });
         this.bus.emit('conn', { host, port, proto: 'tcp', src: rt.src, kind: o.kind || 'probe', ts: K.clock.now() });
-        return { state: 'open', reason: 'syn-ack', rtt, service: svc, host, route: rt };
+        return { state: 'open', reason: 'syn-ack', rtt, service: svc, host, route: rt, sport };
       }
       if ((svc && svc.state === 'filtered') || (fw.filtered || []).includes(port) || fw.default === 'filtered') {
         return { state: 'filtered', reason: 'no-response', rtt, host, route: rt, service: svc || null };
       }
-      this.packet({ src: dstIp, dst: rt.src, proto: 'TCP', sport: port, dport: 0, flags: 'R.', info: 'Flags [R.]', len: 40, dev: rt.dev, ts: K.clock.now() + rtt });
+      this.packet({ src: dstIp, dst: rt.src, proto: 'TCP', sport: port, dport: sport, flags: 'R.', info: 'Flags [R.]', len: 40, dev: rt.dev, ts: K.clock.now() + rtt });
       return { state: 'closed', reason: 'reset', rtt, host, route: rt };
     },
 
     /** UDP port state: 'open' | 'open|filtered' | 'closed' | 'filtered' */
-    udp(machine, dstIp, port) {
+    udp(machine, dstIp, port, o) {
       const rt = this.route(machine, dstIp);
       if (!rt.ok) return { state: 'filtered', reason: 'host-unreach', route: rt, hostDown: true, rtt: 0 };
-      this.packet({ src: rt.src, dst: dstIp, proto: 'UDP', sport: 40000 + Math.floor(this.rand() * 20000), dport: port, info: 'UDP, length 0', len: 28, dev: rt.dev });
+      if (!(o && o.quiet)) this.packet({ src: rt.src, dst: dstIp, proto: 'UDP', sport: 40000 + Math.floor(this.rand() * 20000), dport: port, info: 'UDP, length 0', len: 28, dev: rt.dev });
       const host = rt.host;
       if (rt.blackhole || !host || !host.up) return { state: 'open|filtered', reason: 'no-response', route: rt, hostDown: true, rtt: 0 };
       const rtt = this.jitter(rt.rtt, 0.3);
@@ -363,13 +364,41 @@
      * (commands add the dot when printing).
      */
     dns(machine, name, type, o) {
+      const res = this._dns(machine, name, type, o);
+      this._dnsWire(machine, res);
+      return res;
+    },
+
+    /** Put one DNS query (and its response, when there was one) on the bus in tcpdump's format. */
+    _dnsWire(machine, res) {
+      if (res.status === 'NOSERVER') return;
+      const rt = this.route(machine, res.server);
+      if (!rt.ok) return;
+      const id = Math.floor(this.rand() * 65536);
+      const sport = 40000 + Math.floor(this.rand() * 20000);
+      const q = res.question;
+      const qname = q.name + '.';
+      const qlen = 12 + qname.length + 1 + 4;
+      const wire = (from, to, sp, dp, info, ulen, ts) => this.packet({ src: from, dst: to, proto: 'UDP', sport: sp, dport: dp, info, ulen, len: ulen + 28, dev: rt.dev, dns: true, ts });
+      wire(rt.src, res.server, sport, 53, id + '+ ' + q.type + '? ' + qname + ' (' + qlen + ')', qlen, K.clock.now());
+      if (res.status === 'TIMEOUT') return;
+      const rr = (r) => r.type + ' ' + (r.type === 'MX' ? r.data + '. ' + r.prio : /^(NS|CNAME|PTR)$/.test(r.type) ? r.data + '.' : r.type === 'TXT' ? '"' + r.data + '"' : r.data);
+      const counts = res.answers.length + '/' + res.authority.length + '/' + res.additional.length;
+      const flags = (res.flags.aa ? '*' : '') + (res.flags.ra ? '' : '-');
+      const shown = res.answers.length ? ' ' + res.answers.map(rr).join(', ') : '';
+      const rcode = res.status === 'NOERROR' ? '' : (res.status === 'NXDOMAIN' ? 'NXDomain' : res.status === 'REFUSED' ? 'Refused' : 'ServFail') + flags + ' ';
+      const rlen = qlen + [].concat(res.answers, res.authority, res.additional).reduce((n, r) => n + 12 + String(r.data).length, 0);
+      wire(res.server, rt.src, 53, sport, id + (rcode ? ' ' : flags + ' ') + rcode + counts + shown + ' (' + rlen + ')', rlen, K.clock.now() + res.ms);
+    },
+
+    _dns(machine, name, type, o) {
       o = o || {};
       type = String(type || 'A').toUpperCase();
       name = String(name).toLowerCase().replace(/\.$/, '');
       const serverIp = o.server || machine.dns[0];
       const res = { status: 'NOERROR', answers: [], authority: [], additional: [], server: serverIp, ms: 0, flags: { aa: false, ra: true, rd: true }, question: { name, type } };
       if (!serverIp) { res.status = 'NOSERVER'; return res; }
-      const probe = this.udp(machine, serverIp, 53);
+      const probe = this.udp(machine, serverIp, 53, { quiet: true });
       const sdef = this.world.dns.servers[serverIp] || null;
       if (probe.state !== 'open') { res.status = 'TIMEOUT'; res.ms = 5000; return res; }
       if (!sdef) { res.status = 'REFUSED'; res.flags.ra = false; res.ms = Math.max(1, Math.round(probe.rtt)); return res; }
@@ -574,7 +603,38 @@
       rh['content-length'] = String(U.byteLen(body));
       if (method === 'HEAD') body = '';
       if (isTls) out.tls = (host.web && host.web.tls) || { subject: 'CN=' + (host.fqdn || hostname), issuer: 'C=US, O=Simulated Trust Services, CN=SimTrust RSA CA 1', notBefore: 'Sep  1 00:00:00 2026 GMT', notAfter: 'Nov 30 23:59:59 2026 GMT', version: 'TLSv1.3', cipher: 'TLS_AES_256_GCM_SHA384' };
-      return Object.assign(out, { status: resp.status || 200, statusText: this.STATUS[resp.status || 200] || 'Unknown', headers: rh, body });
+      const final = Object.assign(out, { status: resp.status || 200, statusText: this.STATUS[resp.status || 200] || 'Unknown', headers: rh, body });
+      this._httpWire(t, request, pathq, final, isTls);
+      return final;
+    },
+
+    /** Put the data segments of one HTTP exchange on the bus (the handshake was emitted by tcp()). */
+    _httpWire(t, request, pathq, res, isTls) {
+      const c = t.route.src; const s = res.ip; const dev = t.route.dev;
+      const sport = t.sport; const dport = res.port;
+      let at = K.clock.now() + t.rtt;
+      const seg = (from, flags, data, plen, dt) => {
+        at += dt;
+        const fwd = from === c;
+        this.packet({ src: fwd ? c : s, dst: fwd ? s : c, proto: 'TCP', sport: fwd ? sport : dport, dport: fwd ? dport : sport, flags, plen, data, info: 'Flags [' + flags + ']', len: 52 + plen, dev, ts: at });
+      };
+      const send = (from, text, dt) => {
+        const MSS = 1448;
+        for (let i = 0; i < text.length && i < MSS * 6; i += MSS) {
+          const chunk = text.slice(i, i + MSS);
+          seg(from, 'P.', isTls ? null : chunk, U.byteLen(chunk), i ? 0.02 : dt);
+        }
+        seg(from === c ? s : c, '.', null, 0, t.rtt);
+      };
+      const hdrs = Object.keys(request.headers).filter((k) => k !== 'host').map((k) => k.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase()) + ': ' + request.headers[k]).join('\r\n');
+      const reqText = isTls ? 'T'.repeat(517) : request.method + ' ' + pathq + ' HTTP/1.1\r\nHost: ' + request.host + (request.port === 80 ? '' : ':' + request.port) + '\r\n' + (hdrs ? hdrs + '\r\n' : '') + '\r\n' + request.body;
+      const resText = isTls ? 'T'.repeat(Math.min(1400, 200 + U.byteLen(res.body))) : 'HTTP/1.1 ' + res.status + ' ' + res.statusText + '\r\n' + Object.keys(res.headers).map((k) => k.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase()) + ': ' + res.headers[k]).join('\r\n') + '\r\n\r\n' + res.body;
+      seg(c, '.', null, 0, 0.04);
+      send(c, reqText, 0.05);
+      send(s, resText, 0.3);
+      seg(c, 'F.', null, 0, 0.1);
+      seg(s, 'F.', null, 0, t.rtt);
+      seg(c, '.', null, 0, 0.05);
     },
 
     _serve(host, svc, request) {
