@@ -569,12 +569,172 @@
     refs: ['scp(1)', 'sha256sum(1)', 'ssh(1)', 'NIST SP 800-115', 'Kali Linux Revealed, ch. 5'],
   };
 
+  /* ------------------------------------------------------------ remote-ftp */
+  const FTPDIR = '/home/kali/practice/remote/ftp';
+  const ftpLesson = {
+    id: 'remote-ftp',
+    title: 'Anonymous FTP, and why it is no longer trusted',
+    minutes: 10,
+    objectives: [
+      'Log in to an anonymous FTP service, browse it and download a file',
+      'Show that FTP commands and passwords travel as readable text',
+      'Record a clear-text protocol as a finding in your engagement notes',
+    ],
+    intro: T(
+      'FTP is one of the oldest file transfer protocols, and you will still meet it on printers, scanners, old servers and public download areas. A public FTP area that serves documents to anyone is a legitimate use of anonymous access.',
+      '',
+      'The protocol itself, however, sends everything unencrypted: commands, file contents and, on a normal login, the password. Anyone on the network path can read it. That is why SSH-based transfer (`scp`, `sftp`) replaced FTP for anything private. When an assessor finds FTP in use, it is written down. In this lesson you visit `files01.halcyon.lab`, which is within the scope in `~/engagement/scope.txt`, and look at what the protocol really says.'
+    ),
+    steps: [
+      {
+        id: 'workdir',
+        prompt: T(
+          'Make a working directory and go into it. Files you download land in the directory you were in when you started `ftp`:',
+          '',
+          '```',
+          'mkdir -p ~/practice/remote/ftp && cd ~/practice/remote/ftp',
+          '```'
+        ),
+        hint: 'Use `mkdir -p` and `cd`, joined with `&&`.',
+        solution: 'mkdir -p ~/practice/remote/ftp && cd ~/practice/remote/ftp',
+        check: { cwd: FTPDIR },
+      },
+      {
+        id: 'session',
+        prompt: T(
+          'Start the FTP client:',
+          '',
+          '```',
+          'ftp files01.halcyon.lab',
+          '```',
+          '',
+          'The server greets you with a `220` line that names its software. Numbers at the start of a line are FTP reply codes: `331` means a password is needed, `230` means you are logged in.',
+          '',
+          'At `Name` type `anonymous`. At `Password` press Enter, or type any e-mail address, by convention. Then, at the `ftp>` prompt, type these commands one at a time:',
+          '',
+          '- `ls` to list the server\'s directory',
+          '- `cd pub` to go into `pub`, the public area, and `ls` again',
+          '- `get README.txt` to download a file into your current local directory',
+          '- `bye` to leave',
+          '',
+          'You are done when `README.txt` is in `~/practice/remote/ftp`.'
+        ),
+        hint: 'Log in as `anonymous` with an empty password, `cd pub`, `get README.txt`, `bye`.',
+        solution: 'ftp files01.halcyon.lab',
+        input: ['anonymous', '', 'ls', 'cd pub', 'ls', 'get README.txt', 'bye'],
+        check: { cmd: 'ftp', file: { path: FTPDIR + '/README.txt', exists: true, contains: /Halcyon Freight public FTP/ } },
+      },
+      {
+        id: 'read',
+        prompt: T(
+          'Read what you downloaded:',
+          '',
+          '```',
+          'cat README.txt',
+          '```'
+        ),
+        hint: 'Use `cat README.txt` in the directory where you ran `ftp`.',
+        solution: 'cat README.txt',
+        check: { cmd: 'cat', out: /Anonymous access is read-only/ },
+      },
+      {
+        id: 'readonly',
+        prompt: 'The file names three directories under `pub/`. One of them holds the current rate card. Type its name.',
+        hint: 'Look at the list in the file; the names are descriptive.',
+        solution: 'rates',
+        answer: /^(pub\/)?rates\/?$/,
+      },
+      {
+        id: 'raw',
+        prompt: T(
+          'Now see what the client was saying. FTP commands are plain text lines, so you can talk to the server by hand with `nc` (netcat), which connects and passes through whatever you type. Control connections use port 21:',
+          '',
+          '```',
+          'nc files01.halcyon.lab 21',
+          '```',
+          '',
+          'Type these lines, pressing Enter after each:',
+          '',
+          '```',
+          'USER anonymous',
+          'PASS guest@example.com',
+          'QUIT',
+          '```',
+          '',
+          'Those are the very bytes the `ftp` client sent. The `PASS` line carries the password in the clear. For an anonymous login that costs nothing, but with a real account the password would be visible to everyone on the path, on every login.'
+        ),
+        hint: 'Connect with `nc files01.halcyon.lab 21`, then type the three lines. `QUIT` ends the session.',
+        solution: 'nc -w 3 files01.halcyon.lab 21',
+        input: ['USER anonymous', 'PASS guest@example.com', 'QUIT'],
+        check: { cmd: ['nc', 'ncat', 'netcat'], out: /230 Login successful/ },
+      },
+      {
+        id: 'which',
+        prompt: 'In that exchange, which line did you type that would reveal a real user\'s secret if the account were not anonymous: `USER`, `PASS` or `QUIT`? Type the word.',
+        hint: 'One of them carries the password.',
+        solution: 'PASS',
+        answer: ['pass', 'pass line'],
+      },
+      {
+        id: 'note',
+        prompt: T(
+          'Write it down. A note records a finding while you remember the details, and it is what you will turn into a line of the report. Add one line to the engagement notes:',
+          '',
+          '```',
+          'echo "files01 21/tcp FTP: anonymous read access, clear-text protocol" >> ~/engagement/notes.md',
+          '```',
+          '',
+          '`>>` appends to the file instead of replacing it. A fuller note also records the date and the exact commands, so that anyone can repeat what you did. What you would recommend is moving any private transfer to SFTP or SCP and keeping FTP only for public, read-only content.'
+        ),
+        hint: 'Append a line mentioning `files01` and `FTP` to `~/engagement/notes.md` with `>>`.',
+        solution: 'echo "files01 21/tcp FTP: anonymous read access, clear-text protocol" >> ~/engagement/notes.md',
+        check: { line: />>\s*~?\/?\S*notes\.md/, file: { path: '/home/kali/engagement/notes.md', contains: /files01.*ftp/i } },
+      },
+    ],
+    quiz: [
+      {
+        q: 'Why is anonymous FTP on a public download server less worrying than FTP with a login on an internal server?',
+        choices: [
+          'Anonymous FTP is encrypted',
+          'Nothing secret crosses the wire: no real password and only public files',
+          'FTP is safe when it uses port 21',
+          'Anonymous users cannot read files',
+        ],
+        answer: 1,
+        why: 'Plain text is the problem only when the content is sensitive. A real password or private file sent over FTP can be read by anyone who can capture the traffic. Public documents and an e-mail address as password cannot hurt.',
+      },
+      {
+        q: 'An assessor finds a server where staff log in with FTP. What goes in the notes?',
+        choices: [
+          'Nothing, because FTP is a normal service',
+          'The host, the port, the observation that logins are in clear text, and the commands used to see it',
+          'The staff passwords, so the client can check them',
+          'A recommendation to disable the firewall',
+        ],
+        answer: 1,
+        why: 'A finding needs the evidence and the way to reproduce it. Passwords are handled with care and normally not copied into a report. The fix is to move to an encrypted protocol such as SFTP.',
+      },
+      {
+        q: 'Which tools replace FTP for private file transfer?',
+        choices: [
+          '`telnet` and `nc`',
+          '`scp` and `sftp`, which run over SSH',
+          '`ping` and `traceroute`',
+          '`ftp` with the option `-p`',
+        ],
+        answer: 1,
+        why: 'Both run inside the encrypted SSH channel, so commands, passwords and file contents are protected, and the server is authenticated by its host key.',
+      },
+    ],
+    refs: ['ftp(1)', 'nc(1)', 'RFC 959', 'RFC 4251', 'NIST SP 800-115'],
+  };
+
   K.lessons.register({
     id: 'remote',
     title: 'Remote access and file transfer',
     order: 90,
     summary: 'Log in to servers with ssh, use keys instead of passwords, copy files with scp, and recognize the clear-text FTP protocol for what it is.',
-    lessons: [sshLesson, keysLesson, scpLesson],
+    lessons: [sshLesson, keysLesson, scpLesson, ftpLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
