@@ -186,3 +186,64 @@ test('bc: files, banner and the interactive terminal', async () => {
   assert.match(r.output.replace(/\r/g, ''), /\n4\n/);
   assert.match(await out('man bc'), /DESCRIPTION/);
 });
+
+/* -------------------------------------------------------------- openssl */
+table('openssl: digests in the OpenSSL 3 output style', [
+  [`echo hello > h.txt; openssl dgst -sha256 h.txt`, 'SHA2-256(h.txt)= 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\n'],
+  [`openssl dgst -md5 h.txt`, 'MD5(h.txt)= b1946ac92492d2347c6235b4d2611184\n'],
+  [`openssl dgst -sha1 h.txt`, 'SHA1(h.txt)= f572d396fae9206628714fb2ce00f72e94f2258f\n'],
+  [`openssl dgst -sha512 h.txt`, 'SHA2-512(h.txt)= e7c22b994c59d9cf2b48e549b1e24666636045930d3da7c1acb299d1c3b7f931f94aae41edda2c2b207a36e10f8bcb8d45223e54878f5b316e7ce3b6bc019629\n'],
+  [`openssl dgst -sha224 h.txt`, 'SHA2-224(h.txt)= 2d6d67d91d0badcdd06cbbba1fe11538a68a37ec9c2e26457ceff12b\n'],
+  [`openssl dgst -sha384 /dev/null`, 'SHA2-384(/dev/null)= 38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b\n'],
+  [`echo hi | openssl dgst -sha256`, 'SHA2-256(stdin)= 98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4\n'],
+  [`openssl dgst h.txt`, 'SHA256(h.txt)= 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\n'],
+  [`openssl dgst -sha256 -r h.txt`, '5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03 *h.txt\n'],
+  [`openssl dgst -sha1 -c h.txt`, 'SHA1(h.txt)= f5:72:d3:96:fa:e9:20:66:28:71:4f:b2:ce:00:f7:2e:94:f2:25:8f\n'],
+  [`openssl md5 h.txt`, 'MD5(h.txt)= b1946ac92492d2347c6235b4d2611184\n'],
+  [`openssl sha256 h.txt`, 'SHA2-256(h.txt)= 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\n'],
+  [`openssl dgst -sha256 -hmac key h.txt`, 'HMAC-SHA2-256(h.txt)= 8e384ff349a3d90f2c7837b0d76de8f81c6e85b390ed38905f521ae77cb9a29a\n'],
+  [`printf 'The quick brown fox jumps over the lazy dog' | openssl dgst -sha256 -hmac key`, 'SHA2-256(stdin)= f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8\n'],
+  [`openssl dgst -sha256 -out o.txt h.txt; cat o.txt`, 'SHA2-256(h.txt)= 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03\n'],
+  [`openssl dgst -sha256 h.txt h.txt | wc -l`, '2\n'],
+]);
+
+test('openssl: digest errors', async () => {
+  let r = await run('openssl dgst -sha256 nonexist');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^nonexist: No such file or directory\n[0-9A-F]{16}:error:80000002:system library:file_ctrl:No such file or directory:\.\.\/crypto\/bio\/bss_file\.c:297:calling fopen\(nonexist, r\)\n/);
+  r = await run('openssl dgst -bogus h.txt');
+  assert.match(r.err, /^dgst: Unknown option or message digest: bogus\ndgst: Use -help for summary\.\n/);
+  r = await run('openssl dgst -hmac');
+  assert.equal(r.err, 'dgst: Option -hmac needs a value\ndgst: Use -help for summary.\n');
+  r = await run('openssl foo');
+  assert.deepEqual([r.out, r.err, r.code], ['', 'Invalid command \'foo\'; type "help" for a list.\n', 1]);
+  assert.match((await run('openssl')).err, /^help:\n\nStandard commands\nasn1parse/);
+  assert.match((await run('openssl dgst -help')).err, /^Usage: dgst \[options\] \[file\.\.\.\]/);
+});
+
+table('openssl: base64, enc, rand and version', [
+  [`printf 'hello world, this is a longer line of text to force base64 wrapping at sixty four chars' | openssl base64`, 'aGVsbG8gd29ybGQsIHRoaXMgaXMgYSBsb25nZXIgbGluZSBvZiB0ZXh0IHRvIGZv\ncmNlIGJhc2U2NCB3cmFwcGluZyBhdCBzaXh0eSBmb3VyIGNoYXJz\n'],
+  [`printf hello | openssl base64 -A`, 'aGVsbG8='],
+  [`printf hello | openssl enc -base64`, 'aGVsbG8=\n'],
+  [`echo aGVsbG8= | openssl base64 -d`, 'hello'],
+  [`echo aGVsbG8= | openssl enc -d -base64`, 'hello'],
+  [`echo 'aGVs bG8=' | openssl base64 -d`, 'hello'],
+  [`echo '!!' | openssl base64 -d`, ''],
+  [`openssl base64 -in h.txt`, 'aGVsbG8K\n'],
+  [`openssl base64 -in h.txt -out h.b64; cat h.b64`, 'aGVsbG8K\n'],
+  [`openssl rand -hex 8 | wc -c`, '17\n'],
+  [`openssl rand -base64 6 | wc -c`, '9\n'],
+  [`openssl rand -hex 4 -out r.txt; wc -c < r.txt`, '9\n'],
+  [`openssl version`, 'OpenSSL 3.5.1 1 Jul 2025 (Library: OpenSSL 3.5.1 1 Jul 2025)\n'],
+  [`openssl rand -hex abc`, '', 'rand: Can\'t parse "abc" as a number\nrand: Use -help for summary.\n', 1],
+  [`openssl rand -hex 0`, '', 'rand: Use -help for summary.\n', 1],
+  [`openssl rand -hex -5`, '', 'rand: Unknown option: -5\nrand: Use -help for summary.\n', 1],
+  [`openssl base64 -in nonexist 2>&1 | head -1`, 'Can\'t open "nonexist" for reading, No such file or directory\n'],
+]);
+
+test('openssl: rand is seeded and man page exists', async () => {
+  const a = await out('openssl rand -hex 16');
+  assert.match(a, /^[0-9a-f]{32}\n$/);
+  assert.notEqual(a, await out('openssl rand -hex 16'));
+  assert.match(await out('man openssl'), /DESCRIPTION/);
+});

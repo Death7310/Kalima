@@ -2769,3 +2769,357 @@ EXAMPLES
     return false;
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this);
+
+/* ================================================================= openssl */
+;(function (root) {
+  'use strict';
+  const K = root.K;
+  const U = K.util;
+
+  /* --------------------------------------------------- message digests */
+  const rotl = (x, n) => (x << n) | (x >>> (32 - n));
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  const PRIMES = [];
+  for (let n = 2; PRIMES.length < 80; n++) if (PRIMES.every((p) => n % p)) PRIMES.push(n);
+  /** floor(frac(p^(1/root)) * 2^bits) with exact integer arithmetic. */
+  function fracBits(p, root, bits) {
+    const target = BigInt(p) << BigInt(root * bits);
+    let lo = 0n; let hi = 1n << BigInt(bits + 8);
+    while (lo < hi) { const mid = (lo + hi + 1n) >> 1n; if (mid ** BigInt(root) <= target) lo = mid; else hi = mid - 1n; }
+    return lo & ((1n << BigInt(bits)) - 1n);
+  }
+  let tables = null;
+  function sha2Tables() {
+    if (tables) return tables;
+    const k256 = PRIMES.slice(0, 64).map((p) => Number(fracBits(p, 3, 32)));
+    const k512 = PRIMES.map((p) => fracBits(p, 3, 64));
+    const h = (from, bits) => PRIMES.slice(from, from + 8).map((p) => fracBits(p, 2, bits));
+    tables = {
+      k256, k512,
+      h256: h(0, 32).map(Number),
+      h224: h(8, 64).map((v) => Number(v & 0xffffffffn)),
+      h512: h(0, 64), h384: h(8, 64),
+    };
+    return tables;
+  }
+  /** Pad per MD construction: 0x80, zeros, bit length in `lenBytes` bytes. */
+  function mdPad(bytes, block, lenBytes, littleEndian) {
+    const total = Math.ceil((bytes.length + 1 + lenBytes) / block) * block;
+    const out = new Uint8Array(total);
+    out.set(bytes); out[bytes.length] = 0x80;
+    let bits = BigInt(bytes.length) * 8n;
+    for (let i = 0; i < lenBytes; i++) {
+      out[littleEndian ? total - lenBytes + i : total - 1 - i] = Number(bits & 255n); bits >>= 8n;
+    }
+    return out;
+  }
+  function md5(bytes) {
+    const S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+    const T = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) >>> 0);
+    const data = mdPad(bytes, 64, 8, true);
+    let a0 = 0x67452301; let b0 = 0xefcdab89 | 0; let c0 = 0x98badcfe | 0; let d0 = 0x10325476;
+    for (let off = 0; off < data.length; off += 64) {
+      const M = Array.from({ length: 16 }, (_, i) => data[off + 4 * i] | (data[off + 4 * i + 1] << 8) | (data[off + 4 * i + 2] << 16) | (data[off + 4 * i + 3] << 24));
+      let A = a0; let B = b0; let C = c0; let D = d0;
+      for (let i = 0; i < 64; i++) {
+        let F; let g;
+        if (i < 16) { F = (B & C) | (~B & D); g = i; } else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
+        else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) % 16; } else { F = C ^ (B | ~D); g = (7 * i) % 16; }
+        F = (F + A + T[i] + M[g]) | 0;
+        A = D; D = C; C = B; B = (B + rotl(F, S[(i >> 4) * 4 + (i % 4)])) | 0;
+      }
+      a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+    }
+    return [a0, b0, c0, d0].flatMap((w) => [w & 255, (w >>> 8) & 255, (w >>> 16) & 255, (w >>> 24) & 255]);
+  }
+  const be32 = (words) => words.flatMap((w) => [(w >>> 24) & 255, (w >>> 16) & 255, (w >>> 8) & 255, w & 255]);
+  function sha1(bytes) {
+    const data = mdPad(bytes, 64, 8, false);
+    let h = [0x67452301, 0xefcdab89 | 0, 0x98badcfe | 0, 0x10325476, 0xc3d2e1f0 | 0];
+    for (let off = 0; off < data.length; off += 64) {
+      const w = Array.from({ length: 80 }, (_, i) => (i < 16 ? (data[off + 4 * i] << 24) | (data[off + 4 * i + 1] << 16) | (data[off + 4 * i + 2] << 8) | data[off + 4 * i + 3] : 0));
+      for (let i = 16; i < 80; i++) w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+      let [a, b, c, d, e] = h;
+      for (let i = 0; i < 80; i++) {
+        const [f, k] = i < 20 ? [(b & c) | (~b & d), 0x5a827999] : i < 40 ? [b ^ c ^ d, 0x6ed9eba1] : i < 60 ? [(b & c) | (b & d) | (c & d), 0x8f1bbcdc | 0] : [b ^ c ^ d, 0xca62c1d6 | 0];
+        const t = (rotl(a, 5) + f + e + k + w[i]) | 0;
+        e = d; d = c; c = rotl(b, 30); b = a; a = t;
+      }
+      h = [(h[0] + a) | 0, (h[1] + b) | 0, (h[2] + c) | 0, (h[3] + d) | 0, (h[4] + e) | 0];
+    }
+    return be32(h);
+  }
+  function sha256(bytes, is224) {
+    const t = sha2Tables();
+    const data = mdPad(bytes, 64, 8, false);
+    let h = (is224 ? t.h224 : t.h256).map((x) => x | 0);
+    for (let off = 0; off < data.length; off += 64) {
+      const w = Array.from({ length: 64 }, (_, i) => (i < 16 ? (data[off + 4 * i] << 24) | (data[off + 4 * i + 1] << 16) | (data[off + 4 * i + 2] << 8) | data[off + 4 * i + 3] : 0));
+      for (let i = 16; i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      let [a, b, c, d, e, f, g, hh] = h;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + t.k256[i] + w[i]) | 0;
+        const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      h = [a, b, c, d, e, f, g, hh].map((v, i) => (h[i] + v) | 0);
+    }
+    return be32(is224 ? h.slice(0, 7) : h);
+  }
+  const M64 = (1n << 64n) - 1n;
+  const rotr64 = (x, n) => ((x >> BigInt(n)) | (x << BigInt(64 - n))) & M64;
+  function sha512(bytes, is384) {
+    const t = sha2Tables();
+    const data = mdPad(bytes, 128, 16, false);
+    let h = (is384 ? t.h384 : t.h512).slice();
+    for (let off = 0; off < data.length; off += 128) {
+      const w = [];
+      for (let i = 0; i < 16; i++) { let v = 0n; for (let j = 0; j < 8; j++) v = (v << 8n) | BigInt(data[off + 8 * i + j]); w.push(v); }
+      for (let i = 16; i < 80; i++) {
+        const s0 = rotr64(w[i - 15], 1) ^ rotr64(w[i - 15], 8) ^ (w[i - 15] >> 7n);
+        const s1 = rotr64(w[i - 2], 19) ^ rotr64(w[i - 2], 61) ^ (w[i - 2] >> 6n);
+        w.push((w[i - 16] + s0 + w[i - 7] + s1) & M64);
+      }
+      let [a, b, c, d, e, f, g, hh] = h;
+      for (let i = 0; i < 80; i++) {
+        const t1 = (hh + (rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41)) + ((e & f) ^ (~e & M64 & g)) + t.k512[i] + w[i]) & M64;
+        const t2 = ((rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39)) + ((a & b) ^ (a & c) ^ (b & c))) & M64;
+        hh = g; g = f; f = e; e = (d + t1) & M64; d = c; c = b; b = a; a = (t1 + t2) & M64;
+      }
+      h = [a, b, c, d, e, f, g, hh].map((v, i) => (h[i] + v) & M64);
+    }
+    return h.slice(0, is384 ? 6 : 8).flatMap((v) => Array.from({ length: 8 }, (_, i) => Number((v >> BigInt(56 - 8 * i)) & 255n)));
+  }
+  /** name as printed by dgst, block size, function */
+  const DIGESTS = {
+    md5: { label: 'MD5', block: 64, fn: md5 },
+    sha1: { label: 'SHA1', block: 64, fn: sha1 },
+    sha224: { label: 'SHA2-224', block: 64, fn: (b) => sha256(b, true) },
+    sha256: { label: 'SHA2-256', block: 64, fn: (b) => sha256(b, false) },
+    sha384: { label: 'SHA2-384', block: 128, fn: (b) => sha512(b, true) },
+    sha512: { label: 'SHA2-512', block: 128, fn: (b) => sha512(b, false) },
+  };
+  function hmac(alg, key, msg) {
+    const d = DIGESTS[alg];
+    let k = key.length > d.block ? d.fn(key) : key.slice();
+    while (k.length < d.block) k.push(0);
+    const inner = d.fn(k.map((x) => x ^ 0x36).concat(msg));
+    return d.fn(k.map((x) => x ^ 0x5c).concat(inner));
+  }
+  const hex = (bytes) => bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+  const latin1 = (bytes) => String.fromCharCode(...bytes);
+
+  /* ------------------------------------------------------------ helpers */
+  const HELP = { dgst: "Usage: dgst [options] [file...]\n\nGeneral options:\n -help               Display this summary\n -list               List digests\n -engine val         Use engine e, possibly a hardware device\n -engine_impl        Also use engine given by -engine for digest operations\n -passin val         Input file pass phrase source\n\nOutput options:\n -c                  Print the digest with separating colons\n -r                  Print the digest in coreutils format\n -out outfile        Output to filename rather than stdout\n -keyform format     Key file format (ENGINE, other values ignored)\n -hex                Print as hex dump\n -binary             Print in binary form\n -xoflen +int        Output length for XOF algorithms. To obtain the maximum security strength set this to 32 (or greater) for SHAKE128, and 64 (or greater) for SHAKE256\n -d                  Print debug info\n -debug              Print debug info\n\nSigning options:\n -sign val           Sign digest using private key\n -verify val         Verify a signature using public key\n -prverify val       Verify a signature using private key\n -sigopt val         Signature parameter in n:v form\n -signature infile   File with signature to verify\n -hmac val           Create hashed MAC with key\n -mac val            Create MAC (not necessarily HMAC)\n -macopt val         MAC algorithm parameters in n:v form or key\n -*                  Any supported digest\n -fips-fingerprint   Compute HMAC with the key used in OpenSSL-FIPS fingerprint\n\nRandom state options:\n -rand val           Load the given file(s) into the random number generator\n -writerand outfile  Write random data to the specified file\n\nProvider options:\n -provider-path val  Provider load path (must be before 'provider' argument if required)\n -provider val       Provider to load (can be specified multiple times)\n -propquery val      Property query used when fetching algorithms\n\nParameters:\n file                Files to digest (optional; default is stdin)\n", rand: "Usage: rand [options] num\n\nGeneral options:\n -help               Display this summary\n -engine val         Use engine, possibly a hardware device\n\nOutput options:\n -out outfile        Output file\n -base64             Base64 encode output\n -hex                Hex encode output\n\nRandom state options:\n -rand val           Load the given file(s) into the random number generator\n -writerand outfile  Write random data to the specified file\n\nProvider options:\n -provider-path val  Provider load path (must be before 'provider' argument if required)\n -provider val       Provider to load (can be specified multiple times)\n -propquery val      Property query used when fetching algorithms\n\nParameters:\n num                 Number of bytes to generate\n", enc: "Usage: enc [options]\n\nGeneral options:\n -help               Display this summary\n -list               List ciphers\n -ciphers            Alias for -list\n -e                  Encrypt\n -d                  Decrypt\n -p                  Print the iv/key\n -P                  Print the iv/key and exit\n -engine val         Use engine, possibly a hardware device\n\nInput options:\n -in infile          Input file\n -k val              Passphrase\n -kfile infile       Read passphrase from file\n\nOutput options:\n -out outfile        Output file\n -pass val           Passphrase source\n -v                  Verbose output\n -a                  Base64 encode/decode, depending on encryption flag\n -base64             Same as option -a\n -A                  Used with -[base64|a] to specify base64 buffer as a single line\n\nEncryption options:\n -nopad              Disable standard block padding\n -salt               Use salt in the KDF (default)\n -nosalt             Do not use salt in the KDF\n -debug              Print debug info\n -bufsize val        Buffer size\n -K val              Raw key, in hex\n -S val              Salt, in hex\n -iv val             IV in hex\n -md val             Use specified digest to create a key from the passphrase\n -iter +int          Specify the iteration count and force the use of PBKDF2\n                     Default: 10000\n -pbkdf2             Use password-based key derivation function 2 (PBKDF2)\n                     Use -iter to change the iteration count from 10000\n -none               Don't encrypt\n -*                  Any supported cipher\n\nRandom state options:\n -rand val           Load the given file(s) into the random number generator\n -writerand outfile  Write random data to the specified file\n\nProvider options:\n -provider-path val  Provider load path (must be before 'provider' argument if required)\n -provider val       Provider to load (can be specified multiple times)\n -propquery val      Property query used when fetching algorithms\n", version: "Usage: version [options]\n\nGeneral options:\n -help  Display this summary\n\nOutput options:\n -a     Show all data\n -b     Show build date\n -d     Show configuration directory\n -e     Show engines directory\n -m     Show modules directory\n -f     Show compiler flags used\n -o     Show some internal datatype options\n -p     Show target build platform\n -r     Show random seeding options\n -v     Show library version\n -c     Show CPU settings info\n" };
+  const helpListing = "help:\n\nStandard commands\nasn1parse         ca                ciphers           cmp               \ncms               crl               crl2pkcs7         dgst              \ndhparam           dsa               dsaparam          ec                \necparam           enc               engine            errstr            \nfipsinstall       gendsa            genpkey           genrsa            \nhelp              info              kdf               list              \nmac               nseq              ocsp              passwd            \npkcs12            pkcs7             pkcs8             pkey              \npkeyparam         pkeyutl           prime             rand              \nrehash            req               rsa               rsautl            \ns_client          s_server          s_time            sess_id           \nsmime             speed             spkac             srp               \nstoreutl          ts                verify            version           \nx509              \n\nMessage Digest commands (see the `dgst' command for more details)\nblake2b512        blake2s256        md4               md5               \nrmd160            sha1              sha224            sha256            \nsha3-224          sha3-256          sha3-384          sha3-512          \nsha384            sha512            sha512-224        sha512-256        \nshake128          shake256          sm3               \n\nCipher commands (see the `enc' command for more details)\naes-128-cbc       aes-128-ecb       aes-192-cbc       aes-192-ecb       \naes-256-cbc       aes-256-ecb       aria-128-cbc      aria-128-cfb      \naria-128-cfb1     aria-128-cfb8     aria-128-ctr      aria-128-ecb      \naria-128-ofb      aria-192-cbc      aria-192-cfb      aria-192-cfb1     \naria-192-cfb8     aria-192-ctr      aria-192-ecb      aria-192-ofb      \naria-256-cbc      aria-256-cfb      aria-256-cfb1     aria-256-cfb8     \naria-256-ctr      aria-256-ecb      aria-256-ofb      base64            \nbf                bf-cbc            bf-cfb            bf-ecb            \nbf-ofb            camellia-128-cbc  camellia-128-ecb  camellia-192-cbc  \ncamellia-192-ecb  camellia-256-cbc  camellia-256-ecb  cast              \ncast-cbc          cast5-cbc         cast5-cfb         cast5-ecb         \ncast5-ofb         des               des-cbc           des-cfb           \ndes-ecb           des-ede           des-ede-cbc       des-ede-cfb       \ndes-ede-ofb       des-ede3          des-ede3-cbc      des-ede3-cfb      \ndes-ede3-ofb      des-ofb           des3              desx              \nrc2               rc2-40-cbc        rc2-64-cbc        rc2-cbc           \nrc2-cfb           rc2-ecb           rc2-ofb           rc4               \nrc4-40            seed              seed-cbc          seed-cfb          \nseed-ecb          seed-ofb          sm4-cbc           sm4-cfb           \nsm4-ctr           sm4-ecb           sm4-ofb           \n\n";
+  const VERSION_LINE = 'OpenSSL 3.5.1 1 Jul 2025 (Library: OpenSSL 3.5.1 1 Jul 2025)';
+  const toBytes = (s) => U.toBytes(s);
+
+  /** The 16-hex-digit thread id OpenSSL puts in front of its error queue lines. */
+  const errId = () => Array.from({ length: 16 }, () => '0123456789ABCDEF'[Math.floor(K.net.rand() * 16)]).join('');
+
+  async function readStdin(ctx) {
+    if (ctx.stdin != null) return ctx.stdin;
+    let s = '';
+    for (;;) { const l = await ctx.readLine(''); if (l == null) return s; s += l + '\n'; }
+  }
+  /** Contents of a file operand ("-" or none: stdin); null after reporting the failure. */
+  async function readFile(ctx, path, sub, kind) {
+    if (path === null || path === '-') return readStdin(ctx);
+    try { return ctx.fs.read(path); } catch (e) {
+      if (!(e instanceof K.FsError)) throw e;
+      if (kind === 'dgst') {
+        if (e.code === 'EISDIR') {
+          ctx.err('Read error in ' + path + '\n' + errId() + ':error:80000015:system library:file_read:Is a directory:../crypto/bio/bss_file.c:148:calling fread()\n' + errId() + ':error:10080002:BIO routines:file_read:system lib:../crypto/bio/bss_file.c:150:\n');
+        } else {
+          ctx.err(path + ': ' + e.message + '\n' + errId() + ':error:80000002:system library:file_ctrl:' + e.message + ':../crypto/bio/bss_file.c:297:calling fopen(' + path + ', r)\n' + errId() + ':error:10080002:BIO routines:file_ctrl:system lib:../crypto/bio/bss_file.c:300:\n');
+        }
+      } else {
+        ctx.err('Can\'t open "' + path + '" for reading, ' + e.message + '\n' + errId() + ':error:80000002:system library:BIO_new_file:' + e.message + ':../crypto/bio/bss_file.c:67:calling fopen(' + path + ', rb)\n' + errId() + ':error:10000080:BIO routines:BIO_new_file:no such file:../crypto/bio/bss_file.c:75:\n');
+      }
+      return null;
+    }
+  }
+  function writeOut(ctx, path, text) {
+    if (path == null) { ctx.out(text); return true; }
+    try { ctx.fs.write(path, text); return true; } catch (e) {
+      if (!(e instanceof K.FsError)) throw e;
+      ctx.err('Can\'t open "' + path + '" for writing, ' + e.message + '\n');
+      return false;
+    }
+  }
+  const usage = (ctx, sub) => { ctx.err(sub + ': Use -help for summary.\n'); return 1; };
+
+  /* ---------------------------------------------------------- commands */
+  async function dgst(ctx, sub, args, fixedAlg) {
+    let alg = fixedAlg;
+    const o = { files: [] };
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '--') { o.files.push(...args.slice(i + 1)); break; }
+      if (a[0] !== '-' || a === '-') { o.files.push(a); continue; }
+      const opt = a.replace(/^--?/, '');
+      if (opt === 'help' || opt === 'h') { ctx.err(HELP.dgst); return 0; }
+      if (opt === 'list') { ctx.out('Supported digests:\n' + Object.keys(DIGESTS).map((d) => '-' + d).join('\n') + '\n'); return 0; }
+      if (opt === 'r') o.coreutils = true;
+      else if (opt === 'hex') o.hex = true;
+      else if (opt === 'binary') o.binary = true;
+      else if (opt === 'c') o.colons = true;
+      else if (opt === 'out' || opt === 'hmac' || opt === 'sign' || opt === 'verify' || opt === 'passin' || opt === 'engine') {
+        if (i + 1 >= args.length) { ctx.err(sub + ': Option -' + opt + ' needs a value\n'); return usage(ctx, sub); }
+        o[opt] = args[++i];
+      } else if (opt in DIGESTS) alg = opt;
+      else {
+        ctx.err(sub + ': Unknown option or message digest: ' + opt + '\n' + sub + ': Use -help for summary.\n' + errId() + ':error:0308010C:digital envelope routines:inner_evp_generic_fetch:unsupported:../crypto/evp/evp_fetch.c:386:Global default library context, Algorithm (' + opt + ' : 0), Properties (<null>)\n');
+        return 1;
+      }
+    }
+    const algName = alg || 'sha256';
+    const d = DIGESTS[algName];
+    const label = (alg ? d.label : 'SHA256');
+    let status = 0; let text = '';
+    for (const f of o.files.length ? o.files : [null]) {
+      const content = await readFile(ctx, f, sub, 'dgst');
+      if (content === null) { status = 1; continue; }
+      const bytes = toBytes(content);
+      const digest = o.hmac !== undefined ? hmac(algName, toBytes(o.hmac), bytes) : d.fn(bytes);
+      const shown = f === null || f === '-' ? 'stdin' : f;
+      if (o.binary) text += latin1(digest);
+      else {
+        const h = o.colons ? digest.map((b) => b.toString(16).padStart(2, '0')).join(':') : hex(digest);
+        text += o.coreutils ? h + ' *' + shown + '\n' : (o.hmac !== undefined && f !== null ? 'HMAC-' : '') + label + '(' + shown + ')= ' + h + '\n';
+      }
+    }
+    if (!writeOut(ctx, o.out, text)) return 1;
+    return status;
+  }
+
+  function b64Decode(text) {
+    const s = text.replace(/\s/g, '');
+    const m = /^([A-Za-z0-9+/]*)(={0,2})$/.exec(s);
+    if (!m || (m[1].length + m[2].length) % 4 !== 0) return null;
+    return K.b64.dec(m[1]);
+  }
+
+  async function enc(ctx, sub, args) {
+    const o = { dec: false, one: false, base64: sub === 'base64' };
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-help' || a === '-h') { ctx.err(HELP.enc); return 0; }
+      if (a === '-d') o.dec = true;
+      else if (a === '-e') o.dec = false;
+      else if (a === '-a' || a === '-base64') o.base64 = true;
+      else if (a === '-A') o.one = true;
+      else if (a === '-in' || a === '-out' || a === '-k' || a === '-pass' || a === '-md' || a === '-iter') {
+        if (i + 1 >= args.length) { ctx.err(sub + ': Option ' + a + ' needs a value\n'); return usage(ctx, sub); }
+        o[a.slice(1)] = args[++i];
+      } else if (/^-(aes|aria|bf|camellia|cast5?|des|rc[24]|seed|sm4)/.test(a) || a === '-pbkdf2' || a === '-salt' || a === '-nosalt' || a === '-p' || a === '-P') {
+        if (/^-(aes|aria|bf|camellia|cast5?|des|rc[24]|seed|sm4)/.test(a)) o.cipher = a.slice(1);
+      } else {
+        ctx.err(sub + ': Unknown cipher: ' + a.replace(/^-+/, '') + '\n' + sub + ': Use -help for summary.\n' + errId() + ':error:0308010C:digital envelope routines:inner_evp_generic_fetch:unsupported:../crypto/evp/evp_fetch.c:386:Global default library context, Algorithm (' + a.replace(/^-+/, '') + ' : 0), Properties (<null>)\n');
+        return 1;
+      }
+    }
+    if (o.cipher) { ctx.err(sub + ': the ' + o.cipher + ' cipher is not available in this simulator; use -base64 for encoding\n'); return 1; }
+    if (!o.base64) { ctx.err(sub + ': a cipher or -base64 is required in this simulator\n'); return 1; }
+    const content = await readFile(ctx, o.in === undefined ? null : o.in, sub, 'enc');
+    if (content === null) return 1;
+    let result;
+    if (o.dec) {
+      const bytes = b64Decode(content);
+      result = bytes ? latin1To(bytes) : '';
+    } else {
+      const b = K.b64.enc(toBytes(content));
+      result = !b ? '' : o.one ? b : b.replace(/(.{64})(?=.)/g, '$1\n') + '\n';
+    }
+    return writeOut(ctx, o.out, result) ? 0 : 1;
+  }
+  const latin1To = (bytes) => U.fromBytes(bytes);
+
+  async function rand(ctx, args) {
+    const o = {};
+    let count = null;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-help') { ctx.err(HELP.rand); return 0; }
+      if (a === '-hex') o.hex = true;
+      else if (a === '-base64') o.b64 = true;
+      else if (a === '-out') { if (i + 1 >= args.length) { ctx.err('rand: Option -out needs a value\n'); return usage(ctx, 'rand'); } o.out = args[++i]; }
+      else if (a === '-writerand' || a === '-engine') i++;
+      else if (a[0] === '-' && a.length > 1) { ctx.err('rand: Unknown option: ' + a + '\n'); return usage(ctx, 'rand'); }
+      else if (count !== null) return usage(ctx, 'rand');
+      else {
+        if (!/^\d+$/.test(a)) { ctx.err('rand: Can\'t parse "' + a + '" as a number\n'); return usage(ctx, 'rand'); }
+        count = Number(a);
+      }
+    }
+    if (count === null) { if (o.hex || o.b64) ctx.out('\n'); return 0; }
+    if (count < 1) return usage(ctx, 'rand');
+    const bytes = Array.from({ length: count }, () => Math.floor(K.net.rand() * 256));
+    const text = o.hex ? hex(bytes) + '\n' : o.b64 ? K.b64.enc(bytes).replace(/(.{64})(?=.)/g, '$1\n') + '\n' : latin1(bytes);
+    return writeOut(ctx, o.out, text) ? 0 : 1;
+  }
+
+  function version(ctx, args) {
+    const all = {
+      '-v': VERSION_LINE, '-b': 'built on: Tue Jul  1 12:00:00 2025 UTC', '-p': 'platform: debian-amd64', '-o': 'options: bn(64,64)',
+      '-d': 'OPENSSLDIR: "/usr/lib/ssl"', '-m': 'MODULESDIR: "/usr/lib/x86_64-linux-gnu/ossl-modules"', '-r': 'Seeding source: os-specific',
+    };
+    if (!args.length) { ctx.println(VERSION_LINE); return 0; }
+    const lines = [];
+    for (const a of args) {
+      if (a === '-help') { ctx.err(HELP.version); return 0; }
+      if (a === '-a') lines.push(...Object.values(all));
+      else if (all[a]) lines.push(all[a]);
+      else if (a[0] === '-') { ctx.err('version: Unknown option: ' + a + '\n'); return usage(ctx, 'version'); }
+      else { ctx.err('Use -help for summary.\n'); return 1; }
+    }
+    ctx.out(lines.join('\n') + '\n');
+    return 0;
+  }
+
+  const MAN = `DESCRIPTION
+       openssl is a cryptography toolkit. In this simulator the following
+       commands are available:
+
+       openssl version [-a]
+       openssl dgst [-md5|-sha1|-sha224|-sha256|-sha384|-sha512] [-r] [-hex]
+                    [-binary] [-c] [-hmac key] [-out file] [file...]
+       openssl md5|sha1|sha224|sha256|sha384|sha512 [file...]
+       openssl base64 [-d] [-e] [-A] [-in file] [-out file]
+       openssl enc -base64 [-d] [-A] [-in file] [-out file]
+       openssl rand [-hex|-base64] [-out file] num
+
+       The digest commands print "SHA2-256(file)= hex" and read standard input
+       when no file is given. rand draws from the simulator's seeded generator.
+
+EXAMPLES
+       openssl dgst -sha256 /etc/passwd
+       echo -n 'password' | openssl dgst -md5
+       echo 'user:pass' | openssl base64
+       openssl rand -hex 16`;
+
+  K.cmd.register({
+    name: 'openssl',
+    pkg: 'openssl',
+    summary: 'OpenSSL command line program',
+    synopsis: 'openssl command [ options ] [ parameters ]',
+    man: MAN,
+    async run(ctx) {
+      const [sub, ...rest] = ctx.args;
+      if (sub === undefined || sub === 'help') { ctx.err(helpListing); return 0; }
+      if (sub === 'version') return version(ctx, rest);
+      if (sub === 'dgst') return dgst(ctx, 'dgst', rest, null);
+      if (DIGESTS[sub]) return dgst(ctx, sub, rest, sub);
+      if (sub === 'base64' || sub === 'enc') return enc(ctx, sub, rest);
+      if (sub === 'rand') return rand(ctx, rest);
+      ctx.err('Invalid command \'' + sub + '\'; type "help" for a list.\n');
+      return 1;
+    },
+    complete() { return ['version', 'dgst', 'enc', 'base64', 'rand', 'md5', 'sha1', 'sha256', 'sha512', 'help']; },
+  });
+})(typeof globalThis !== 'undefined' ? globalThis : this);
