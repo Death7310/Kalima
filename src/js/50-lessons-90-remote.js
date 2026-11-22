@@ -190,12 +190,209 @@
     refs: ['ssh(1)', 'ssh-keygen(1)', 'sshd(8)', 'known_hosts format in sshd(8)', 'RFC 4251', 'Kali Linux Revealed, ch. 5'],
   };
 
+  /* ------------------------------------------------------------ remote-keys */
+  const KEY = '~/.ssh/halcyon_ed25519';
+  const keysLesson = {
+    id: 'remote-keys',
+    title: 'SSH keys instead of passwords',
+    minutes: 11,
+    objectives: [
+      'Create an ed25519 key pair and say which half is secret',
+      'Install the public half on a server with `ssh-copy-id`',
+      'Log in without typing the account password',
+      'Explain what a passphrase adds and why keys are preferred to passwords',
+    ],
+    intro: T(
+      'A password can be guessed, reused, or typed into the wrong window. An SSH key pair avoids most of that. You keep a *private* key that never leaves your machine, and give servers the matching *public* key. To log in, you prove that you hold the private key without ever sending it.',
+      '',
+      'Administrators use keys for their own accounts, and scripts use them because nobody has to type anything. For you, a key for each engagement is also tidy bookkeeping: when the engagement ends, the key can be deleted and removed from the servers. This lesson creates one for the lab.'
+    ),
+    steps: [
+      {
+        id: 'generate',
+        prompt: T(
+          'Create a key pair for this engagement:',
+          '',
+          '```',
+          'ssh-keygen -t ed25519 -f ~/.ssh/halcyon_ed25519 -N ""',
+          '```',
+          '',
+          '- `-t ed25519` selects the key type, a modern and compact one',
+          '- `-f` names the file for the private key; the public key gets the same name plus `.pub`',
+          '- `-N ""` sets an empty passphrase',
+          '',
+          'The empty passphrase keeps this lab simple. Without `-N`, ssh-keygen asks you for a passphrase, and on a real workstation you should give one. If the file already exists from an earlier attempt, ssh-keygen asks whether to overwrite it: answer `y`.',
+          '',
+          'The output shows the *fingerprint* of the new key and its randomart picture.'
+        ),
+        hint: 'Run `ssh-keygen` with `-t ed25519`, `-f ~/.ssh/halcyon_ed25519` and `-N ""`.',
+        solution: 'ssh-keygen -t ed25519 -f ~/.ssh/halcyon_ed25519 -N ""',
+        input: ['y'],
+        check: { cmd: 'ssh-keygen', args: ['-t'], file: { path: '/home/kali/.ssh/halcyon_ed25519.pub', exists: true } },
+      },
+      {
+        id: 'perms',
+        prompt: T(
+          'Two files were created. List them:',
+          '',
+          '```',
+          'ls -l ~/.ssh/halcyon_ed25519*',
+          '```',
+          '',
+          'Compare the permission columns. The private key is `-rw-------`: only you can read or write it. The public key is `-rw-r--r--`: anyone may read it, which is fine, because it is meant to be handed out. If a private key is readable by others, ssh refuses to use it.'
+        ),
+        hint: 'Use `ls -l` with the pattern `~/.ssh/halcyon_ed25519*`.',
+        solution: 'ls -l ~/.ssh/halcyon_ed25519*',
+        check: { cmd: 'ls', out: /-rw------- .*halcyon_ed25519\n[\s\S]*-rw-r--r-- .*halcyon_ed25519\.pub/ },
+      },
+      {
+        id: 'perms-q',
+        prompt: 'Which file is the secret one: the one with the name `halcyon_ed25519` or the one ending in `.pub`? Type the file name.',
+        hint: 'Look at which of the two has permissions for the owner only.',
+        solution: 'halcyon_ed25519',
+        answer: /^(~\/\.ssh\/|\/home\/kali\/\.ssh\/)?halcyon_ed25519$/,
+      },
+      {
+        id: 'pub',
+        prompt: T(
+          'Read the public key. It is one line of text:',
+          '',
+          '```',
+          'cat ~/.ssh/halcyon_ed25519.pub',
+          '```',
+          '',
+          'The line has three fields: the key type, the key itself, and a comment. By default the comment is `user@host` of the machine that made it, here `kali@kali`. The comment is only a label, so that you and the server\'s administrator can tell keys apart.',
+          '',
+          'Printing the *private* key would show the text `BEGIN OPENSSH PRIVATE KEY`. Never paste it into a chat, a ticket or a report.'
+        ),
+        hint: 'Use `cat` on the file that ends in `.pub`.',
+        solution: 'cat ~/.ssh/halcyon_ed25519.pub',
+        check: { cmd: 'cat', out: /^ssh-ed25519 \S+ kali@kali\s*$/m },
+      },
+      {
+        id: 'copy-id',
+        prompt: T(
+          'Install the public key on the server, in the account you can already log in to. `ssh-copy-id` logs in with the password one last time and appends the key to `~/.ssh/authorized_keys` there:',
+          '',
+          '```',
+          'ssh-copy-id -i ~/.ssh/halcyon_ed25519.pub student@web01.halcyon.lab',
+          '```',
+          '',
+          '`-i` names the key to install. Answer the host key question with `yes` if it appears, and give the password `student`. The output ends with `Number of key(s) added: 1`.'
+        ),
+        hint: 'Use `ssh-copy-id -i` with the public key file and `student@web01.halcyon.lab`.',
+        solution: 'ssh-copy-id -i ~/.ssh/halcyon_ed25519.pub student@web01.halcyon.lab',
+        input: SSHIN,
+        check: { cmd: 'ssh-copy-id', out: /Number of key\(s\) added: 1|already exist on the remote system/ },
+      },
+      {
+        id: 'login-key',
+        prompt: T(
+          'Now log in with the key. `-i` says which private key to offer, and `-o PasswordAuthentication=no` forbids falling back to the password, so a success proves that the key worked:',
+          '',
+          '```',
+          'ssh -i ~/.ssh/halcyon_ed25519 -o PasswordAuthentication=no student@web01.halcyon.lab hostname',
+          '```',
+          '',
+          'No password prompt appears. The server checked that you hold the private key that belongs to the public key in `authorized_keys`.'
+        ),
+        hint: 'Add `-i` with the private key file, and `-o PasswordAuthentication=no`, before the `student@...` part.',
+        solution: 'ssh -i ~/.ssh/halcyon_ed25519 -o PasswordAuthentication=no student@web01.halcyon.lab hostname',
+        check: { cmd: 'hostname', host: 'web01', out: /^web01\s*$/m, exit: 0, fn: (ev) => !/password:/i.test(outOf(ev)) },
+      },
+      {
+        id: 'authorized',
+        prompt: T(
+          'Look at what the server holds. Print the file that `ssh-copy-id` appended to:',
+          '',
+          '```',
+          'ssh -i ~/.ssh/halcyon_ed25519 student@web01.halcyon.lab "cat ~/.ssh/authorized_keys"',
+          '```',
+          '',
+          'Your public key is there, with its `kali@kali` comment. This is all the server stores: nothing in it lets anyone log in as you. If someone copied this file, they would only get your public key. If you want to revoke access, remove the line.'
+        ),
+        hint: 'Run `cat ~/.ssh/authorized_keys` on web01 through ssh, with the quotes as in the lesson text.',
+        solution: 'ssh -i ~/.ssh/halcyon_ed25519 student@web01.halcyon.lab "cat ~/.ssh/authorized_keys"',
+        check: { cmd: 'cat', host: 'web01', out: /^ssh-ed25519 \S+ kali@kali\s*$/m },
+      },
+      {
+        id: 'authorized-q',
+        prompt: 'Which file, in the home directory of the account on the server, lists the public keys that may log in? Type its name.',
+        hint: 'It was in the command you just ran.',
+        solution: 'authorized_keys',
+        answer: /^(~\/\.ssh\/|\.ssh\/)?authorized_keys$/,
+      },
+      {
+        id: 'fingerprint',
+        prompt: T(
+          'Last, learn to identify a key without printing it. A fingerprint is a short digest of the key:',
+          '',
+          '```',
+          'ssh-keygen -l -f ~/.ssh/halcyon_ed25519.pub',
+          '```',
+          '',
+          'The output has the key size in bits, the fingerprint beginning `SHA256:`, the comment, and the type. Fingerprints are what you compare when you want to know that two keys are the same, or when you note in a report which key you used.'
+        ),
+        hint: 'Use `ssh-keygen -l -f` with the public key file.',
+        solution: 'ssh-keygen -l -f ~/.ssh/halcyon_ed25519.pub',
+        check: { cmd: 'ssh-keygen', args: ['-l'], out: /^256 SHA256:\S+ kali@kali \(ED25519\)/m },
+      },
+    ],
+    quiz: [
+      {
+        q: 'Which of the two files may be copied to a server, posted in a ticket or sent by email?',
+        choices: [
+          'Only the private key',
+          'Both, because they are encrypted',
+          'Only the public key, the one ending in `.pub`',
+          'Neither; a key never leaves the machine that made it',
+        ],
+        answer: 2,
+        why: 'The public key is designed to be shared. Whoever holds the private key can log in wherever the public key is installed, so that file stays on your machine.',
+      },
+      {
+        q: 'Someone copies your private key file, which has a good passphrase. What is true?',
+        choices: [
+          'They can log in at once, because a passphrase only protects the public key',
+          'They still need the passphrase to use the key, which buys you time to remove the key from the servers',
+          'Nothing; a passphrase makes the file impossible to copy',
+          'They can use it only from your machine',
+        ],
+        answer: 1,
+        why: 'The passphrase encrypts the private key file. A copy of the file is not usable without it, though a weak passphrase can be guessed offline, so revoke the key anyway.',
+      },
+      {
+        q: 'Why are keys preferred to passwords for logging in to servers?',
+        choices: [
+          'Keys are faster to type',
+          'A key is long and random and is never sent to the server, so there is nothing to guess, reuse or capture',
+          'Servers do not support passwords any more',
+          'A key can be shared safely among colleagues',
+        ],
+        answer: 1,
+        why: 'A password is a secret that crosses the network and can be guessed or reused. With a key the server only learns that you hold the secret. Sharing a private key among people is poor practice, since you cannot tell who used it.',
+      },
+      {
+        q: 'You run `ssh -o PasswordAuthentication=no student@web01.halcyon.lab` and get `Permission denied (publickey,password)`. What does it tell you?',
+        choices: [
+          'The server is down',
+          'Your password is wrong',
+          'No key you offered is accepted for that account, and you forbade the password',
+          'The host key changed',
+        ],
+        answer: 2,
+        why: 'The list in parentheses is what the server accepts. With the password turned off, only a key could succeed, and none was accepted. Check which key ssh offered and whether it is in `authorized_keys`.',
+      },
+    ],
+    refs: ['ssh-keygen(1)', 'ssh-copy-id(1)', 'ssh(1)', 'sshd(8), AUTHORIZED_KEYS FILE FORMAT', 'RFC 4253', 'Kali Linux Revealed, ch. 5'],
+  };
+
   K.lessons.register({
     id: 'remote',
     title: 'Remote access and file transfer',
     order: 90,
     summary: 'Log in to servers with ssh, use keys instead of passwords, copy files with scp, and recognize the clear-text FTP protocol for what it is.',
-    lessons: [sshLesson],
+    lessons: [sshLesson, keysLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
