@@ -269,7 +269,7 @@
         ),
         hint: 'Use `-A` followed by a quoted label, together with `-v`.',
         solution: 'curl -v -A \'kalima-lab/1.0\' http://web01.halcyon.lab/status',
-        check: { cmd: 'curl', args: ['-A'], out: /> User-Agent: \S+/, fn: (ev) => !/> User-Agent: curl\//.test(ev.output || '') },
+        check: { cmd: 'curl', args: ['-A'], out: /> User-Agent: \S+/, not: { out: /> User-Agent: curl\// } },
       },
       {
         id: 'server-grep',
@@ -284,7 +284,7 @@
         ),
         hint: 'Combine `curl -sI` and `grep -i server` with a pipe.',
         solution: 'curl -sI http://web01.halcyon.lab/ | grep -i \'^server\'',
-        check: { cmd: 'curl', args: ['-I'], out: /^Server: nginx/m, fn: (ev) => !/HTTP\/1\.1/.test(ev.output || '') },
+        check: { cmd: 'curl', args: ['-I'], out: /^Server: nginx/m, not: { out: /^HTTP\/1\.1|^Date:/m } },
       },
       {
         id: 'server-read',
@@ -384,11 +384,164 @@
     refs: ['curl(1)', 'RFC 9110 (HTTP Semantics), sections 7.2, 10.1.5 and 10.2.4', 'RFC 9309 (Robots Exclusion Protocol)', 'sitemaps.org protocol'],
   };
 
+  /* --------------------------------------------------------------- web-tls */
+  const tlsLesson = {
+    id: 'web-tls',
+    title: 'HTTPS and certificate errors',
+    minutes: 9,
+    objectives: [
+      'Explain what a certificate verification error means and read the reason `curl` gives',
+      'Inspect the certificate details a server presents with `curl -v`',
+      'Use `-k` as a deliberate, recorded exception in a lab, and say why it is not a habit for the internet',
+    ],
+    intro: T(
+      'HTTPS is HTTP inside an encrypted channel, and it does two jobs. It hides the traffic from anyone on the path, and it lets the client check that it reached the server it asked for. The second job is done with certificates, and it is the one people skip when a certificate error gets in the way.',
+      '',
+      'The lab web server offers HTTPS on port 443 with a certificate that your workstation does not trust. That is a safe place to learn what the error says, what the override does, and what you give up when you use it.'
+    ),
+    steps: [
+      {
+        id: 'fail',
+        prompt: T(
+          'Plain HTTP uses port 80. HTTPS uses port 443, and `curl` picks it from the `https://` scheme. Try the intranet over HTTPS:',
+          '',
+          '```',
+          'curl https://web01.halcyon.lab/status',
+          '```',
+          '',
+          'It fails. No page is printed, only an error, and that is the right behavior. Read the message before you do anything about it.'
+        ),
+        hint: 'Type `curl` followed by the `https://` URL for `/status`.',
+        solution: 'curl https://web01.halcyon.lab/status',
+        check: { cmd: 'curl', argsRe: /^https:\/\//, out: /SSL certificate problem/ },
+      },
+      {
+        id: 'errno',
+        prompt: 'The error starts with `curl:` and a number in parentheses. `curl` documents every exit code, and that number is the exit code. Which number is it?',
+        hint: 'Look at the first line of the error, `curl: (NN) SSL certificate problem`.',
+        solution: '60',
+        answer: /^(60|\(60\)|curl: \(60\))$/,
+      },
+      {
+        id: 'reason',
+        prompt: T(
+          'After `SSL certificate problem:` comes the reason. Type the two words that name the problem.',
+          '',
+          'The server did present a certificate. `curl` could not trace it back to an authority that the workstation trusts, so it refused to continue. A certificate that nobody trusted vouches only for itself, and anyone can make one.'
+        ),
+        hint: 'The words are hyphenated: the certificate signed itself.',
+        solution: 'self-signed certificate',
+        answer: /^self[- ]signed( certificate)?$/i,
+      },
+      {
+        id: 'inspect',
+        prompt: T(
+          'You can look at the certificate without trusting it. With `-v` and `-k` (more on `-k` in a moment) the handshake details are printed. Filter them for the lines you need:',
+          '',
+          '```',
+          'curl -vk https://web01.halcyon.lab/status 2>&1 | grep -E \'subject|expire date|verify result\'',
+          '```',
+          '',
+          '`2>&1` sends error output, where `-v` writes, into the pipe so `grep` sees it. The `subject` line says whom the certificate was issued to, here `web01.halcyon.lab`. The `expire date` line says when it stops being valid. The `verify result` line is the verdict that `curl` would have enforced without `-k`.'
+        ),
+        hint: 'Use `curl -vk`, the HTTPS URL, then `2>&1 | grep -E` with the three words separated by `|`.',
+        solution: 'curl -vk https://web01.halcyon.lab/status 2>&1 | grep -E \'subject|expire date|verify result\'',
+        check: { cmd: 'curl', args: ['-k'], out: /subject: CN=web01\.halcyon\.lab[\s\S]*expire date:[\s\S]*verify result/, not: { out: /Trying 10\.10\.10\.10|TLSv1\.3 \(/ } },
+      },
+      {
+        id: 'expiry',
+        prompt: 'On which date does the certificate expire? Type the month, day and year in any common form, for example `Dec 5 2026`.',
+        hint: 'Read the `expire date` line from the last step.',
+        solution: 'Nov 30 2026',
+        answer: /^(nov(ember)?\.? 30,? 2026|30 nov(ember)?,? 2026|2026-11-30)$/i,
+      },
+      {
+        id: 'insecure',
+        prompt: T(
+          'The option `-k` (long form `--insecure`) tells `curl` to carry on when verification fails. The traffic is still encrypted. What you give up is the check of *who* is on the other end, so anyone able to intercept the connection could present their own certificate and `curl -k` would accept it.',
+          '',
+          'Inside this lab that is an understood exception: you know the host, it is in scope, and the network is yours. Use it knowingly:',
+          '',
+          '```',
+          'curl -k https://web01.halcyon.lab/status',
+          '```',
+          '',
+          'On the internet, and with anything secret, the answer to a certificate error is to find out why. The proper fix is to trust the lab authority\'s certificate with `--cacert file`, or to have the server given a certificate your workstation trusts. Never put `-k` into a script you will reuse.'
+        ),
+        hint: 'Repeat the plain `curl` command from the first step and add `-k`.',
+        solution: 'curl -k https://web01.halcyon.lab/status',
+        check: { cmd: 'curl', args: ['-k'], out: /"status":"ok"/ },
+      },
+      {
+        id: 'note',
+        prompt: T(
+          'An exception you do not write down will be forgotten. Add a line to your engagement notes saying what you did and why, using `echo` and `>>` to append:',
+          '',
+          '```',
+          'echo "web01 https: self-signed lab certificate, used curl -k deliberately (lab network, in scope)" >> ~/engagement/notes.md',
+          '```',
+          '',
+          'Use your own wording if you like, but name the host, the self-signed certificate and the use of `-k`. Then `tail -3 ~/engagement/notes.md` shows the line at the end of the file.'
+        ),
+        hint: 'Append with `>>` so you do not overwrite the notes. Mention web01 and the self-signed certificate in the text.',
+        solution: 'echo "web01 https: self-signed lab certificate, used curl -k deliberately (lab network, in scope)" >> ~/engagement/notes.md',
+        check: { file: { path: HOME + '/engagement/notes.md', contains: /web01[^\n]*self-signed|self-signed[^\n]*web01/i } },
+      },
+    ],
+    quiz: [
+      {
+        q: 'What does `curl: (60) SSL certificate problem: self-signed certificate` tell you?',
+        choices: [
+          'The server is down',
+          'The server presented a certificate that does not chain to an authority your workstation trusts',
+          'Your password was wrong',
+          'The connection was not encrypted',
+        ],
+        answer: 1,
+        why: 'The connection reached the server and the handshake began. Verification failed because the certificate could not be tied to a trusted authority.',
+      },
+      {
+        q: 'You run `curl -k https://web01.halcyon.lab/`. Which statement is true?',
+        choices: [
+          'The traffic is sent unencrypted',
+          'The traffic is still encrypted, but curl no longer verifies the server\'s identity',
+          'The server is now trusted by your whole workstation',
+          'curl checks the certificate twice as carefully',
+        ],
+        answer: 1,
+        why: '`-k` skips verification only. Encryption still happens, but you no longer know who holds the other end.',
+      },
+      {
+        q: 'Why is `-k` acceptable here and a bad habit on the internet?',
+        choices: [
+          'In the lab you know the host and control the network, so an impostor is not a realistic risk; on the internet you do not',
+          'It runs faster in a lab',
+          'Internet servers reject requests that use `-k`',
+          'It is not acceptable in the lab either, since it should never be used',
+        ],
+        answer: 0,
+        why: 'The risk is that someone else answers in the server\'s place. On a network you control that risk is small and known, and you record the exception. On the internet it is not.',
+      },
+      {
+        q: 'What is the right long-term fix for a lab server whose certificate is signed by your own authority?',
+        choices: [
+          'Add `-k` to every command',
+          'Disable HTTPS and use plain HTTP',
+          'Give curl the authority\'s certificate with `--cacert`, or install it as trusted on the workstation',
+          'Ignore the error message',
+        ],
+        answer: 2,
+        why: 'Trusting the authority that signed the certificate restores verification, so the check keeps working and the error disappears for the right reason.',
+      },
+    ],
+    refs: ['curl(1)', 'RFC 8446 (TLS 1.3)', 'RFC 5280 (X.509 certificates)'],
+  };
+
   K.lessons.register({
     id: 'web',
     title: 'HTTP from the command line',
     order: 80,
     summary: 'Read what web servers actually say: requests, status codes, headers, TLS certificates and plain-text protocols, using curl, wget, a throwaway python web server and nc.',
-    lessons: [curlLesson, headersLesson],
+    lessons: [curlLesson, headersLesson, tlsLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
