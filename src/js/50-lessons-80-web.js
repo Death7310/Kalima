@@ -206,11 +206,189 @@
     refs: ['curl(1)', 'RFC 9110 (HTTP Semantics), section 15 (status codes)'],
   };
 
+  /* ----------------------------------------------------------- web-headers */
+  const headersLesson = {
+    id: 'web-headers',
+    title: 'Anatomy of a request and a response',
+    minutes: 10,
+    objectives: [
+      'Read a request and a response side by side with `curl -v`',
+      'Say what the Host, User-Agent and Server headers carry, and what the Server header gives away',
+      'Find the files a site publishes for crawlers, `robots.txt` and `sitemap.xml`, and say what they are and are not',
+    ],
+    intro: T(
+      'HTTP is a text conversation. The client sends a request line and some headers, and the server answers with a status line, headers and a body. Once you can read both sides, a lot of web troubleshooting and reconnaissance becomes plain reading.',
+      '',
+      'Headers also leak. A server that announces its exact software version has told every visitor which software to look up. In this lesson you will watch a whole exchange with `curl -v` and then read two public files that sites publish for search engines. Reading them sends ordinary requests to a server in your scope.'
+    ),
+    steps: [
+      {
+        id: 'verbose',
+        prompt: T(
+          'Add `-v` (verbose) to see the whole exchange, not only the reply:',
+          '',
+          '```',
+          'curl -v http://web01.halcyon.lab/status',
+          '```',
+          '',
+          'Lines are marked by their first character:',
+          '',
+          '- `*` is `curl` talking about itself: the name lookup and the connection.',
+          '- `>` is what `curl` sent. The first `>` line is the *request line*: method, path and protocol version.',
+          '- `<` is what the server sent back. The first `<` line is the status line.',
+          '',
+          'The body, a small JSON status message, appears at the end without a marker.'
+        ),
+        hint: 'Use `curl -v` followed by the URL `http://web01.halcyon.lab/status`.',
+        solution: 'curl -v http://web01.halcyon.lab/status',
+        check: { cmd: 'curl', args: ['-v'], out: /> GET \/status HTTP\/1\.1[\s\S]*< HTTP\/1\.1 200 OK/ },
+      },
+      {
+        id: 'host',
+        prompt: T(
+          'Look at the request headers, the lines after the request line that start with `>`. One of them tells the server which site you want. That matters because one server and one address can host many sites.',
+          '',
+          'What is the name of that header?'
+        ),
+        hint: 'The header whose value is `web01.halcyon.lab`.',
+        solution: 'Host',
+        answer: /^host( header)?$/i,
+      },
+      {
+        id: 'useragent',
+        prompt: T(
+          'The `User-Agent` header says which program is asking. `curl` announces itself by name and version. Any client can put anything there, so servers cannot trust it, but they do log it.',
+          '',
+          'During an assessment that makes it useful to be honest. Send your own label with `-A` and watch it appear in the request:',
+          '',
+          '```',
+          'curl -v -A \'kalima-lab/1.0\' http://web01.halcyon.lab/status',
+          '```',
+          '',
+          'Someone reading the web01 access log can now tell your requests from everyone else\'s.'
+        ),
+        hint: 'Use `-A` followed by a quoted label, together with `-v`.',
+        solution: 'curl -v -A \'kalima-lab/1.0\' http://web01.halcyon.lab/status',
+        check: { cmd: 'curl', args: ['-A'], out: /> User-Agent: \S+/, fn: (ev) => !/> User-Agent: curl\//.test(ev.output || '') },
+      },
+      {
+        id: 'server-grep',
+        prompt: T(
+          'Now the response side. The `Server` header names the software that answered. Print only that line, by sending the headers through `grep`:',
+          '',
+          '```',
+          'curl -sI http://web01.halcyon.lab/ | grep -i \'^server\'',
+          '```',
+          '',
+          'The `-i` in `grep` ignores case, because header names may be written in any case.'
+        ),
+        hint: 'Combine `curl -sI` and `grep -i server` with a pipe.',
+        solution: 'curl -sI http://web01.halcyon.lab/ | grep -i \'^server\'',
+        check: { cmd: 'curl', args: ['-I'], out: /^Server: nginx/m, fn: (ev) => !/HTTP\/1\.1/.test(ev.output || '') },
+      },
+      {
+        id: 'server-read',
+        prompt: T(
+          'Which software and which version does web01 announce?',
+          '',
+          'That is more than the visitor needs. Anyone can now look up the release notes and known problems of that exact version. Administrators often switch the version off, so the header says only `nginx`. Either way, the header is something a client is told, not proof, so treat it as a lead to confirm.'
+        ),
+        hint: 'Read the value of the `Server` header from the last step, name and number together.',
+        solution: 'nginx/1.26.3',
+        answer: /^nginx( ?\/ ?|\s+)1\.26\.3$/i,
+      },
+      {
+        id: 'robots',
+        prompt: T(
+          'Sites publish two files for automated visitors, and both live at fixed paths. The first is `robots.txt`, which asks search-engine crawlers to stay out of certain paths. Fetch it:',
+          '',
+          '```',
+          'curl -s http://web01.halcyon.lab/robots.txt',
+          '```',
+          '',
+          'Each `Disallow` line is a request, not a lock. A well-behaved crawler obeys it, and anyone else can read the same file. A `robots.txt` that lists sensitive paths therefore advertises them. Access to a path has to be enforced by the server, with a login or a rule, not by a polite note.'
+        ),
+        hint: 'The file is at `/robots.txt` on the same server. Add `-s` to keep the output clean.',
+        solution: 'curl -s http://web01.halcyon.lab/robots.txt',
+        check: { cmd: 'curl', argsRe: /robots\.txt/, out: /Disallow: \/backup\// },
+      },
+      {
+        id: 'robots-read',
+        prompt: 'The file lists two paths that the owner would rather keep out of search results. Type both paths.',
+        hint: 'Read the two `Disallow:` lines. Each path starts and ends with a slash.',
+        solution: '/staff/ /backup/',
+        answer: /^(\/?staff\/?[ ,;and&]+\/?backup\/?|\/?backup\/?[ ,;and&]+\/?staff\/?)$/i,
+      },
+      {
+        id: 'sitemap',
+        prompt: T(
+          'The second file is `sitemap.xml`, the opposite of `robots.txt`: a list of the pages the owner *wants* indexed. Fetch it:',
+          '',
+          '```',
+          'curl -s http://web01.halcyon.lab/sitemap.xml',
+          '```',
+          '',
+          'Each `<loc>` element is one address. Notice that the addresses use `www.halcyon.lab`, another name for web01. Both files are public by design. Reading them is ordinary browsing, and they are a quick way to learn how a site is laid out. Note what you found in `~/engagement/notes.md` when it matters for your report.'
+        ),
+        hint: 'Same pattern as the last step, with the path `/sitemap.xml`.',
+        solution: 'curl -s http://web01.halcyon.lab/sitemap.xml',
+        check: { cmd: 'curl', argsRe: /sitemap\.xml/, out: /<urlset[\s\S]*<loc>/ },
+      },
+    ],
+    quiz: [
+      {
+        q: 'In `curl -v` output, which lines show what curl sent to the server?',
+        choices: [
+          'Lines that start with `*`',
+          'Lines that start with `<`',
+          'Lines that start with `>`',
+          'Lines that start with `HTTP`',
+        ],
+        answer: 2,
+        why: '`>` marks the request curl sent, `<` marks the response received, and `*` marks curl\'s own notes about the connection.',
+      },
+      {
+        q: 'Why does a request need a `Host` header when it is already being sent to a specific IP address?',
+        choices: [
+          'Because the address might change during the request',
+          'Because one server can host many sites on one address, and the header says which one you want',
+          'Because the header encrypts the request',
+          'Because curl would otherwise refuse to send it',
+        ],
+        answer: 1,
+        why: 'Name-based virtual hosting puts many sites behind one address. The server chooses a site by the Host header.',
+      },
+      {
+        q: 'A `robots.txt` file contains `Disallow: /backup/`. What does that actually do?',
+        choices: [
+          'It blocks every visitor from the path',
+          'It asks well-behaved crawlers not to index the path, and it also tells anyone who reads it that the path exists',
+          'It deletes the path from the server',
+          'It encrypts the contents of the path',
+        ],
+        answer: 1,
+        why: 'The file is a request that crawlers may honor. It enforces nothing, and because it is public it can point readers to the paths it lists.',
+      },
+      {
+        q: 'What is a sensible way to treat a `Server: nginx/1.26.3` header in your notes?',
+        choices: [
+          'As proof that the server has no known weaknesses',
+          'As an observation of what the server announces, to confirm by other means before you rely on it',
+          'As an error that you must fix on your own workstation',
+          'As a password',
+        ],
+        answer: 1,
+        why: 'A banner is what the server chooses to say. It is a useful lead, and a header can be changed or misleading, so confirm before you report it as fact.',
+      },
+    ],
+    refs: ['curl(1)', 'RFC 9110 (HTTP Semantics), sections 7.2, 10.1.5 and 10.2.4', 'RFC 9309 (Robots Exclusion Protocol)', 'sitemaps.org protocol'],
+  };
+
   K.lessons.register({
     id: 'web',
     title: 'HTTP from the command line',
     order: 80,
     summary: 'Read what web servers actually say: requests, status codes, headers, TLS certificates and plain-text protocols, using curl, wget, a throwaway python web server and nc.',
-    lessons: [curlLesson],
+    lessons: [curlLesson, headersLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
