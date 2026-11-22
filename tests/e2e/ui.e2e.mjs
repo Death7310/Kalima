@@ -916,6 +916,22 @@ group('wide layout: lesson beside the terminal, resizable and collapsible', asyn
   await waitText(page, /\nstray-keys\n/);
 });
 
+group('first keys after the welcome: nothing typed on a keyboard is lost', async ({ browser }) => {
+  // After the dialog closes the input field has focus but the caret can be elsewhere in the
+  // document; keys must reach the command line all the same, at every width.
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 620, height: 900 }, { width: 390, height: 780 }]) {
+    const page = await open(browser, { viewport });
+    try {
+      await page.getByRole('button', { name: 'Start', exact: true }).click();
+      await dialogGone(page);
+      await page.keyboard.type('echo first-keys');
+      assert.equal(await typed(page), 'echo first-keys', 'typed text is on the command line at ' + viewport.width + ' px');
+      await page.keyboard.press('Enter');
+      await waitText(page, /\nfirst-keys\n/);
+    } finally { await page.context().close(); }
+  }
+});
+
 group('phone viewport: one view at a time, touch keys, usable terminal', async ({ browser }) => {
   const page = await open(browser, { viewport: { width: 360, height: 740 }, touch: true });
   try {

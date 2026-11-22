@@ -493,7 +493,15 @@
     }
 
     /* ---- focus, selection, clipboard ---- */
-    focus() { if (!this._disposed) { try { this.ta.focus({ preventScroll: true }); } catch (e) { this.ta.focus(); } } }
+    focus() {
+      if (this._disposed) return;
+      try { this.ta.focus({ preventScroll: true }); } catch (e) { this.ta.focus(); }
+      // Focus alone can leave the caret elsewhere in the document; soft-keyboard text needs it in the field.
+      if (!this._hasSelection() && !this._composing) {
+        const p = this.ta.selectionStart == null ? this.ta.value.length : this.ta.selectionStart;
+        try { this.ta.setSelectionRange(p, p); } catch (e) { /* not focusable yet */ }
+      }
+    }
     _hasSelection() {
       const sel = typeof getSelection === 'function' ? getSelection() : null;
       // a click at the end of a line can leave a range that is not collapsed and yet selects nothing
@@ -656,7 +664,10 @@
       // Editing the field would move the browser's selection into it, so while output is
       // selected the keys are applied by hand and the selection stays for copying.
       if (e.target === this.ta && this._hasSelection()) this.el.focus({ preventScroll: true });
-      const k = { key, ctrl, alt, shift: e.shiftKey, native: document.activeElement === this.ta };
+      // Keys from a physical keyboard are always applied by hand. Leaving them to the browser
+      // loses them whenever the field holds focus without the caret (after a dialog closes, for
+      // one). Soft keyboards and IMEs do not come this way: their text arrives in _onInput.
+      const k = { key, ctrl, alt, shift: e.shiftKey, native: false };
       if (this._latch) { this._setLatch(false); k.ctrl = true; }
       if (this._handleKey(k)) e.preventDefault();
     }
