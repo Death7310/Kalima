@@ -415,3 +415,18 @@ test('help points to kalima help, man and --help', async () => {
   for (const part of ['kalima help', 'man COMMAND', 'COMMAND --help']) assert.ok(r.out.includes(part));
   assert.equal((await sim.run('help | wc -l')).out.trim(), '5');
 });
+
+test('a tool nobody simulates is a stub that says so honestly', async () => {
+  const sim = await boot();
+  const { K } = sim;
+  assert.equal(K.cmd.get('hydra').stub, true);
+  const run = await sim.run('hydra -l admin 10.10.10.10');
+  assert.equal(run.code, 1);
+  assert.match(run.err, /not simulate/);
+  assert.match(run.err, /kalima atlas hydra/);
+  const help = await sim.run('hydra --help');
+  assert.equal(help.code, 0);
+  assert.match(help.out, /Password Attacks/);
+  assert.equal((await sim.run('hydra -h')).code, 0);
+  assert.equal((await sim.run('hydra --help | grep -c atlas')).out.trim(), '1');
+});
