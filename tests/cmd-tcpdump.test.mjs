@@ -283,7 +283,10 @@ test('tcpdump: -r takes filters and -c, and works in pipelines', async () => {
   await capture(sim, '-c 8 -w /tmp/web.pcap host 10.10.10.10', 'curl -s http://10.10.10.10/ >/dev/null');
   assert.equal((await sim.run('tcpdump -nr /tmp/web.pcap -c 2')).out.trim().split('\n').length, 2);
   const syn = await sim.run('tcpdump -nr /tmp/web.pcap "tcp[tcpflags] & tcp-syn != 0"');
-  assert.equal(syn.code, 1);
+  assert.deepEqual(syn.out.trim().split('\n').map((l) => /Flags \[(S\.?)\]/.exec(l)[1]), ['S', 'S.']);
+  assert.equal((await sim.run('tcpdump -nr /tmp/web.pcap "tcp[13] = 16"')).out.trim().split('\n').length >= 2, true);
+  assert.equal((await sim.run('tcpdump -nr /tmp/web.pcap "tcp[tcpflags] == 99 or icmp[icmptype] == icmp-echo"')).out, '');
+  assert.equal((await sim.run('tcpdump -r /tmp/web.pcap "icmp[tcpflags] == 1"')).err, 'tcpdump: syntax error\n');
   const http = await sim.run('tcpdump -nr /tmp/web.pcap | grep -c HTTP');
   assert.equal(http.out.trim(), '2');
   const q = await sim.run('tcpdump -qnr /tmp/web.pcap src port 80 and greater 100');

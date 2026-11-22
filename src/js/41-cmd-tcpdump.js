@@ -46,6 +46,10 @@
   const MAC_BROADCAST = 'ff:ff:ff:ff:ff:ff';
   const TCP_BITS = { F: 1, S: 2, R: 4, P: 8, '.': 16 };
 
+  const BYTE_NAMES = { tcpflags: 13, icmptype: 0 };
+  const BYTE_PROTO = { tcpflags: 'tcp', icmptype: 'icmp' };
+  const BYTE_VALUES = { 'tcp-fin': 1, 'tcp-syn': 2, 'tcp-rst': 4, 'tcp-push': 8, 'tcp-ack': 16, 'tcp-urg': 32, 'icmp-echoreply': 0, 'icmp-unreach': 3, 'icmp-echo': 8, 'icmp-timxceed': 11 };
+
   class FilterError extends Error {}
 
   /* ---------------------------------------------------------------- filter */
@@ -55,7 +59,7 @@
 
   /** Compile a pcap-filter expression into a predicate on packet records. */
   function compileFilter(machine, text) {
-    const toks = text.match(/\(|\)|&&|\|\||!|[^\s()!&|]+/g) || [];
+    const toks = text.match(/\(|\)|&&|\|\||!=|==|>=|<=|[!&|<>=]|[^\s()!&|<>=]+/g) || [];
     let i = 0;
     const syntax = () => new FilterError('syntax error');
     const peek = () => toks[i];
@@ -113,9 +117,26 @@
       return p.proto === proto.toUpperCase();
     }
 
+    // tcp[tcpflags] & tcp-syn != 0, icmp[icmptype] == icmp-echo, tcp[13] = 2: one byte of the transport header
+    function parseByteTest(m) {
+      const off = BYTE_NAMES[m[2]] != null ? BYTE_NAMES[m[2]] : /^\d+$/.test(m[2]) ? +m[2] : NaN;
+      if (isNaN(off) || (BYTE_NAMES[m[2]] != null && BYTE_PROTO[m[2]] !== m[1])) throw syntax();
+      const num = (v) => { const n = /^\d+$/.test(v || '') ? +v : BYTE_VALUES[v]; if (n == null) throw syntax(); return n; };
+      let mask = 255;
+      if (peek() === '&') { i++; mask = num(toks[i++]); }
+      const op = toks[i++];
+      if (!['=', '==', '!=', '<', '>', '<=', '>='].includes(op)) throw syntax();
+      const want = num(toks[i++]);
+      const cmp = { '=': (a) => a === want, '==': (a) => a === want, '!=': (a) => a !== want, '<': (a) => a < want, '>': (a) => a > want, '<=': (a) => a <= want, '>=': (a) => a >= want }[op];
+      const proto = m[1];
+      return (p) => protoMatch(proto, p) && cmp(wireBytes(p)[20 + off] & mask);
+    }
+
     function parsePrimitive() {
       const q = { dir: null, proto: null, type: null };
       let t = peek();
+      const bracket = /^(tcp|udp|icmp)\[(\w+)\]$/.exec(t || '');
+      if (bracket) { i++; return parseByteTest(bracket); }
       if (t === 'broadcast' || t === 'multicast') { i++; return t === 'broadcast' ? (p) => p.dmac === MAC_BROADCAST : (p) => p.dmac === MAC_MDNS; }
       if (t === 'less' || t === 'greater') {
         i++; const n = toks[i++];
@@ -640,6 +661,7 @@
 
   K.cmd.register({
     name: 'tcpdump',
+    only: 'kali',
     path: '/usr/bin/tcpdump',
     pkg: 'tcpdump',
     section: 8,
@@ -666,6 +688,7 @@
       '',
       'EXPRESSIONS',
       '  host, src host, dst host, net, port, src port, dst port, portrange, icmp, tcp, udp, arp, ip, broadcast, less, greater, combined with and, or, not and parentheses.',
+      '  Byte tests: tcp[tcpflags] & tcp-syn != 0, icmp[icmptype] == icmp-echo.',
       '',
       'EXAMPLES',
       '  sudo tcpdump -n -i eth0 icmp',
