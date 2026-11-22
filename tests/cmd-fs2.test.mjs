@@ -35,7 +35,7 @@ test('find -type, -empty, -size, -maxdepth, -mindepth', async () => {
   assert.deepEqual(lines(await out('find . -empty')), ['./.hidden', './empty']);
   assert.equal(await out('find . -type f -size +1k'), './docs/Big.TXT\n');
   assert.equal(await out('find . -size -2c -type f'), './.hidden\n');
-  assert.equal(await out('find . -size 2c'), './src/lib/b.h\n'.replace('lib/b.h', 'lib/b.h'));
+  assert.equal(await out('find . -size 3c'), './src/lib/b.h\n');
   assert.deepEqual(lines(await out('find . -maxdepth 1 -type d')), ['.', './docs', './empty', './src']);
   assert.deepEqual(lines(await out('find . -mindepth 2 -maxdepth 2')), ['./docs/Big.TXT', './src/a.c', './src/lib']);
 });
@@ -80,11 +80,11 @@ test('find -print0, -ls, -printf', async () => {
 test('find -exec with ; and + runs the command through the shell', async () => {
   const { sh, out } = await setup();
   await sh(TREE);
-  assert.equal(await out('find src -name "*.c" -exec cat {} \;'), 'a\n');
-  assert.equal(await out('find src -type f -exec echo got {} \;'), 'got src/a.c\ngot src/lib/b.h\n');
+  assert.equal(await out('find src -name "*.c" -exec cat {} \\;'), 'a\n');
+  assert.equal(await out('find src -type f -exec echo got {} \\;'), 'got src/a.c\ngot src/lib/b.h\n');
   assert.equal(await out('find src -type f -exec echo got {} +'), 'got src/a.c src/lib/b.h\n');
-  assert.equal(await out('find src -name a.c -exec echo {}.bak \;'), 'src/a.c.bak\n');
-  assert.equal((await sh('find . -name "*.c" -exec false {} \; -print')).out, '');
+  assert.equal(await out('find src -name a.c -exec echo {}.bak \\;'), 'src/a.c.bak\n');
+  assert.equal((await sh('find . -name "*.c" -exec false {} \\; -print')).out, '');
   assert.equal((await sh('find src -type f -exec grep -l bb {} +')).out, 'src/lib/b.h\n');
   assert.equal((await sh('find src -name a.c -exec')).err, "find: missing argument to `-exec'\n");
 });
