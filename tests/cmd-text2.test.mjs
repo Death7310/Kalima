@@ -184,6 +184,109 @@ const SED = [
 ];
 table('sed: output of the real GNU sed', SED);
 
+const AWK = [
+// BEGIN AWK
+  ["awk '{print $1}' ab", "a\nd\n", "", 0],
+  ["awk -F: '{print $1, $NF}' col", "x foo\ny bar\nz baz\n", "", 0],
+  ["awk '$2 > 10' fruit", "5 apples\n12 pears\n7 figs\n", "", 0],
+  ["awk '{s += $1} END {print s}' fruit", "24\n", "", 0],
+  ["awk '{c[$1]++} END {for (k in c) print c[k], k}' ab col", "1 y:22:bar\n1 a\n1 x:1:foo\n1 d\n1 z:333:baz\n", "", 0],
+  ["awk 'NR==2,NR==4' n5", "two\nthree\nfour\n", "", 0],
+  ["awk 'BEGIN{printf \"%5.2f|%-5s|%05d|%x|%o|%c%c|%e|%g|%+d|% d\\n\", 3.14159, \"ab\", 42, 255, 8, 65, \"hello\", 12345.6789, 0.0000123, 5, 5}'", " 3.14|ab   |00042|ff|10|Ah|1.234568e+04|1.23e-05|+5| 5\n", "", 0],
+  ["awk 'BEGIN{print 2^53, 2^31, 2^63, 1e18, 1e30, 0.1+0.2, 100000*100000, -3, 1/3, 17/4, 1e6, 1e-5, 123456789012}'", "9007199254740992 2147483648 9223372036854775808 1000000000000000000 1e+30 0.3 10000000000 -3 0.333333 4.25 1000000 1e-05 123456789012\n", "", 0],
+  ["awk 'BEGIN{print \"0x1A\"+0, \"1e3\"+0, \".5\"+0, \"+5x\"+0, \" 12 \"+0}'", "26 1000 0.5 5 12\n", "", 0],
+  ["awk 'BEGIN{print substr(\"hello\",0,2) \"|\" substr(\"hello\",-1) \"|\" substr(\"hello\",2,100) \"|\" substr(\"hello\",1.5,2) \"|\" substr(\"hello\",2) \"|\" substr(\"hello\", 6) \"|\" substr(\"hello\",-1,3)}'", "he|hello|ello|he|ello||hell\n", "", 0],
+  ["awk 'BEGIN{printf \"%s %s\\n\", \"a\"}'", "a ", "awk: run time error: not enough arguments passed to printf(\"%s %s\n\")\n\tFILENAME=\"\" FNR=0 NR=0\n", 2],
+  ["awk 'BEGIN{print 1/0}'", "inf\n", "", 0],
+  ["awk '{print}' nofile", "", "awk: cannot open \"nofile\" (No such file or directory)\n", 2],
+  ["awk 'BEGIN { x = }'", "", "awk: line 1: syntax error at or near }\n", 2],
+  ["awk 'BEGIN { print \"abc\" ~ /(/ }'", "", "awk: line 1: regular expression compile failed (missing ')')\n(\n", 2],
+  ["awk 'BEGIN{print \"\\q\" \"\\/\" \"\\101\" \"\\x41\"}'", "\\q\\/AA\n", "", 0],
+  ["awk 'BEGIN{x[\"a\"]=1; print length(x); delete x; print length(x)}'", "1\n0\n", "", 0],
+  ["awk 'BEGIN{print -2^2, 2^3^2, 1 - 1, 1 \" \" -1, !x, !\"a\", 1==1.0, \"a\"<\"b\", \"10\"<\"9\", 10<9}'", "-4 512 0 1-1 1 0 1 1 1 0\n", "", 0],
+  ["echo \"a b c\" | awk '{$5=\"x\"; print; print NF; NF=2; print; $0=\"p q r s\"; print NF}'", "a b c  x\n5\na b\n4\n", "", 0],
+  ["echo \"a:b\" | awk -F: -v OFS=- '{$1=$1; print}'", "a-b\n", "", 0],
+  ["printf 'a b\\n\\nc d\\ne\\n\\n\\nf\\n' | awk 'BEGIN{RS=\"\"}{print NR\": \"$1\"|\"$NF\"|\"NF}'", "1: a|b|2\n2: c|e|3\n3: f|f|1\n", "", 0],
+  ["echo \"x\" | awk '{ print NR, FNR, FILENAME \"|\" }'", "1 1 -|\n", "", 0],
+  ["echo \"3 4\" | awk '{print $1*$2, $1/$2, $1%$2, $1^$2, $1 $2}'", "12 0.75 3 81 34\n", "", 0],
+  ["awk 'BEGIN{printf \"%d\\n\", \"abc\"}'", "0\n", "", 0],
+  ["awk 'function f(a){a[\"x\"]=1} BEGIN{f(arr); print arr[\"x\"]}'", "1\n", "", 0],
+  ["awk 'BEGIN{print 1e300*1e300, -1e300*1e300}'", "inf -inf\n", "", 0],
+  ["awk 'BEGIN{print int(-3.7), int(\"3abc\"), int(\"\"), sqrt(16), exp(0), log(1), atan2(0,-1), sin(0), cos(0)}'", "-3 3 0 4 1 0 3.14159 0 1\n", "", 0],
+  ["awk 'END{print $0, NF, NR}' ab", "d e f 3 2\n", "", 0],
+  ["awk -v 'x=a\\tb' 'BEGIN{print x; print length(x)}'", "a\tb\n3\n", "", 0],
+  ["awk '{print v, $1}' v=1 n5 v=2 ab", "1 one\n1 two\n1 three\n1 four\n1 five\n2 a\n2 d\n", "", 0],
+  ["echo '1.0 1 abc ABC 0x10 16 +1 1e0' | awk '{print ($1==$2), ($3==$4), ($5==$6), ($7==$2), ($8==$2), ($1==\"1\"), ($2==\"1.0\")}'", "1 0 1 1 1 0 0\n", "", 0],
+  ["awk 'BEGIN{x=\"a\"; y = x ~ \"a\"; print y; $0=\"a b\"; print /a/ + /c/; print !/a/}'", "1\n1\n0\n", "", 0],
+  ["awk 'BEGIN{printf \"%*d|%-*d|%.*f\\n\", 5, 42, 4, 7, 2, 3.14159}'", "   42|7   |3.14\n", "", 0],
+  ["awk 'BEGIN{printf \"%d %d %d\\n\", 2147483648, -2147483649, 1e19; printf \"%s %s\\n\", 1e6, 1234567.5; OFMT=\"%.2f\"; print 3.14159, 3.14159 \"\"; CONVFMT=\"%.3f\"; print 3.14159 \"\"}'", "2147483648 -2147483649 10000000000000000000\n1000000 1.23457e+06\n3.14 3.14159\n3.142\n", "", 0],
+  ["awk 'BEGIN{a[\"x\"];if (\"x\" in a) print \"in\"; if ((\"y\") in a) print \"no\"; print length(a); a[1,2]=3; for (k in a) {n=split(k,p,SUBSEP); print n}}'", "in\n1\n1\n2\n", "", 0],
+  ["printf 'a,b;c\\n' | awk -F'[,;]' '{print $2, NF}'", "b 3\n", "", 0],
+  ["printf 'a  b\\n' | awk -F' ' '{print NF}'; printf 'a  b\\n' | awk -F'[ ]' '{print NF}'; printf 'atbtc\\n' | awk -Ft '{print NF}'; printf 'a|b\\n' | awk -F'|' '{print $2}'; printf 'a.b\\n' | awk -F. '{print $2}'", "2\n3\n3\nb\nb\n", "", 0],
+  ["printf 'aXXbXc\\n' | awk 'BEGIN{RS=\"X+\"}{print NR\":\"$0}'", "1:a\n2:b\n3:c\n\n", "", 0],
+  ["printf 'a b\\nc d\\n' | awk '{ $2 = \"\"; print; print NF }'", "a \n2\nc \n2\n", "", 0],
+  ["printf 'one two\\n' | awk '{ sub(/o/, \"[&]\"); print; gsub(/o/, \"\\\\&\"); print; n = gsub(/e/, \"E\", $2); print n, $0 }'", "[o]ne two\n[&]ne tw&\n0 [&]ne tw&\n", "", 0],
+  ["awk 'BEGIN{s=\"aaa\"; n=gsub(/x*/,\"-\",s); print n, s; t=\"hello\"; gsub(/l*/,\"X\",t); print t; u=\"abc\"; sub(/b/,\"\\\\\\\\&\",u); print u}'", "4 -a-a-a-\nXhXeXoX\na\\bc\n", "", 0],
+  ["awk 'BEGIN{print match(\"foobar\", /o+/), RSTART, RLENGTH; print match(\"x\", /y/), RSTART, RLENGTH; print split(\"a b  c\", arr), arr[3]; print split(\"\", arr), length(arr); print split(\"abc\", c, \"\"), c[2]; print split(\"a1b2c\", d, /[0-9]/), d[3]}'", "2 2 2\n0 0 -1\n3 c\n0 0\n3 b\n3 c\n", "", 0],
+  ["awk 'BEGIN{print tolower(\"ABC\") toupper(\"abc\"), sprintf(\"%03d\", 7), index(\"\", \"a\"), index(\"a\", \"\")}'", "abcABC 007 0 1\n", "", 0],
+  ["awk 'BEGIN { while (i < 3) { i++; if (i == 2) continue; print i } do { j++ } while (j < 5); print j; for (;;) { k++; if (k > 3) break }; print k }'", "1\n3\n5\n4\n", "", 0],
+  ["awk 'function fact(n) { return n <= 1 ? 1 : n * fact(n-1) } BEGIN { print fact(10), fact(20) }'", "3628800 2432902008176640000\n", "", 0],
+  ["awk 'BEGIN { exit 3 } END { print \"end\" }'", "end\n", "", 3],
+  ["awk 'BEGIN{print length(12345), length(1/3)}'", "5 8\n", "", 0],
+  ["awk 'NR==2,/9/' n5; awk '/two/,/two/{print \"r\" $0}' n5", "two\nthree\nfour\nfive\nrtwo\n", "", 0],
+  ["awk '{c[$1]++} END {for (k in c) print c[k], k}' n5", "1 three\n1 five\n1 four\n1 two\n1 one\n", "", 0],
+  ["awk 'BEGIN { printf \"a\" \"b\" \"\\n\"; print(\"x\")(\"y\"); print (1)(2) }'", "ab\nxy\n12\n", "", 0],
+  ["awk 'BEGIN { x = 5; x ^= 2; x %= 7; print x; y = x++ + ++x; print y, x; print x--, --x }'", "4\n10 6\n6 4\n", "", 0],
+  ["awk 'BEGIN { print 010 + 0, \"010\" + 0, 1e3, .5 }'", "10 10 1000 0.5\n", "", 0],
+  ["awk 'BEGIN{getline; print \"got \" $0; getline x; print \"x=\" x, NR}' n5", "got one\nx=two 2\n", "", 0],
+  ["awk '{ print FILENAME, FNR, NR }' n5 ab", "n5 1 1\nn5 2 2\nn5 3 3\nn5 4 4\nn5 5 5\nab 1 6\nab 2 7\n", "", 0],
+  ["awk 'BEGIN { print substr(\"abc\", 2) > \"out1\"; close(\"out1\"); while ((getline l < \"out1\") > 0) print \"read\", l }'", "read bc\n", "", 0],
+  ["awk 'BEGIN{print ENVIRON[\"NOPE\"] \"|\", ARGC, ARGV[0], ARGV[1]}' zz", "| 2 awk zz\n", "", 0],
+  ["awk 'BEGIN { print length(\"a\\nb\"); print \"a\" \"b\" == \"ab\"; print 1 \" \" 2, 1+1 \"x\" }'", "3\n1\n1 2 2x\n", "", 0],
+  ["awk 'BEGIN{x[1]=1; x=2}'", "", "awk: line 1: illegal reference to array x\n", 2],
+  ["awk 'function f(x){return x} BEGIN{print f(1,2)}'", "", "awk: line 1: too many arguments in call to f\n", 2],
+  ["awk 'BEGIN{nosuch(1)}'", "", "awk: line 2: function nosuch never defined\n", 2],
+  ["awk 'BEGIN{print -\"3x\", +\"4\", - -2}'", "-3 4 2\n", "", 0],
+  ["awk 'BEGIN { print }}'", "", "awk: line 1: extra '}'\nawk: line 1: syntax error at or near end of line\n", 2],
+  ["awk 'BEGIN{printf \"%z\\n\", 1}'", "", "awk: run time error: improper conversion(number 1) in printf(\"%z\n\")\n\tFILENAME=\"\" FNR=0 NR=0\n", 2],
+  ["echo 'a b' | awk '{print $(-1)}'", "", "awk: run time error: negative field index $-1\n\tFILENAME=\"-\" FNR=1 NR=1\n", 2],
+  ["echo 'x y' | awk '{ print $NF, $(NF-1) ; NF++; print NF}'", "y x\n3\n", "", 0],
+  ["awk 'BEGIN { OFS=\"-\"; $0 = \"a b c\"; $1=$1; print; print $0 }'", "a-b-c\na-b-c\n", "", 0],
+  ["awk 'BEGIN{printf \"%x %X %o %u\\n\", 255, 255, 8, -1}'", "ff FF 10 18446744073709551615\n", "", 0],
+  ["awk 'BEGIN{printf \"%.2f %.0f %.0f %.0f %.1f\\n\", 2.675, 0.5, 1.5, 2.5, 0.25}'", "2.67 0 2 2 0.2\n", "", 0],
+  ["awk 'BEGIN { print 5 % 3, -5 % 3, 5.5 % 2, 2 ^ 0.5, 2 ^ -1 }'", "2 -2 1.5 1.41421 0.5\n", "", 0],
+  ["awk 'BEGIN{for(i=1;i<=12;i++)a[i]=i; for(k in a) printf \"%s \", k; print \"\"; b[\"x\"];b[\"y\"];b[\"z\"];b[\"apple\"];b[\"banana\"]; for(k in b) printf \"%s \", k; print \"\"; delete a[3]; for(k in a) printf \"%s \", k; print \"\"}'", "3 10 8 6 5 2 11 1 4 12 9 7 \nx banana z y apple \n10 8 6 5 2 11 1 4 12 9 7 \n", "", 0],
+  ["echo 65 | awk '{printf \"%c|%c\\n\", $1, $1+0}'", "A|A\n", "", 0],
+  ["awk 'BEGIN{print \"z\\na\" | \"sort\"; print \"first\"}'", "a\nz\nfirst\n", "", 0],
+  ["awk 'BEGIN{print system(\"exit 3\"), system(\"true\")}'", "3 0\n", "", 0],
+  ["awk 'BEGIN{while((\"echo a;echo b\" | getline l)>0) print \"got\", l; print close(\"echo a;echo b\")}'", "got a\ngot b\n0\n", "", 0],
+  ["awk 'BEGIN { \"echo hi\" | getline y; print y; system(\"echo sys\"); print \"z\" | \"cat\"; close(\"cat\"); print \"after\" }'", "hi\nsys\nz\nafter\n", "", 0],
+  ["awk --version | head -1", "mawk 1.3.4 20240123\n", "", 0],
+  ["awk", "", "Usage: mawk [Options] [Program] [file ...]\n\nProgram:\n    The -f option value is the name of a file containing program text.\n    If no -f option is given, a \"--\" ends option processing; the following\n    parameters are the program text.\n\nOptions:\n    -f program-file  Program  text is read from file instead of from the\n                     command-line.  Multiple -f options are accepted.\n    -F value         sets the field separator, FS, to value.\n    -v var=value     assigns value to program variable var.\n    --               unambiguous end of options.\n\n    Implementation-specific options are prefixed with \"-W\".  They can be\n    abbreviated:\n\n    -W version       show version information and exit.\n    -W compat        pre-POSIX 2001.\n    -W dump          show assembler-like listing of program and exit.\n    -W help          show this message and exit.\n    -W interactive   set unbuffered output, line-buffered input.\n    -W exec file     use file as program as well as last option.\n    -W posix         stricter POSIX checking.\n    -W random=number set initial random seed.\n    -W sprintf=number adjust size of sprintf buffer.\n    -W usage         show this message and exit.\n", 0],
+  ["awk -z 'BEGIN{}'", "", "awk: not an option: -z\n", 2],
+  ["awk -F", "", "awk: option -F lacks argument\n", 2],
+  ["awk -f nofile", "", "awk: cannot open \"nofile\" (No such file or directory)\n", 2],
+  ["awk -v 1x=3 'BEGIN{}'", "", "awk: improper assignment: -v 1x=3\n", 2],
+  ["awk 'BEGIN{getline x < \"nofile\"; print (getline y < \"nofile\")}'", "-1\n", "", 0],
+  ["awk '/o/ && !/e/ {print NR\": \"$0}' n5", "2: two\n4: four\n", "", 0],
+  ["awk 'NR%2' n5", "one\nthree\nfive\n", "", 0],
+  ["awk '{ $1 = toupper(substr($1,1,1)) substr($1,2) } 1' n5", "One\nTwo\nThree\nFour\nFive\n", "", 0],
+  ["awk 'BEGIN { while ((\"echo 1 2 3\" | getline) > 0) print NF, $2 }'", "3 2\n", "", 0],
+  ["awk '{ n = split($0, p, \"\"); print n }' ab", "5\n5\n", "", 0],
+  ["awk '{ for (i = NF; i > 0; i--) printf \"%s%s\", $i, (i > 1 ? OFS : ORS) }' ab", "c b a\nf e d\n", "", 0],
+  ["awk 'BEGIN { printf \"%s\\n\", 0.1 + 0.2; print 0.1+0.2 == 0.3; print 1e3 \"\" , 1e3 + 0 \"\"; x = 0.1; print x \"\" ; print 3/2 \"\" }'", "0.3\n0\n1000 1000\n0.1\n1.5\n", "", 0],
+  ["awk 'BEGIN { x[\"a\"]=1; f(x) } function f(arr, k) { for (k in arr) print k, arr[k] }'", "a 1\n", "", 0],
+  ["awk 'function g(n,   loc) { loc = n * 2; return loc } BEGIN { print g(4), loc \"|\" }'", "8 |\n", "", 0],
+  ["awk 'BEGIN{ OFS=\":\"; print \"a\",\"b\"; ORS=\"!\\n\"; print \"c\" }'", "a:b\nc!\n", "", 0],
+  ["awk '{ print > \"/dev/stderr\" }' ab", "", "a b c\nd e f\n", 0],
+  ["awk 'BEGIN{printf \"%s %d\\n\", \"x\"}'", "x ", "awk: run time error: not enough arguments passed to printf(\"%s %d\n\")\n\tFILENAME=\"\" FNR=0 NR=0\n", 2],
+  ["awk 'BEGIN{print length()}' < /dev/null", "0\n", "", 0],
+  ["awk -F: '$2 > 20 { print $1 > \"big.txt\" } END { close(\"big.txt\"); while ((getline l < \"big.txt\") > 0) print \"big:\", l }' col", "big: y\nbig: z\n", "", 0],
+  ["awk 'BEGIN { print substr(\"hello\", 2, 3), substr(\"x\", 1, 0) \"|\" }'", "ell |\n", "", 0],
+// END AWK
+];
+table('awk: output of the real mawk', AWK);
+
 test('sed: pipelines, in-place editing and files in the simulated filesystem', async () => {
   await run('cd /tmp; ' + SETUP);
   assert.equal(await out('cat n5 | sed -n "2p" | tr a-z A-Z'), 'TWO\n');
@@ -212,4 +315,33 @@ test('sed: standard input, and Ctrl-C stops a runaway script', async () => {
   assert.equal(r.out, 'first\n');
   const stopped = await interrupted('echo x | sed ":a;ba"');
   assert.equal(stopped.code, 130);
+});
+
+test('awk: pipelines, files and commands in the simulated filesystem', async () => {
+  await run('cd /tmp; ' + SETUP);
+  assert.equal(await out('cat fruit | awk \'{ total += $1 } END { print total }\''), '24\n');
+  assert.equal(await out('awk \'{ print $2 }\' fruit | sort'), 'apples\nfigs\npears\n');
+  assert.equal(await out('ls | awk \'/^n/ { print "file:", $0 }\' | head -n 2'), 'file: n5\nfile: nonl\n');
+  assert.equal(await out('printf "b 2\\na 1\\n" | awk \'{ print $2, $1 | "sort" }\''), '1 a\n2 b\n');
+  assert.equal(await out('awk \'BEGIN { "echo kalima" | getline name; print toupper(name) }\''), 'KALIMA\n');
+  assert.equal(await out('awk \'BEGIN { system("echo from system") }\''), 'from system\n');
+  await run('printf "BEGIN { n = 0 }\\n{ n += \\$1 }\\nEND { print \\"sum\\", n }\\n" > sum.awk');
+  assert.equal(await out('awk -f sum.awk fruit'), 'sum 24\n');
+  await run('awk \'{ print $1 > "firsts.txt" }\' ab');
+  assert.equal(await out('cat firsts.txt'), 'a\nd\n');
+});
+
+test('awk: standard input, the terminal and the field separator option', async () => {
+  assert.equal((await run('awk -F, \'{ print $2 }\'', { stdin: 'a,b,c\nd,e,f\n' })).out, 'b\ne\n');
+  assert.equal((await run('awk \'END { print NR }\'', { stdin: 'x\ny\nz' })).out, '3\n');
+  sim.term.feed('one two');
+  const r = await run('awk \'{ print $2; exit }\'');
+  assert.equal(r.out, 'two\n');
+});
+
+test('awk: Ctrl-C stops an endless loop', async () => {
+  const stopped = await interrupted('awk \'BEGIN { while (1) n++ }\'');
+  assert.equal(stopped.code, 130);
+  const printing = await interrupted('awk \'BEGIN { while (1) print "y" }\' | head -c 0 >/dev/null; echo done');
+  assert.ok(printing.output.length >= 0);
 });

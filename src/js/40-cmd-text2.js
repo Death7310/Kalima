@@ -1032,5 +1032,1701 @@
     run: runSed,
   });
 
-  K.text2 = { compileRegex, RegexError, breathe, stdinText, Sink, manPage };
+
+  /* =================================================================== awk
+   * Strings are byte strings (one JavaScript character per byte), as in mawk:
+   * length() counts bytes and substr() cuts between them. Program text and
+   * input are converted on the way in and the output on the way out.
+   */
+
+  const toBin = (s) => {
+    if (!/[^\x00-\x7f]/.test(s)) return s;
+    let r = '';
+    for (const b of U.toBytes(s)) r += String.fromCharCode(b);
+    return r;
+  };
+  const fromBin = (s) => (/[^\x00-\x7f]/.test(s) ? U.fromBytes(Array.from(s, (c) => c.charCodeAt(0))) : s);
+
+  class AwkSyntax extends Error {
+    constructor(msg, line) { super(msg); this.line = line; }
+  }
+  /** A run time error: mawk prints it with the position in the input. `partial` is output produced before it. */
+  class AwkRuntime extends Error {
+    constructor(msg, partial) { super(msg); this.partial = partial; }
+  }
+  /** A fatal error without the run time banner (unreadable file, bad option). */
+  class AwkFatal extends Error {}
+  /** Thrown inside the synchronous evaluator when it needs the event loop (a command, a terminal read). */
+  class Blocked extends Error {
+    constructor(run) { super('blocked'); this.run = run; }
+  }
+
+  /* ------------------------------------------------------------ values
+   * A value is a JavaScript number, a string, undefined (never assigned) or a
+   * StrNum: input text that looks like a number and compares as one.
+   */
+  class StrNum {
+    constructor(s, n) { this.s = s; this.n = n; }
+  }
+  const NUM_PREFIX = /^[ \t\n\r\f\v]*([+-]?(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|inf(?:inity)?|nan))/i;
+  const NUM_FULL = /^[ \t\n\r\f\v]*[+-]?(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|inf(?:inity)?|nan)[ \t\n\r\f\v]*$/i;
+
+  function parseNum(text) {
+    const lower = text.toLowerCase();
+    const neg = lower[0] === '-';
+    const body = lower[0] === '-' || lower[0] === '+' ? lower.slice(1) : lower;
+    let v;
+    if (body.startsWith('0x')) v = parseInt(body, 16);
+    else if (body.startsWith('inf')) v = Infinity;
+    else if (body === 'nan') v = NaN;
+    else v = parseFloat(body);
+    return neg ? -v : v;
+  }
+  /** Numeric value of the longest numeric prefix of a string (0 when there is none). */
+  function strToNum(s) {
+    const m = NUM_PREFIX.exec(s);
+    return m ? parseNum(m[1]) : 0;
+  }
+  /** Input text as a value: a StrNum when it looks like a number. */
+  function inputValue(s) {
+    return NUM_FULL.test(s) ? new StrNum(s, strToNum(s)) : s;
+  }
+  const toNum = (v) => (typeof v === 'number' ? v : v === undefined ? 0 : typeof v === 'string' ? strToNum(v) : v.n);
+  const isNumeric = (v) => typeof v === 'number' || v === undefined || v instanceof StrNum;
+
+  /** Associative array whose for-in order imitates mawk's hash table. */
+  class AwkArray {
+    constructor() { this.m = new Map(); this.peak = 0; this.counter = 0; }
+    get(k) { const e = this.m.get(k); return e ? e.v : undefined; }
+    get size() { return this.m.size; }
+    has(k) { return this.m.has(k); }
+    /** The entry for a key, created (unset) when missing. `isInt`: created by an integer subscript. */
+    ref(k, isInt) {
+      let e = this.m.get(k);
+      if (!e) {
+        e = { v: undefined, int: isInt, seq: ++this.counter };
+        this.m.set(k, e);
+        if (this.m.size > this.peak) this.peak = this.m.size;
+      }
+      return e;
+    }
+    delete(k) { this.m.delete(k); }
+    clear() { this.m.clear(); }
+    /** Keys in the order mawk's `for (k in a)` visits them: by FNV-1a bucket, then by list position. */
+    keys() {
+      let size = 64;
+      while (this.peak > size * 12) size *= 2;
+      const rows = [];
+      for (const [k, e] of this.m) rows.push({ k, e, b: fnv1a(k) & (size - 1) });
+      const mask = size - 1;
+      rows.sort((x, y) => {
+        if (x.b !== y.b) return x.b - y.b;
+        if (x.e.int !== y.e.int) return x.e.int ? -1 : 1;
+        if (x.e.int) return ((+y.k) & mask) - ((+x.k) & mask) || x.e.seq - y.e.seq;
+        return y.e.seq - x.e.seq;
+      });
+      return rows.map((r) => r.k);
+    }
+  }
+  function fnv1a(s) {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i) & 255; h = Math.imul(h, 16777619) >>> 0; }
+    return h >>> 0;
+  }
+
+  /* ------------------------------------------------------- number formatting */
+  const trimZeros = (s) => (s.indexOf('.') < 0 ? s : s.replace(/\.?0+$/, ''));
+  const nonFinite = (x, upper) => {
+    const s = Number.isNaN(x) ? '-nan' : x < 0 ? '-inf' : 'inf';
+    return upper ? s.toUpperCase() : s;
+  };
+  /** printf("%.<prec>f"): JavaScript rounds exact ties up, C rounds them to even. */
+  function fixed(x, prec) {
+    if (Math.abs(x) >= 1e21) return BigInt(x).toString() + (prec ? '.' + '0'.repeat(prec) : '');
+    const long = x.toFixed(Math.min(100, prec + 25));
+    const base = long.slice(0, long.length - 25);
+    if (/^50{24}$/.test(long.slice(-25)) && prec + 25 <= 100) {
+      const kept = base.replace(/\.$/, '');
+      if ((+kept[kept.length - 1]) % 2 === 0) return kept;
+    }
+    return x.toFixed(prec);
+  }
+  function expo(x, prec, upper) {
+    const s = x.toExponential(prec).replace(/e([+-])(\d)$/, 'e$10$2');
+    return upper ? s.toUpperCase() : s;
+  }
+  function general(x, prec, alt, upper) {
+    const p = prec === 0 ? 1 : prec;
+    if (x === 0) return alt ? (0).toFixed(p - 1) : '0';
+    const exp = parseInt(x.toExponential(p - 1).split('e')[1], 10);
+    if (exp < -4 || exp >= p) {
+      const parts = expo(x, p - 1, upper).split(upper ? 'E' : 'e');
+      return (alt ? parts[0] : trimZeros(parts[0])) + (upper ? 'E' : 'e') + parts[1];
+    }
+    const f = fixed(x, Math.max(0, p - 1 - exp));
+    return alt ? f : trimZeros(f);
+  }
+  const INT_MIN = -(2n ** 63n); const UINT_MAX = 2n ** 64n - 1n;
+  const toBig = (x) => (Number.isNaN(x) ? INT_MIN : x >= 1.8446744073709552e19 ? UINT_MAX : x <= -9.223372036854776e18 ? INT_MIN : BigInt(Math.trunc(x)));
+
+  /** Format one conversion. Returns the text before padding to the field width. */
+  function convert(conv, spec, v) {
+    const { flags, prec } = spec;
+    const sign = (x, s) => (x < 0 || Object.is(x, -0) ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '') + s;
+    switch (conv) {
+      case 'd': case 'i': {
+        const n = toBig(toNum(v)); let digits = (n < 0n ? -n : n).toString();
+        if (prec != null) digits = digits.padStart(prec, '0');
+        return { text: (n < 0n ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '') + digits, numeric: prec == null };
+      }
+      case 'o': case 'x': case 'X': case 'u': {
+        let n = toBig(toNum(v)); if (n < 0n) n += 2n ** 64n;
+        let digits = n.toString(conv === 'u' ? 10 : conv === 'o' ? 8 : 16);
+        if (conv === 'X') digits = digits.toUpperCase();
+        if (prec != null) digits = digits.padStart(prec, '0');
+        if (flags.includes('#') && n !== 0n) digits = (conv === 'o' ? '0' : conv === 'x' ? '0x' : conv === 'X' ? '0X' : '') + digits;
+        return { text: digits, numeric: prec == null };
+      }
+      case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': {
+        const x = toNum(v); const upper = conv === 'E' || conv === 'F' || conv === 'G';
+        if (!isFinite(x)) return { text: nonFinite(x, upper), numeric: false };
+        const p = prec == null ? 6 : prec; const a = Math.abs(x);
+        const body = conv === 'f' || conv === 'F' ? fixed(a, p) : conv === 'e' || conv === 'E' ? expo(a, p, upper) : general(a, p, flags.includes('#'), upper);
+        return { text: sign(x, body), numeric: true };
+      }
+      case 'c': {
+        if (typeof v === 'string') return { text: v === '' ? '\0' : v[0], numeric: false };
+        return { text: String.fromCharCode(toNum(v) & 255), numeric: false };
+      }
+      default: {
+        const s = typeof v === 'string' ? v : toStrBasic(v);
+        return { text: prec != null ? s.slice(0, prec) : s, numeric: false };
+      }
+    }
+  }
+  /** String value of a number or StrNum with the default CONVFMT (used where no runtime is at hand). */
+  function toStrBasic(v) {
+    if (v === undefined) return '';
+    if (typeof v === 'string') return v;
+    if (v instanceof StrNum) return v.s;
+    return numberToString(v, '%.6g');
+  }
+  const printfError = (msg, partial) => new AwkRuntime(msg, partial);
+
+  /**
+   * sprintf for awk. `args` are values; `who` names the function in error messages.
+   * Raises a run time error (with the text produced so far) like mawk.
+   */
+  function sprintf(fmt, args, who) {
+    let out = ''; let ai = 0; let n = 0;
+    for (let i = 0; i < fmt.length; i++) {
+      const c = fmt[i];
+      if (c !== '%') { out += c; continue; }
+      if (fmt[i + 1] === '%') { out += '%'; i++; continue; }
+      n++;
+      const m = /^%([-+ #0]*)(\*|\d+)?(?:\.(\*|\d*))?([a-zA-Z%]?)/.exec(fmt.slice(i));
+      const next = () => {
+        if (ai >= args.length) throw printfError('not enough arguments passed to ' + who + '("' + fmt + '")', out);
+        return args[ai++];
+      };
+      let flags = m[1]; let width = m[2]; let prec = m[3];
+      if (width === '*') { width = toNum(next()); if (width < 0) { flags += '-'; width = -width; } } else width = width ? +width : 0;
+      if (prec === '*') prec = Math.max(0, toNum(next())); else if (prec != null) prec = prec === '' ? 0 : +prec;
+      const conv = m[4];
+      if (!conv || !/[diouxXeEfFgGcs]/.test(conv)) throw printfError('improper conversion(number ' + n + ') in ' + who + '("' + fmt + '")', out);
+      const r = convert(conv, { flags, prec }, next());
+      let text = r.text;
+      if (text.length < width) {
+        if (flags.includes('-')) text = text.padEnd(width);
+        else if (flags.includes('0') && r.numeric !== false && conv !== 's' && conv !== 'c') {
+          const sg = /^[-+ ]|^0[xX]/.exec(text);
+          const head = sg ? sg[0] : '';
+          text = head + text.slice(head.length).padStart(width - head.length, '0');
+        } else text = text.padStart(width);
+      }
+      out += text;
+      i += m[0].length - 1;
+    }
+    return out;
+  }
+
+  /** Number to string: integers print as integers, other numbers with CONVFMT or OFMT. */
+  function numberToString(n, fmt) {
+    if (Number.isInteger(n)) {
+      if (Math.abs(n) < 1e15) return String(n);
+      if (n >= -9223372036854775808 && n <= 18446744073709551616) return (n >= 18446744073709551616 ? UINT_MAX : BigInt(n)).toString();
+    }
+    if (!isFinite(n)) return nonFinite(n, false);
+    return sprintf(fmt, [n], 'sprintf');
+  }
+
+  /** Process the backslash escapes of a command line assignment or -F value (mawk's rm_escape). */
+  function unescapeArg(s) {
+    return s.replace(/\\(?:([0-7]{1,3})|(x[0-9a-fA-F]{1,2})|([\s\S]))/g, (m, oct, hex, ch) => {
+      if (oct) return String.fromCharCode(parseInt(oct, 8) & 255);
+      if (hex) return String.fromCharCode(parseInt(hex.slice(1), 16));
+      const map = { n: '\n', t: '\t', r: '\r', f: '\f', v: '\v', a: '\x07', b: '\b', '\\': '\\', '"': '"' };
+      return map[ch] != null ? map[ch] : m;
+    });
+  }
+
+  /* ------------------------------------------------------------------ lexer */
+  const AWK_KEYWORDS = new Set(['BEGIN', 'END', 'function', 'func', 'if', 'else', 'while', 'for', 'do', 'break', 'continue', 'next', 'nextfile', 'exit', 'return', 'delete', 'in', 'getline', 'print', 'printf']);
+  const AWK_BUILTINS = {
+    length: [0, 1], substr: [2, 3], index: [2, 2], split: [2, 3], sub: [2, 3], gsub: [2, 3], match: [2, 2], sprintf: [1, Infinity],
+    sin: [1, 1], cos: [1, 1], atan2: [2, 2], exp: [1, 1], log: [1, 1], sqrt: [1, 1], int: [1, 1], rand: [0, 0], srand: [0, 1],
+    tolower: [1, 1], toupper: [1, 1], system: [1, 1], close: [1, 1], fflush: [0, 1], systime: [0, 0], strftime: [0, 3],
+  };
+  const PUNCT = ['+=', '-=', '*=', '/=', '%=', '^=', '==', '<=', '>=', '!=', '++', '--', '&&', '||', '>>', '!~'];
+
+  class AwkLexer {
+    constructor(src) { this.src = src; this.i = 0; this.line = 1; }
+    save() { return { i: this.i, line: this.line }; }
+    restore(s) { this.i = s.i; this.line = s.line; }
+    error(msg) { throw new AwkSyntax(msg, this.line); }
+
+    /** Read the regular expression literal whose opening slash is at `pos`; leaves the lexer after it. */
+    regexAt(pos) {
+      const src = this.src; let i = pos + 1; let s = ''; let inBracket = false;
+      for (;;) {
+        const c = src[i];
+        if (c === undefined || c === '\n') this.error('runaway regular expression /' + s.slice(0, 10) + ' ...');
+        if (c === '\\' && src[i + 1] !== undefined) {
+          if (src[i + 1] === '/') s += '/'; else s += c + src[i + 1];
+          i += 2; continue;
+        }
+        if (inBracket) { if (c === ']') inBracket = false; }
+        else if (c === '[') { inBracket = true; if (src[i + 1] === '^') { s += '[^'; i += 2; if (src[i] === ']') { s += ']'; i++; } continue; } if (src[i + 1] === ']') { s += '[]'; i += 2; continue; } }
+        else if (c === '/') break;
+        s += c; i++;
+      }
+      this.i = i + 1;
+      return s;
+    }
+
+    next() {
+      const src = this.src;
+      for (;;) {
+        const c = src[this.i];
+        if (c === ' ' || c === '\t' || c === '\r') this.i++;
+        else if (c === '\\' && (src[this.i + 1] === '\n' || (src[this.i + 1] === '\r' && src[this.i + 2] === '\n'))) { this.i += src[this.i + 1] === '\n' ? 2 : 3; this.line++; }
+        else if (c === '#') { while (this.i < src.length && src[this.i] !== '\n') this.i++; }
+        else break;
+      }
+      const pos = this.i; const c = src[pos];
+      if (c === undefined) return { t: 'eof', pos, line: this.line, text: 'end of file' };
+      const tok = (t, v, len) => { this.i = pos + len; return { t, v, pos, line: this.line, text: src.slice(pos, pos + len) }; };
+      if (c === '\n') { this.i++; const t = { t: 'nl', pos, line: this.line, text: 'end of line' }; this.line++; return t; }
+      let m;
+      if ((m = /^(?:0[xX][0-9a-fA-F]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/.exec(src.slice(pos, pos + 64)))) {
+        const v = strToNum(m[0]);
+        if (!isFinite(v)) this.error(m[0] + ' : decimal overflow');
+        return tok('num', v, m[0].length);
+      }
+      if (c === '"') return this.string(pos);
+      if ((m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(pos, pos + 256)))) {
+        const name = m[0];
+        if (AWK_KEYWORDS.has(name)) return tok('kw', name === 'func' ? 'function' : name, name.length);
+        if (Object.prototype.hasOwnProperty.call(AWK_BUILTINS, name)) return tok('builtin', name, name.length);
+        return tok(src[pos + name.length] === '(' ? 'funcname' : 'name', name, name.length);
+      }
+      for (const p of PUNCT) if (src.startsWith(p, pos)) return tok('p', p, 2);
+      if ('{}()[];,+-*/%^!<>|?:~$='.includes(c)) return tok('p', c, 1);
+      return this.error("unexpected character '" + c + "'");
+    }
+
+    string(pos) {
+      const src = this.src; let i = pos + 1; let s = '';
+      for (;;) {
+        const c = src[i];
+        if (c === undefined || c === '\n') this.error('runaway string constant "' + s.slice(0, 10) + ' ...');
+        if (c === '"') break;
+        if (c === '\\') {
+          const e = src[i + 1];
+          if (e === '\n') { i += 2; this.line++; continue; }
+          const m = /^\\(?:([0-7]{1,3})|x([0-9a-fA-F]{1,2}))/.exec(src.slice(i, i + 5));
+          if (m) { s += String.fromCharCode(m[1] ? parseInt(m[1], 8) & 255 : parseInt(m[2], 16)); i += m[0].length; continue; }
+          const map = { n: '\n', t: '\t', r: '\r', f: '\f', v: '\v', a: '\x07', b: '\b', '\\': '\\', '"': '"' };
+          if (map[e] != null) s += map[e]; else s += '\\' + (e === undefined ? '' : e);
+          i += 2; continue;
+        }
+        s += c; i++;
+      }
+      this.i = i + 1;
+      return { t: 'str', v: s, pos, line: this.line, text: src.slice(pos, i + 1) };
+    }
+  }
+
+  /* ----------------------------------------------------------------- parser
+   * Expression nodes have a `type`: num str regex var local field index assign cond or and not neg plus
+   * in match cmp concat bin preinc postinc group call builtin getline. Statements: block expr print if
+   * while do for forin break continue next nextfile exit return delete.
+   */
+  const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '%=', '^=']);
+  const isLvalue = (n) => n.type === 'var' || n.type === 'local' || n.type === 'field' || n.type === 'index';
+
+  class AwkParser {
+    constructor(src) {
+      this.lex = new AwkLexer(src);
+      this.cur = this.lex.next();
+      this.funcs = new Map(); this.locals = null; this.fn = null;
+      this.begin = []; this.end = []; this.rules = []; this.calls = [];
+      this.arrays = new Set(); this.scalars = new Set();
+      this.noGt = false; this.where = 'rule';
+    }
+
+    advance() { const t = this.cur; this.cur = this.lex.next(); return t; }
+    peek() { const st = this.lex.save(); const t = this.lex.next(); this.lex.restore(st); return t; }
+    mark() { return { lex: this.lex.save(), cur: this.cur }; }
+    reset(m) { this.lex.restore(m.lex); this.cur = m.cur; }
+    is(v) { return this.cur.t === 'p' && this.cur.v === v; }
+    isKw(v) { return this.cur.t === 'kw' && this.cur.v === v; }
+    skipNl() { while (this.cur.t === 'nl') this.advance(); }
+    skipTerminators() { while (this.cur.t === 'nl' || this.is(';')) this.advance(); }
+    fail(msg) { throw new AwkSyntax(msg, this.cur.line); }
+    syntaxError() { return this.fail('syntax error at or near ' + this.cur.text); }
+    expect(v) {
+      if (!this.is(v)) {
+        if (this.cur.t === 'eof' || this.cur.t === 'nl') this.fail('missing ' + v + ' near ' + this.cur.text);
+        this.syntaxError();
+      }
+      return this.advance();
+    }
+
+    compileRe(src) {
+      try { return compileRegex(src, { ere: true, awk: true }); }
+      catch (e) {
+        if (e instanceof RegexError) throw new AwkSyntax('regular expression compile failed (' + mawkRegexMessage(e.message) + ')\n' + src, this.cur.line);
+        throw e;
+      }
+    }
+
+    /** Parse the whole program. */
+    parseProgram() {
+      this.skipTerminators();
+      while (this.cur.t !== 'eof') {
+        this.parseItem();
+        this.skipTerminators();
+      }
+      this.finish();
+      return { begin: this.begin, end: this.end, rules: this.rules, funcs: this.funcs };
+    }
+
+    /** Checks that need the whole program: undefined functions, array parameters, scalar/array clashes. */
+    finish() {
+      const eofLine = this.lex.line + 1;
+      for (const c of this.calls) {
+        if (!this.funcs.has(c.name)) throw new AwkSyntax('function ' + c.name + ' never defined', eofLine);
+      }
+      for (let changed = true; changed;) {
+        changed = false;
+        for (const c of this.calls) {
+          const callee = this.funcs.get(c.name);
+          c.args.forEach((a, i) => {
+            if (a.type === 'local' && callee.arrays.has(i) && !c.from.arrays.has(a.idx)) { c.from.arrays.add(a.idx); changed = true; }
+          });
+        }
+      }
+      for (const name of this.arrays) {
+        if (this.scalars.has(name)) throw new AwkSyntax('illegal reference to array ' + name, 1);
+      }
+    }
+
+    parseItem() {
+      if (this.is('}')) throw new AwkSyntax("extra '}'\n{NAME}: line " + this.cur.line + ': syntax error at or near end of line', this.cur.line);
+      if (this.isKw('function')) return this.parseFunction();
+      if (this.isKw('BEGIN') || this.isKw('END')) {
+        const which = this.advance().v;
+        if (!this.is('{')) this.syntaxError();
+        this.where = which;
+        const body = this.parseBlock();
+        this.where = 'rule';
+        (which === 'BEGIN' ? this.begin : this.end).push(body);
+        return null;
+      }
+      let a = null; let b = null; let action = null;
+      if (!this.is('{')) {
+        a = this.parseExpr();
+        if (this.is(',')) { this.advance(); this.skipNl(); b = this.parseExpr(); }
+      }
+      if (this.is('{')) action = this.parseBlock();
+      else if (a === null) this.syntaxError();
+      this.rules.push({ a, b, action, active: false });
+      return null;
+    }
+
+    parseFunction() {
+      this.advance();
+      if (this.cur.t !== 'name' && this.cur.t !== 'funcname') this.syntaxError();
+      const name = this.advance().v;
+      if (this.funcs.has(name)) this.fail('function ' + name + ' redefined');
+      this.expect('(');
+      const params = [];
+      while (!this.is(')')) {
+        if (this.cur.t !== 'name') this.syntaxError();
+        params.push(this.advance().v);
+        if (this.is(',')) { this.advance(); this.skipNl(); } else if (!this.is(')')) this.syntaxError();
+      }
+      this.advance(); this.skipNl();
+      const fn = { name, params, body: null, arrays: new Set() };
+      this.funcs.set(name, fn);
+      this.locals = new Map(params.map((p, i) => [p, i]));
+      this.fn = fn; this.where = 'function';
+      fn.body = this.parseBlock();
+      this.locals = null; this.fn = null; this.where = 'rule';
+    }
+
+    parseBlock() {
+      this.expect('{');
+      const body = [];
+      this.skipTerminators();
+      while (!this.is('}')) {
+        if (this.cur.t === 'eof') this.fail('missing } near end of file');
+        body.push(this.parseStmt());
+        this.skipTerminators();
+      }
+      this.advance();
+      return { type: 'block', body };
+    }
+
+    endStmt() {
+      const c = this.cur;
+      if (c.t === 'nl' || this.is(';')) { this.advance(); return; }
+      if (this.is('}') || c.t === 'eof') return;
+      this.syntaxError();
+    }
+
+    parseStmt() {
+      const c = this.cur;
+      if (this.is('{')) return this.parseBlock();
+      if (this.is(';')) { this.advance(); return { type: 'block', body: [] }; }
+      if (c.t === 'kw') {
+        switch (c.v) {
+          case 'if': return this.parseIf();
+          case 'while': {
+            this.advance(); this.expect('(');
+            const cond = this.parseExpr(); this.expect(')');
+            if (this.is(';')) { this.advance(); return { type: 'while', cond, body: { type: 'block', body: [] } }; }
+            this.skipNl();
+            return { type: 'while', cond, body: this.parseStmt() };
+          }
+          case 'do': {
+            this.advance(); this.skipNl();
+            const body = this.parseStmt();
+            this.skipTerminators();
+            if (!this.isKw('while')) this.syntaxError();
+            this.advance(); this.expect('(');
+            const cond = this.parseExpr(); this.expect(')');
+            this.endStmt();
+            return { type: 'do', body, cond };
+          }
+          case 'for': return this.parseFor();
+          case 'break': case 'continue': this.advance(); this.endStmt(); return { type: c.v };
+          case 'next': case 'nextfile':
+            if (this.where !== 'rule') this.fail('improper use of ' + c.v);
+            this.advance(); this.endStmt(); return { type: c.v };
+          case 'exit': case 'return': {
+            this.advance();
+            if (c.v === 'return' && !this.fn) this.fail('return outside function body');
+            let e = null;
+            if (!(this.cur.t === 'nl' || this.is(';') || this.is('}') || this.cur.t === 'eof')) e = this.parseExpr();
+            this.endStmt();
+            return { type: c.v, e };
+          }
+          case 'delete': {
+            this.advance();
+            const arr = this.arrayRef(this.parseName());
+            let subs = null;
+            if (this.is('[')) subs = this.parseSubscripts();
+            this.endStmt();
+            return { type: 'delete', arr, subs };
+          }
+          case 'print': case 'printf': return this.parsePrint();
+          default: break;
+        }
+      }
+      const e = this.parseExpr();
+      this.endStmt();
+      return { type: 'expr', e };
+    }
+
+    parseIf() {
+      this.advance(); this.expect('(');
+      const cond = this.parseExpr(); this.expect(')');
+      this.skipNl();
+      const then = this.parseStmt();
+      let other = null;
+      const m = this.mark();
+      this.skipNl();
+      if (this.isKw('else')) { this.advance(); this.skipNl(); other = this.parseStmt(); } else this.reset(m);
+      return { type: 'if', cond, then, other };
+    }
+
+    parseFor() {
+      this.advance(); this.expect('(');
+      if (this.cur.t === 'name') {
+        const m = this.mark();
+        const v = this.parseName();
+        if (this.isKw('in')) {
+          this.advance();
+          if (this.cur.t === 'name') {
+            const arr = this.arrayRef(this.parseName());
+            if (this.is(')')) {
+              this.advance(); this.skipNl();
+              return { type: 'forin', v, arr, body: this.parseStmt() };
+            }
+          }
+        }
+        this.reset(m);
+      }
+      let init = null; let cond = null; let step = null;
+      if (!this.is(';')) init = { type: 'expr', e: this.parseExpr() };
+      this.expect(';'); this.skipNl();
+      if (!this.is(';')) cond = this.parseExpr();
+      this.expect(';'); this.skipNl();
+      if (!this.is(')')) step = { type: 'expr', e: this.parseExpr() };
+      this.expect(')');
+      if (this.is(';')) { this.advance(); return { type: 'for', init, cond, step, body: { type: 'block', body: [] } }; }
+      this.skipNl();
+      return { type: 'for', init, cond, step, body: this.parseStmt() };
+    }
+
+    parsePrint() {
+      const kind = this.advance().v;
+      const ends = () => this.cur.t === 'nl' || this.cur.t === 'eof' || this.is(';') || this.is('}') || this.is('>') || this.is('>>') || this.is('|');
+      let args = [];
+      if (!ends()) {
+        let grouped = null;
+        if (this.is('(')) {
+          const m = this.mark();
+          this.advance();
+          const saved = this.noGt; this.noGt = false;
+          const list = this.parseExprList(')');
+          this.noGt = saved;
+          if (this.is(')')) { this.advance(); if (ends()) grouped = list; }
+          if (!grouped) this.reset(m);
+        }
+        if (grouped) args = grouped;
+        else { this.noGt = true; try { args = this.parseExprList(null); } finally { this.noGt = false; } }
+      }
+      let redir = null;
+      if (this.is('>') || this.is('>>') || this.is('|')) {
+        const op = this.advance().v;
+        this.noGt = true;
+        let target;
+        try { target = this.parseConcat(); } finally { this.noGt = false; }
+        redir = { op, target };
+      }
+      this.endStmt();
+      if (kind === 'printf' && !args.length) this.syntaxError();
+      return { type: kind, args, redir };
+    }
+
+    parseExprList(closer) {
+      const list = [];
+      this.skipNl();
+      if (closer && this.is(closer)) return list;
+      for (;;) {
+        list.push(this.parseExpr());
+        if (this.is(',')) { this.advance(); this.skipNl(); continue; }
+        return list;
+      }
+    }
+
+    parseName() {
+      if (this.cur.t !== 'name' && this.cur.t !== 'funcname') this.syntaxError();
+      const name = this.advance().v;
+      if (this.locals && this.locals.has(name)) return { type: 'local', idx: this.locals.get(name), name };
+      return { type: 'var', name, special: name === 'NF' || name === 'NR' || name === 'FNR' };
+    }
+
+    /** Mark a variable node as used as an array. */
+    arrayRef(node) {
+      if (node.type === 'local') this.fn.arrays.add(node.idx);
+      else this.arrays.add(node.name);
+      return node;
+    }
+
+    parseSubscripts() {
+      this.expect('[');
+      const saved = this.noGt; this.noGt = false;
+      const subs = this.parseExprList(']');
+      this.noGt = saved;
+      if (!subs.length) this.syntaxError();
+      this.expect(']');
+      return subs;
+    }
+
+    /* ---- expressions, from the lowest precedence up */
+    parseExpr() {
+      const left = this.parseTernary();
+      if (this.cur.t === 'p' && ASSIGN_OPS.has(this.cur.v) && isLvalue(left)) {
+        const op = this.advance().v;
+        this.skipNl();
+        if (left.type === 'var' && !left.special) this.scalars.add(left.name);
+        return { type: 'assign', op, lhs: left, rhs: this.parseExpr() };
+      }
+      return left;
+    }
+
+    parseTernary() {
+      const cond = this.parseOr();
+      if (!this.is('?')) return cond;
+      this.advance(); this.skipNl();
+      const a = this.parseExpr(); this.skipNl();
+      this.expect(':'); this.skipNl();
+      return { type: 'cond', cond, a, b: this.parseExpr() };
+    }
+
+    parseOr() {
+      let left = this.parseAnd();
+      while (this.is('||')) { this.advance(); this.skipNl(); left = { type: 'or', l: left, r: this.parseAnd() }; }
+      return left;
+    }
+    parseAnd() {
+      let left = this.parseIn();
+      while (this.is('&&')) { this.advance(); this.skipNl(); left = { type: 'and', l: left, r: this.parseIn() }; }
+      return left;
+    }
+    parseIn() {
+      let left = this.parseMatch();
+      while (this.isKw('in')) {
+        this.advance();
+        const arr = this.arrayRef(this.parseName());
+        left = { type: 'in', subs: [left], arr };
+      }
+      return left;
+    }
+    parseMatch() {
+      let left = this.parseComparison();
+      while (this.is('~') || this.is('!~')) {
+        const neg = this.advance().v === '!~';
+        left = { type: 'match', neg, l: left, r: this.parseComparison() };
+      }
+      return left;
+    }
+    parseComparison() {
+      let left = this.parseConcat();
+      for (;;) {
+        if (this.is('|') && this.peek().t === 'kw' && this.peek().v === 'getline') {
+          this.advance(); this.advance();
+          const lhs = this.parseGetlineTarget();
+          left = { type: 'getline', kind: 'cmd', src: left, lhs };
+          continue;
+        }
+        const c = this.cur;
+        if (c.t === 'p' && ['<', '<=', '==', '!=', '>=', '>'].includes(c.v) && !(c.v === '>' && this.noGt)) {
+          this.advance();
+          return { type: 'cmp', op: c.v, l: left, r: this.parseConcat() };
+        }
+        return left;
+      }
+    }
+
+    startsOperand() {
+      const c = this.cur;
+      if (c.t === 'num' || c.t === 'str' || c.t === 'name' || c.t === 'funcname' || c.t === 'builtin') return true;
+      if (c.t === 'p') return c.v === '$' || c.v === '(' || c.v === '++' || c.v === '--';
+      return false;
+    }
+    parseConcat() {
+      let left = this.parseAdditive();
+      while (this.startsOperand()) left = { type: 'concat', l: left, r: this.parseAdditive() };
+      return left;
+    }
+    parseAdditive() {
+      let left = this.parseMul();
+      while (this.is('+') || this.is('-')) { const op = this.advance().v; left = { type: 'bin', op, l: left, r: this.parseMul() }; }
+      return left;
+    }
+    parseMul() {
+      let left = this.parseUnary();
+      while (this.is('*') || this.is('/') || this.is('%')) { const op = this.advance().v; left = { type: 'bin', op, l: left, r: this.parseUnary() }; }
+      return left;
+    }
+    parseUnary() {
+      if (this.is('!')) { this.advance(); return { type: 'not', e: this.parseUnary() }; }
+      if (this.is('-')) { this.advance(); return { type: 'neg', e: this.parseUnary() }; }
+      if (this.is('+')) { this.advance(); return { type: 'plus', e: this.parseUnary() }; }
+      return this.parsePow();
+    }
+    parsePow() {
+      const base = this.parsePostfix();
+      if (!this.is('^')) return base;
+      this.advance();
+      return { type: 'bin', op: '^', l: base, r: this.parsePowOperand() };
+    }
+    parsePowOperand() {
+      if (this.is('-')) { this.advance(); return { type: 'neg', e: this.parsePowOperand() }; }
+      if (this.is('+')) { this.advance(); return { type: 'plus', e: this.parsePowOperand() }; }
+      if (this.is('!')) { this.advance(); return { type: 'not', e: this.parsePowOperand() }; }
+      return this.parsePow();
+    }
+    parsePostfix() {
+      const e = this.parsePrimary();
+      if (isLvalue(e) && (this.is('++') || this.is('--'))) {
+        const op = this.advance().v;
+        if (e.type === 'var' && !e.special) this.scalars.add(e.name);
+        return { type: 'postinc', delta: op === '++' ? 1 : -1, e };
+      }
+      return e;
+    }
+
+    parseGetlineTarget() {
+      if (this.cur.t === 'name' || (this.is('$'))) return this.parsePrimary();
+      return null;
+    }
+
+    parsePrimary() {
+      const c = this.cur;
+      switch (c.t) {
+        case 'num': this.advance(); return { type: 'num', v: c.v };
+        case 'str': this.advance(); return { type: 'str', v: c.v };
+        case 'name': {
+          const v = this.parseName();
+          if (this.is('[')) {
+            const subs = this.parseSubscripts();
+            this.arrayRef(v);
+            return { type: 'index', arr: v, subs };
+          }
+          return v;
+        }
+        case 'funcname': return this.parseCall();
+        case 'builtin': return this.parseBuiltin();
+        case 'kw':
+          if (c.v === 'getline') return this.parseGetline();
+          return this.syntaxError();
+        case 'p': break;
+        default: return this.syntaxError();
+      }
+      switch (c.v) {
+        case '/': case '/=': {
+          const src = this.lex.regexAt(c.pos);
+          this.cur = this.lex.next();
+          return { type: 'regex', src, pat: this.compileRe(src) };
+        }
+        case '$': {
+          this.advance();
+          let e;
+          if (this.is('++') || this.is('--')) {
+            const op = this.advance().v;
+            const target = this.parsePrimary();
+            if (!isLvalue(target)) this.syntaxError();
+            e = { type: 'preinc', delta: op === '++' ? 1 : -1, e: target };
+          } else if (this.is('-')) { this.advance(); e = { type: 'neg', e: this.parsePrimary() }; }
+          else if (this.is('+')) { this.advance(); e = { type: 'plus', e: this.parsePrimary() }; }
+          else if (this.is('!')) { this.advance(); e = { type: 'not', e: this.parsePrimary() }; }
+          else e = this.parsePrimary();
+          return { type: 'field', e };
+        }
+        case '++': case '--': {
+          this.advance();
+          const target = this.parsePrimary();
+          if (!isLvalue(target)) this.syntaxError();
+          if (target.type === 'var' && !target.special) this.scalars.add(target.name);
+          return { type: 'preinc', delta: c.v === '++' ? 1 : -1, e: target };
+        }
+        case '(': {
+          this.advance();
+          const saved = this.noGt; this.noGt = false;
+          const list = this.parseExprList(')');
+          this.noGt = saved;
+          this.expect(')');
+          if (list.length > 1) {
+            if (!this.isKw('in')) this.syntaxError();
+            this.advance();
+            return { type: 'in', subs: list, arr: this.arrayRef(this.parseName()) };
+          }
+          if (!list.length) this.syntaxError();
+          return { type: 'group', e: list[0] };
+        }
+        case '-': case '+': case '!': return this.parseUnary();
+        default: return this.syntaxError();
+      }
+    }
+
+    parseGetline() {
+      this.advance();
+      const lhs = this.parseGetlineTarget();
+      if (this.is('<')) {
+        this.advance();
+        return { type: 'getline', kind: 'file', src: this.parsePostfix(), lhs };
+      }
+      return { type: 'getline', kind: 'simple', lhs };
+    }
+
+    parseArgs() {
+      this.expect('(');
+      const saved = this.noGt; this.noGt = false;
+      const args = this.parseExprList(')');
+      this.noGt = saved;
+      this.expect(')');
+      return args;
+    }
+
+    parseCall() {
+      const name = this.advance().v;
+      const args = this.parseArgs();
+      const call = { type: 'call', name, args, from: this.fn };
+      this.calls.push(call);
+      const fn = this.funcs.get(name);
+      if (fn && args.length > fn.params.length) this.fail('too many arguments in call to ' + name);
+      return call;
+    }
+
+    parseBuiltin() {
+      const tok = this.advance(); const name = tok.v;
+      let args = [];
+      if (name === 'length' && !this.is('(')) args = [];
+      else args = this.parseArgs();
+      const [min, max] = AWK_BUILTINS[name];
+      if (args.length < min || args.length > max) {
+        if (name === 'length') this.syntaxError();
+        this.fail('wrong number of arguments in call to ' + name);
+      }
+      if (name === 'split') {
+        if (args[1].type !== 'var' && args[1].type !== 'local') this.syntaxError();
+        this.arrayRef(args[1]);
+      }
+      if ((name === 'sub' || name === 'gsub') && args[2] && !isLvalue(args[2]) && args[2].type !== 'group') this.fail('syntax error at or near )');
+      if (name === 'length' && args[0] && (args[0].type === 'var' || args[0].type === 'local')) args[0].maybeArray = true;
+      return { type: 'builtin', name, args };
+    }
+  }
+
+  /* ---------------------------------------------------------------- input */
+
+  /** Text being split into records. A terminal source is read a line at a time through `fill`. */
+  class Reader {
+    constructor(text, fill) { this.text = text; this.pos = 0; this.fill = fill || null; this.eof = !fill; }
+    more() {
+      return new Blocked(async () => {
+        const line = await this.fill();
+        if (line == null) this.eof = true; else this.text += line + '\n';
+      });
+    }
+    /** Next record for the record separator `rs`, or null at the end. Throws Blocked when it needs terminal input. */
+    read(rs, rt) {
+      const t = this.text;
+      if (rs.length === 1) {
+        const idx = t.indexOf(rs, this.pos);
+        if (idx >= 0) { const rec = t.slice(this.pos, idx); this.pos = idx + 1; return rec; }
+      } else if (rs === '') {
+        while (t[this.pos] === '\n') this.pos++;
+        const m = /\n\n+/.exec(t.slice(this.pos));
+        if (m && (this.eof || this.pos + m.index + m[0].length < t.length)) {
+          const rec = t.slice(this.pos, this.pos + m.index); this.pos += m.index + m[0].length; return rec;
+        }
+        if (this.pos >= t.length && !this.eof) throw this.more();
+      } else {
+        const pat = rt.regex(rs);
+        for (let from = this.pos; from <= t.length;) {
+          const m = pat.exec(t, from);
+          if (!m) break;
+          if (m[0] === '') { from = m.index + 1; continue; }
+          if (!this.eof && m.index + m[0].length >= t.length) break;
+          const rec = t.slice(this.pos, m.index); this.pos = m.index + m[0].length; return rec;
+        }
+      }
+      if (!this.eof) throw this.more();
+      if (this.pos >= t.length) return null;
+      let rec = t.slice(this.pos); this.pos = t.length;
+      if (rs === '') rec = rec.replace(/\n$/, '');
+      return rec;
+    }
+  }
+
+  /** The operands of the command line, read in turn as the main input. */
+  class MainInput {
+    constructor(rt) { this.rt = rt; this.reader = null; this.argi = 1; this.usedOperand = false; this.usedStdin = false; }
+    next() {
+      const rt = this.rt;
+      for (;;) {
+        if (!this.reader && !this.openNext()) return null;
+        const rec = this.reader.read(rt.str(rt.g.get('RS')), rt);
+        if (rec !== null) return rec;
+        this.reader = null;
+      }
+    }
+    openNext() {
+      const rt = this.rt; const argv = rt.g.get('ARGV');
+      while (this.argi < toNum(rt.g.get('ARGC'))) {
+        const a = rt.str(argv.get(String(this.argi++)));
+        if (a === '') continue;
+        const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(a);
+        if (m) { rt.setVar(m[1], inputValue(unescapeArg(m[2]))); continue; }
+        this.usedOperand = true;
+        rt.g.set('FILENAME', a); rt.fnr = 0;
+        if (a === '-') { this.reader = rt.stdinReader(); return true; }
+        try { this.reader = new Reader(toBin(rt.ctx.fs.read(a))); }
+        catch (e) {
+          if (!isFsError(e)) throw e;
+          throw new AwkFatal('cannot open "' + a + '" (' + e.message + ')');
+        }
+        return true;
+      }
+      if (this.usedOperand || this.usedStdin) return false;
+      this.usedStdin = true;
+      rt.g.set('FILENAME', '-'); rt.fnr = 0;
+      this.reader = rt.stdinReader();
+      return true;
+    }
+  }
+
+  /* ------------------------------------------------------------ interpreter */
+  const BRK = 1; const CNT = 2; const NXT = 3; const EXT = 4; const RET = 5; const NXF = 6;
+  const BREATHE = { breathe: true };
+  const ZERO_FIELD = { type: 'field', e: { type: 'num', v: 0 } };
+  const MATH1 = { sin: Math.sin, cos: Math.cos, exp: Math.exp, log: Math.log, sqrt: Math.sqrt };
+
+  /** Can evaluating this node need the event loop (a command, a terminal read, a function call)? */
+  function pureNode(n) {
+    if (n === null || typeof n !== 'object') return true;
+    if (Array.isArray(n)) return n.every(pureNode);
+    if (n._pure !== undefined) return n._pure;
+    let pure = true;
+    if (n.type === 'call' || n.type === 'getline' || (n.type === 'builtin' && (n.name === 'system' || n.name === 'close'))) pure = false;
+    else for (const k of Object.keys(n)) if (k !== 'pat' && k !== 'from' && typeof n[k] === 'object' && !pureNode(n[k])) { pure = false; break; }
+    n._pure = pure;
+    return pure;
+  }
+
+  class AwkInterp {
+    constructor(ctx, prog, sink, name) {
+      this.ctx = ctx; this.prog = prog; this.sink = sink; this.name = name;
+      this.g = new Map(); this.frame = null; this.steps = 0;
+      this.nr = 0; this.fnr = 0; this.nf = 0; this.record = ''; this.fields = null;
+      this.files = new Map(); this.pipes = new Map(); this.readers = new Map();
+      this.reCache = new Map(); this.retval = undefined; this.exitCode = 0;
+      this.sysResult = null; this.closeResult = null; this.stdin = null; this.depth = 0;
+      this.seed = Math.floor(K.clock.now() / 1000) % 2147483647; this.rngState = this.seed;
+      this.main = new MainInput(this);
+      for (const [k, v] of [['FS', ' '], ['OFS', ' '], ['ORS', '\n'], ['RS', '\n'], ['SUBSEP', '\x1c'], ['CONVFMT', '%.6g'], ['OFMT', '%.6g'], ['RSTART', 0], ['RLENGTH', -1], ['FILENAME', '']]) this.g.set(k, v);
+      const env = new AwkArray();
+      for (const [k, v] of Object.entries(ctx.env || {})) env.ref(toBin(k), false).v = inputValue(toBin(String(v)));
+      this.g.set('ENVIRON', env);
+    }
+
+    /* ---- values */
+    str(v) {
+      if (typeof v === 'string') return v;
+      if (v === undefined) return '';
+      if (typeof v === 'number') return numberToString(v, this.str(this.g.get('CONVFMT')));
+      if (v instanceof StrNum) return v.s;
+      throw new AwkRuntime("can't use an array in a scalar context");
+    }
+    outStr(v) { return typeof v === 'number' ? numberToString(v, this.str(this.g.get('OFMT'))) : this.str(v); }
+    bool(v) { return typeof v === 'number' ? v !== 0 : typeof v === 'string' ? v !== '' : v === undefined ? false : v.n !== 0; }
+    compare(a, b) {
+      if (isNumeric(a) && isNumeric(b)) { const x = toNum(a); const y = toNum(b); return x < y ? -1 : x > y ? 1 : x === y ? 0 : NaN; }
+      const x = this.str(a); const y = this.str(b);
+      return x < y ? -1 : x > y ? 1 : 0;
+    }
+    regex(src) {
+      let p = this.reCache.get(src);
+      if (!p) {
+        try { p = compileRegex(src, { ere: true, awk: true }); }
+        catch (e) { if (e instanceof RegexError) throw new AwkRuntime('regular expression compile failed (' + mawkRegexMessage(e.message) + ')\n' + src); throw e; }
+        this.reCache.set(src, p);
+      }
+      return p;
+    }
+    patternOf(node) { return node.type === 'regex' ? node.pat : this.regex(this.str(this.ev(node))); }
+
+    /* ---- variables */
+    getVar(n) {
+      if (!n.special) return this.g.get(n.name);
+      if (n.name === 'NF') { this.ensureFields(); return this.nf; }
+      return n.name === 'NR' ? this.nr : this.fnr;
+    }
+    setVar(name, v) {
+      if (name === 'NF') this.setNF(Math.trunc(toNum(v)));
+      else if (name === 'NR') this.nr = toNum(v);
+      else if (name === 'FNR') this.fnr = toNum(v);
+      else {
+        if (this.g.get(name) instanceof AwkArray) throw new AwkRuntime("can't assign to " + name + '; it\'s an array name.');
+        this.g.set(name, v);
+      }
+    }
+    arrayOf(n) {
+      if (n.type === 'local') { let a = this.frame[n.idx]; if (a === undefined) a = this.frame[n.idx] = new AwkArray(); return a; }
+      let a = this.g.get(n.name);
+      if (a === undefined) { a = new AwkArray(); this.g.set(n.name, a); }
+      return a;
+    }
+    subscript(subs) {
+      const sep = this.str(this.g.get('SUBSEP'));
+      if (subs.length === 1) {
+        const v = this.ev(subs[0]);
+        if (typeof v === 'number') return { key: this.str(v), int: Number.isInteger(v) && Math.abs(v) <= 2147483647 };
+        return { key: this.str(v), int: false };
+      }
+      return { key: subs.map((s) => this.str(this.ev(s))).join(sep), int: false };
+    }
+    entry(n) { const s = this.subscript(n.subs); return this.arrayOf(n.arr).ref(s.key, s.int); }
+
+    /* ---- record and fields */
+    setRecord(s) { this.record = s; this.fields = null; }
+    splitBy(s, fs, paragraph) {
+      if (fs === ' ') { const t = s.replace(/^[ \t\n]+|[ \t\n]+$/g, ''); return t === '' ? [] : t.split(/[ \t\n]+/); }
+      if (s === '') return [];
+      if (fs === '') return s.split('');
+      if (fs.length === 1 && fs !== '\\') return paragraph ? s.split(new RegExp('[' + escInClass(fs) + '\\n]')) : s.split(fs);
+      const pat = this.regex(paragraph ? '(' + fs + ')|\n' : fs);
+      const out = []; let last = 0;
+      for (let from = 0; from <= s.length;) {
+        const m = pat.exec(s, from);
+        if (!m) break;
+        if (m[0] === '') { from = m.index + 1; continue; }
+        out.push(s.slice(last, m.index)); last = m.index + m[0].length; from = last;
+      }
+      out.push(s.slice(last));
+      return out;
+    }
+    ensureFields() {
+      if (this.fields) return;
+      const rs = this.str(this.g.get('RS'));
+      const parts = this.splitBy(this.record, this.str(this.g.get('FS')), rs === '');
+      this.fields = [''].concat(parts); this.nf = parts.length;
+    }
+    rebuild() { this.record = this.fields.slice(1, this.nf + 1).join(this.str(this.g.get('OFS'))); }
+    getField(i) {
+      if (i < 0) throw new AwkRuntime('negative field index $' + i);
+      if (i === 0) return inputValue(this.record);
+      this.ensureFields();
+      return i > this.nf ? undefined : inputValue(this.fields[i]);
+    }
+    setField(i, v) {
+      if (i < 0) throw new AwkRuntime('negative field index $' + i);
+      if (i === 0) { this.setRecord(this.str(v)); return; }
+      this.ensureFields();
+      while (this.nf < i) this.fields[++this.nf] = '';
+      this.fields[i] = this.str(v);
+      this.rebuild();
+    }
+    setNF(n) {
+      this.ensureFields();
+      n = Math.max(0, n);
+      while (this.nf < n) this.fields[++this.nf] = '';
+      this.fields.length = n + 1; this.nf = n;
+      this.rebuild();
+    }
+
+    /* ---- assignment targets */
+    store(t, v) {
+      switch (t.type) {
+        case 'var': this.setVar(t.name, v); break;
+        case 'local': this.frame[t.idx] = v; break;
+        case 'field': this.setField(Math.trunc(toNum(this.ev(t.e))), v); break;
+        default: this.entry(t).v = v;
+      }
+    }
+    /** Update an lvalue with fn(old) -> new and return the new value. */
+    modify(t, fn) {
+      switch (t.type) {
+        case 'var': { const nv = fn(this.getVar(t)); this.setVar(t.name, nv); return nv; }
+        case 'local': { const nv = fn(this.frame[t.idx]); this.frame[t.idx] = nv; return nv; }
+        case 'field': { const i = Math.trunc(toNum(this.ev(t.e))); const nv = fn(this.getField(i)); this.setField(i, nv); return nv; }
+        default: { const e = this.entry(t); e.v = fn(e.v); return e.v; }
+      }
+    }
+    arith(op, a, b) {
+      switch (op) {
+        case '+': return a + b; case '-': return a - b; case '*': return a * b; case '/': return a / b;
+        case '%': return a % b; default: return Math.pow(a, b);
+      }
+    }
+
+    /* ---- expressions */
+    ev(n) {
+      switch (n.type) {
+        case 'num': case 'str': return n.v;
+        case 'var': return this.getVar(n);
+        case 'local': return this.frame[n.idx];
+        case 'group': return this.ev(n.e);
+        case 'field': return this.getField(Math.trunc(toNum(this.ev(n.e))));
+        case 'index': return this.entry(n).v;
+        case 'regex': return n.pat.test(this.record) ? 1 : 0;
+        case 'assign': {
+          if (n.op === '=') {
+            const v = this.ev(n.rhs);
+            this.store(n.lhs, v);
+            return v;
+          }
+          const op = n.op[0]; const r = toNum(this.ev(n.rhs));
+          return this.modify(n.lhs, (old) => this.arith(op, toNum(old), r));
+        }
+        case 'cond': return this.bool(this.ev(n.cond)) ? this.ev(n.a) : this.ev(n.b);
+        case 'or': return this.bool(this.ev(n.l)) || this.bool(this.ev(n.r)) ? 1 : 0;
+        case 'and': return this.bool(this.ev(n.l)) && this.bool(this.ev(n.r)) ? 1 : 0;
+        case 'not': return this.bool(this.ev(n.e)) ? 0 : 1;
+        case 'neg': return -toNum(this.ev(n.e));
+        case 'plus': return toNum(this.ev(n.e));
+        case 'in': { const s = this.subscript(n.subs); return this.arrayOf(n.arr).has(s.key) ? 1 : 0; }
+        case 'match': {
+          const s = this.str(this.ev(n.l));
+          return this.patternOf(n.r).test(s) !== n.neg ? 1 : 0;
+        }
+        case 'cmp': {
+          const c = this.compare(this.ev(n.l), this.ev(n.r));
+          switch (n.op) {
+            case '<': return c < 0 ? 1 : 0; case '<=': return c <= 0 ? 1 : 0; case '==': return c === 0 ? 1 : 0;
+            case '!=': return c !== 0 ? 1 : 0; case '>': return c > 0 ? 1 : 0; default: return c >= 0 ? 1 : 0;
+          }
+        }
+        case 'concat': return this.str(this.ev(n.l)) + this.str(this.ev(n.r));
+        case 'bin': return this.arith(n.op, toNum(this.ev(n.l)), toNum(this.ev(n.r)));
+        case 'preinc': return this.modify(n.e, (old) => toNum(old) + n.delta);
+        case 'postinc': { let old = 0; this.modify(n.e, (o) => { old = toNum(o); return old + n.delta; }); return old; }
+        case 'call': return this.callUser(n);
+        case 'builtin': return this.builtin(n);
+        case 'getline': return this.getline(n);
+        default: throw new Error('awk: unknown node ' + n.type);
+      }
+    }
+
+    callUser(n) {
+      const fn = this.prog.funcs.get(n.name);
+      const frame = new Array(fn.params.length);
+      n.args.forEach((a, i) => {
+        frame[i] = (a.type === 'var' || a.type === 'local') && fn.arrays.has(i) ? this.arrayOf(a) : this.ev(a);
+      });
+      if (++this.depth > 400) { this.depth = 0; throw new AwkRuntime('function call nesting too deep'); }
+      const saved = this.frame; this.frame = frame;
+      try {
+        const r = this.runSync(this.exec(fn.body));
+        return r === RET ? this.retval : undefined;
+      } finally { this.frame = saved; this.depth--; }
+    }
+    /** Run a generator to completion where waiting is impossible: a request to wait restarts the caller. */
+    runSync(gen) {
+      let r = gen.next();
+      while (!r.done) {
+        if (r.value && r.value.run) throw new Blocked(r.value.run);
+        r = gen.next();
+      }
+      return r.value;
+    }
+
+    /* ---- getline, commands and files */
+    stdinReader() {
+      if (this.stdin) return this.stdin;
+      const ctx = this.ctx;
+      this.stdin = ctx.stdin != null ? new Reader(toBin(ctx.stdin)) : new Reader('', () => ctx.readLine('').then((l) => (l == null ? null : toBin(l))));
+      return this.stdin;
+    }
+    getline(n) {
+      let rec; let counts = false;
+      if (n.kind === 'simple') {
+        rec = this.main.next(); counts = true;
+      } else {
+        const name = this.str(this.ev(n.src));
+        const key = (n.kind === 'cmd' ? '|' : '<') + name;
+        let r = this.readers.get(key);
+        if (!r) {
+          if (n.kind === 'cmd') throw new Blocked(() => this.runForReader(name, key));
+          if (name === '-') r = this.stdinReader();
+          else {
+            this.flushFiles();
+            try { r = new Reader(toBin(this.ctx.fs.read(name))); } catch (e) { if (!isFsError(e)) throw e; return -1; }
+          }
+          this.readers.set(key, r);
+        }
+        rec = r.read(this.str(this.g.get('RS')), this);
+        counts = n.kind === 'cmd';
+      }
+      if (rec === null) return 0;
+      if (counts) { this.nr++; if (n.kind === 'simple') this.fnr++; }
+      if (n.lhs) this.store(n.lhs, inputValue(rec)); else this.setRecord(rec);
+      return 1;
+    }
+    async runForReader(cmd, key) {
+      this.sink.flush(); this.flushFiles();
+      const r = await this.ctx.run(['sh', '-c', cmd]);
+      if (r.err) this.ctx.err(r.err);
+      this.readers.set(key, new Reader(toBin(r.out)));
+    }
+    flushFiles() { for (const [name, f] of this.files) if (f.dirty) { this.ctx.fs.write(name, f.buf); f.dirty = false; } }
+    /** Where print writes: stdout, stderr, a file or a command. */
+    write(redir, text) {
+      if (!redir) { this.sink.write(fromBin(text)); return; }
+      const { op, name } = redir;
+      if (op === '|') {
+        const p = this.pipes.get(name);
+        if (p) p.text += text; else { this.sink.flush(); this.pipes.set(name, { text }); }   // starting a command flushes stdout
+        return;
+      }
+      if (name === '/dev/stdout' || name === '-') { this.sink.write(fromBin(text)); return; }
+      if (name === '/dev/stderr') { this.sink.flush(); this.ctx.err(fromBin(text)); return; }
+      let f = this.files.get(name);
+      if (!f) {
+        let buf = '';
+        try {
+          if (op === '>>' && this.ctx.fs.exists(name)) buf = toBin(this.ctx.fs.read(name));
+          this.ctx.fs.write(name, buf);
+        } catch (e) {
+          if (!isFsError(e)) throw e;
+          throw new AwkFatal('cannot open "' + name + '" for output (' + e.message + ')');
+        }
+        f = { buf, dirty: false };
+        this.files.set(name, f);
+      }
+      f.buf += text; f.dirty = true;
+    }
+    /** Feed text to a command. Its output bypasses awk's own buffer, as it does when stdout is not a terminal. */
+    async runPipe(cmd, text) {
+      if (this.ctx.isTTY) this.sink.flush();
+      const r = await this.ctx.run(['sh', '-c', cmd], { stdin: fromBin(text) });
+      if (r.out) this.ctx.out(r.out);
+      if (r.err) this.ctx.err(r.err);
+      return r.code;
+    }
+    system(cmd) {
+      if (this.sysResult && this.sysResult.cmd === cmd) { const c = this.sysResult.code; this.sysResult = null; return c; }
+      throw new Blocked(async () => {
+        this.sink.flush(); this.flushFiles();
+        const r = await this.ctx.run(['sh', '-c', cmd]);
+        if (r.out) this.ctx.out(r.out);
+        if (r.err) this.ctx.err(r.err);
+        this.sysResult = { cmd, code: r.code };
+      });
+    }
+    close(name) {
+      if (this.closeResult && this.closeResult.name === name) { const c = this.closeResult.code; this.closeResult = null; return c; }
+      if (this.pipes.has(name)) {
+        throw new Blocked(async () => {
+          const p = this.pipes.get(name); this.pipes.delete(name);
+          this.closeResult = { name, code: await this.runPipe(name, p.text) };
+        });
+      }
+      let found = false;
+      if (this.files.has(name)) {
+        const f = this.files.get(name);
+        if (f.dirty) this.ctx.fs.write(name, f.buf);
+        this.files.delete(name); found = true;
+      }
+      for (const key of ['<' + name, '|' + name]) if (this.readers.delete(key)) found = true;
+      return found ? 0 : -1;
+    }
+
+    /* ---- built-in functions */
+    builtin(n) {
+      const a = n.args; const name = n.name;
+      switch (name) {
+        case 'length': {
+          if (!a.length) return this.record.length;
+          const v = a[0].type === 'var' || a[0].type === 'local' ? (a[0].type === 'var' ? this.g.get(a[0].name) : this.frame[a[0].idx]) : this.ev(a[0]);
+          return v instanceof AwkArray ? v.size : this.str(this.ev(a[0])).length;
+        }
+        case 'substr': return this.substr(this.str(this.ev(a[0])), toNum(this.ev(a[1])), a.length > 2 ? toNum(this.ev(a[2])) : Infinity);
+        case 'index': { const s = this.str(this.ev(a[0])); return s.indexOf(this.str(this.ev(a[1]))) + 1; }
+        case 'split': return this.split(n);
+        case 'sub': case 'gsub': return this.substitute(n, name === 'gsub');
+        case 'match': {
+          const s = this.str(this.ev(a[0]));
+          const m = this.patternOf(a[1]).exec(s, 0);
+          this.g.set('RSTART', m ? m.index + 1 : 0); this.g.set('RLENGTH', m ? m[0].length : -1);
+          return m ? m.index + 1 : 0;
+        }
+        case 'sprintf': {
+          const vals = a.map((x) => this.ev(x));
+          return sprintf(this.str(vals[0]), vals.slice(1), 'sprintf');
+        }
+        case 'sin': case 'cos': case 'exp': case 'log': case 'sqrt': return MATH1[name](toNum(this.ev(a[0])));
+        case 'atan2': return Math.atan2(toNum(this.ev(a[0])), toNum(this.ev(a[1])));
+        case 'int': return Math.trunc(toNum(this.ev(a[0])));
+        case 'rand': return this.random();
+        case 'srand': {
+          const prev = this.seed;
+          this.seed = a.length ? toNum(this.ev(a[0])) : Math.floor(K.clock.now() / 1000);
+          this.rngState = (Math.floor(this.seed) >>> 0) || 1;
+          return prev;
+        }
+        case 'tolower': return this.str(this.ev(a[0])).replace(/[A-Z]/g, (c) => c.toLowerCase());
+        case 'toupper': return this.str(this.ev(a[0])).replace(/[a-z]/g, (c) => c.toUpperCase());
+        case 'system': return this.system(this.str(this.ev(a[0])));
+        case 'close': return this.close(this.str(this.ev(a[0])));
+        case 'fflush': this.sink.flush(); this.flushFiles(); return 0;
+        case 'systime': return Math.floor(K.clock.now() / 1000);
+        default: return strftime(a.length ? this.str(this.ev(a[0])) : '%a %b %e %H:%M:%S %Z %Y', a.length > 1 ? toNum(this.ev(a[1])) : Math.floor(K.clock.now() / 1000));
+      }
+    }
+    /** mawk 1.3.4-20240123 cuts substr() oddly when the start is below 1: the length grows by the shortfall. */
+    substr(s, m, n) {
+      let start = Math.trunc(m); let len = Math.trunc(n);
+      if (Number.isNaN(start) || Number.isNaN(len)) return '';
+      if (start < 1) { len = len - start; start = 1; }
+      return len <= 0 ? '' : s.substr(start - 1, len);
+    }
+    random() {
+      let t = (this.rngState += 0x6d2b79f5) >>> 0;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+    split(n) {
+      const a = n.args;
+      const s = this.str(this.ev(a[0]));
+      let parts;
+      if (a.length < 3) parts = this.splitBy(s, this.str(this.g.get('FS')), false);
+      else if (a[2].type === 'regex') parts = this.splitRegex(s, a[2].pat);
+      else parts = this.splitBy(s, this.str(this.ev(a[2])), false);
+      const arr = this.arrayOf(a[1]); arr.clear();
+      parts.forEach((p, i) => { arr.ref(String(i + 1), true).v = inputValue(p); });
+      return parts.length;
+    }
+    splitRegex(s, pat) {
+      if (s === '') return [];
+      const out = []; let last = 0;
+      for (let from = 0; from <= s.length;) {
+        const m = pat.exec(s, from);
+        if (!m) break;
+        if (m[0] === '') { from = m.index + 1; continue; }
+        out.push(s.slice(last, m.index)); last = m.index + m[0].length; from = last;
+      }
+      out.push(s.slice(last));
+      return out;
+    }
+    substitute(n, global) {
+      const a = n.args;
+      const pat = this.patternOf(a[0]);
+      const repl = this.str(this.ev(a[1]));
+      const target = a[2] ? (a[2].type === 'group' ? a[2].e : a[2]) : ZERO_FIELD;
+      const s = this.str(this.ev(target));
+      let out = ''; let copy = 0; let pos = 0; let prevEnd = -1; let count = 0;
+      while (pos <= s.length) {
+        const m = pat.exec(s, pos);
+        if (!m) break;
+        const start = m.index; const end = start + m[0].length;
+        if (m[0] === '' && start === prevEnd) { pos = start + 1; continue; }
+        count++;
+        out += s.slice(copy, start) + expandSub(repl, m[0]);
+        copy = end; prevEnd = end; pos = end > start ? end : end + 1;
+        if (!global) break;
+      }
+      if (count) this.store(target, out + s.slice(copy));
+      return count;
+    }
+
+    /* ---- statements */
+    *val(node) {
+      for (;;) {
+        try { return this.ev(node); }
+        catch (e) { if (!(e instanceof Blocked)) throw e; yield { run: e.run }; }
+      }
+    }
+    *eval(node) { return pureNode(node) ? this.ev(node) : yield* this.val(node); }
+
+    *exec(s) {
+      switch (s.type) {
+        case 'block':
+          for (const t of s.body) { const r = yield* this.exec(t); if (r) return r; }
+          return 0;
+        case 'expr': yield* this.eval(s.e); return 0;
+        case 'print': case 'printf': return yield* this.execPrint(s);
+        case 'if':
+          if (this.bool(yield* this.eval(s.cond))) return yield* this.exec(s.then);
+          return s.other ? yield* this.exec(s.other) : 0;
+        case 'while':
+          while (this.bool(yield* this.eval(s.cond))) {
+            if ((++this.steps & 0x3ff) === 0) yield BREATHE;
+            const r = yield* this.exec(s.body);
+            if (r === BRK) break;
+            if (r && r !== CNT) return r;
+          }
+          return 0;
+        case 'do':
+          do {
+            if ((++this.steps & 0x3ff) === 0) yield BREATHE;
+            const r = yield* this.exec(s.body);
+            if (r === BRK) break;
+            if (r && r !== CNT) return r;
+          } while (this.bool(yield* this.eval(s.cond)));
+          return 0;
+        case 'for':
+          if (s.init) yield* this.exec(s.init);
+          while (!s.cond || this.bool(yield* this.eval(s.cond))) {
+            if ((++this.steps & 0x3ff) === 0) yield BREATHE;
+            const r = yield* this.exec(s.body);
+            if (r === BRK) break;
+            if (r && r !== CNT) return r;
+            if (s.step) yield* this.exec(s.step);
+          }
+          return 0;
+        case 'forin': {
+          for (const k of this.arrayOf(s.arr).keys()) {
+            this.store(s.v, k);
+            if ((++this.steps & 0x3ff) === 0) yield BREATHE;
+            const r = yield* this.exec(s.body);
+            if (r === BRK) break;
+            if (r && r !== CNT) return r;
+          }
+          return 0;
+        }
+        case 'break': return BRK;
+        case 'continue': return CNT;
+        case 'next': return NXT;
+        case 'nextfile': return NXF;
+        case 'exit':
+          if (s.e) this.exitCode = Math.trunc(toNum(yield* this.eval(s.e))) & 255;
+          return EXT;
+        case 'return': this.retval = s.e ? yield* this.eval(s.e) : undefined; return RET;
+        case 'delete': {
+          const arr = this.arrayOf(s.arr);
+          if (s.subs) arr.delete(this.subscript(s.subs).key); else arr.clear();
+          return 0;
+        }
+        default: throw new Error('awk: unknown statement ' + s.type);
+      }
+    }
+
+    *execPrint(s) {
+      const vals = [];
+      for (const a of s.args) vals.push(yield* this.eval(a));
+      let redir = null;
+      if (s.redir) redir = { op: s.redir.op, name: this.str(yield* this.eval(s.redir.target)) };
+      if (s.type === 'print') {
+        const text = vals.length ? vals.map((v) => this.outStr(v)).join(this.str(this.g.get('OFS'))) : this.record;
+        this.write(redir, text + this.str(this.g.get('ORS')));
+        return 0;
+      }
+      let text;
+      try { text = sprintf(this.str(vals[0]), vals.slice(1), 'printf'); }
+      catch (e) { if (e instanceof AwkRuntime && e.partial) this.write(redir, e.partial); throw e; }
+      this.write(redir, text);
+      return 0;
+    }
+
+    /** The program: BEGIN actions, the rules for every input record, END actions. */
+    *run() {
+      const prog = this.prog; let exiting = false;
+      for (const b of prog.begin) if ((yield* this.exec(b)) === EXT) { exiting = true; break; }
+      if (!exiting && (prog.rules.length || prog.end.length)) {
+        for (;;) {
+          let rec;
+          for (;;) {
+            try { rec = this.main.next(); break; }
+            catch (e) { if (!(e instanceof Blocked)) throw e; yield { run: e.run }; }
+          }
+          if (rec === null) break;
+          this.nr++; this.fnr++; this.setRecord(rec);
+          let r = 0;
+          for (const rule of prog.rules) {
+            if (!(yield* this.ruleMatches(rule))) continue;
+            r = rule.action ? yield* this.exec(rule.action) : (this.write(null, this.record + this.str(this.g.get('ORS'))), 0);
+            if (r) break;
+          }
+          if (r === EXT) { exiting = true; break; }
+          if (r === NXF) this.main.reader = null;
+        }
+      }
+      for (const e of prog.end) {
+        if ((yield* this.exec(e)) === EXT) break;
+      }
+    }
+    *ruleMatches(rule) {
+      if (!rule.a) return true;
+      if (!rule.b) return this.bool(yield* this.eval(rule.a));
+      if (!rule.active) {
+        if (!this.bool(yield* this.eval(rule.a))) return false;
+        rule.active = true;
+      }
+      if (this.bool(yield* this.eval(rule.b))) rule.active = false;
+      return true;
+    }
+  }
+
+  /** Expand the replacement text of sub/gsub for one match: & is the match, \& a literal ampersand. */
+  function expandSub(repl, match) {
+    if (repl.indexOf('&') < 0 && repl.indexOf('\\') < 0) return repl;
+    let out = '';
+    for (let i = 0; i < repl.length; i++) {
+      const c = repl[i];
+      if (c === '\\' && (repl[i + 1] === '&' || repl[i + 1] === '\\')) out += repl[++i];
+      else if (c === '&') out += match;
+      else out += c;
+    }
+    return out;
+  }
+
+  function mawkRegexMessage(m) {
+    if (/^Unmatched \(/.test(m)) return "missing ')'";
+    if (/^Unmatched \)/.test(m)) return "missing '('";
+    if (/^Unmatched \[/.test(m)) return 'bad class -- [], [^] or [';
+    if (/preceding/.test(m)) return 'missing operand';
+    return m.toLowerCase();
+  }
+
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  /** strftime in UTC (the simulated machines run in UTC). */
+  function strftime(fmt, ts) {
+    const d = new Date(ts * 1000);
+    const p2 = (n) => String(n).padStart(2, '0');
+    const yday = Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86400000) + 1;
+    const h12 = d.getUTCHours() % 12 || 12;
+    const f = {
+      Y: d.getUTCFullYear(), y: p2(d.getUTCFullYear() % 100), m: p2(d.getUTCMonth() + 1), d: p2(d.getUTCDate()), e: String(d.getUTCDate()).padStart(2),
+      H: p2(d.getUTCHours()), M: p2(d.getUTCMinutes()), S: p2(d.getUTCSeconds()), I: p2(h12), p: d.getUTCHours() < 12 ? 'AM' : 'PM',
+      A: DAYS[d.getUTCDay()], a: DAYS[d.getUTCDay()].slice(0, 3), B: MONTHS[d.getUTCMonth()], b: MONTHS[d.getUTCMonth()].slice(0, 3), h: MONTHS[d.getUTCMonth()].slice(0, 3),
+      j: String(yday).padStart(3, '0'), Z: 'UTC', z: '+0000', s: String(Math.floor(ts)), u: d.getUTCDay() || 7, w: d.getUTCDay(), n: '\n', t: '\t', '%': '%',
+    };
+    f.F = f.Y + '-' + f.m + '-' + f.d; f.T = f.H + ':' + f.M + ':' + f.S; f.D = f.m + '/' + f.d + '/' + f.y; f.R = f.H + ':' + f.M;
+    f.c = f.a + ' ' + f.b + ' ' + f.e + ' ' + f.T + ' ' + f.Y; f.x = f.D; f.X = f.T;
+    return fmt.replace(/%(.)/g, (m, c) => (f[c] != null ? String(f[c]) : m));
+  }
+
+  /* ----------------------------------------------------------------- command */
+
+  const AWK_USAGE = 'Usage: mawk [Options] [Program] [file ...]\n\nProgram:\n' +
+    '    The -f option value is the name of a file containing program text.\n' +
+    '    If no -f option is given, a "--" ends option processing; the following\n    parameters are the program text.\n\n' +
+    'Options:\n    -f program-file  Program  text is read from file instead of from the\n                     command-line.  Multiple -f options are accepted.\n' +
+    '    -F value         sets the field separator, FS, to value.\n    -v var=value     assigns value to program variable var.\n' +
+    '    --               unambiguous end of options.\n\n' +
+    '    Implementation-specific options are prefixed with "-W".  They can be\n    abbreviated:\n\n' +
+    '    -W version       show version information and exit.\n    -W compat        pre-POSIX 2001.\n' +
+    '    -W dump          show assembler-like listing of program and exit.\n    -W help          show this message and exit.\n' +
+    '    -W interactive   set unbuffered output, line-buffered input.\n    -W exec file     use file as program as well as last option.\n' +
+    '    -W posix         stricter POSIX checking.\n    -W random=number set initial random seed.\n' +
+    '    -W sprintf=number adjust size of sprintf buffer.\n    -W usage         show this message and exit.\n';
+  const AWK_VERSION = 'mawk 1.3.4 20240123\nCopyright 2008-2023,2024, Thomas E. Dickey\nCopyright 1991-1996,2014, Michael D. Brennan\n\n' +
+    'random-funcs:       arc4random_stir/arc4random\nregex-funcs:        internal\n\ncompiled limits:\nsprintf buffer      8192\nmaximum-integer     9223372036854775808\n';
+
+  /** mawk's command line: options may be glued to their values (-F: -vx=1 -fprog.awk). */
+  function parseAwkArgs(args) {
+    const o = { progFiles: [], assigns: [], fs: null, program: null, operands: [], warnings: [] };
+    let i = 0;
+    const value = (flag, glued) => {
+      if (glued) return glued;
+      if (i + 1 >= args.length) return { error: 'option -' + flag + ' lacks argument' };
+      return args[++i];
+    };
+    for (; i < args.length; i++) {
+      const a = args[i];
+      if (a === '--') { i++; break; }
+      if (a === '--version') { o.version = true; continue; }
+      if (a === '--help' || a === '--usage') { o.help = true; continue; }
+      if (a[0] !== '-' || a === '-') break;
+      const flag = a[1]; const glued = a.slice(2);
+      if (flag === 'f' || flag === 'F' || flag === 'v' || flag === 'W') {
+        const v = value(flag, glued);
+        if (typeof v === 'object') return { error: v.error };
+        if (flag === 'f') o.progFiles.push(v);
+        else if (flag === 'F') o.fs = v;
+        else if (flag === 'v') o.assigns.push(v);
+        else if (/^v/.test(v)) o.version = true;
+        else if (/^[hu]/.test(v)) o.help = true;
+        else if (!/^(c|d|e|i|p|r|s)/.test(v)) o.warnings.push('vacuous option: -W "' + v + '"');
+        continue;
+      }
+      return { error: 'not an option: ' + a };
+    }
+    o.operands = args.slice(i);
+    if (!o.progFiles.length && o.program === null && o.operands.length) o.program = o.operands.shift();
+    return o;
+  }
+
+  async function runAwk(ctx) {
+    const name = ctx.name || 'awk';
+    const o = parseAwkArgs(ctx.args);
+    if (o.error) { ctx.err(name + ': ' + o.error + '\n'); return 2; }
+    for (const w of o.warnings) ctx.err(name + ': ' + w + '\n');
+    if (o.version) { ctx.out(AWK_VERSION); return 0; }
+    if (o.help) { ctx.out(AWK_USAGE); return 0; }
+    if (o.program === null && !o.progFiles.length) { ctx.err(AWK_USAGE); return 0; }
+    let source = o.program;
+    if (o.progFiles.length) {
+      source = '';
+      for (const f of o.progFiles) {
+        try { source += (f === '-' ? await stdinText(ctx) : ctx.fs.read(f)) + '\n'; }
+        catch (e) {
+          if (!isFsError(e)) throw e;
+          ctx.err(name + ': cannot open "' + f + '" (' + e.message + ')\n');
+          return 2;
+        }
+      }
+    }
+    const assigns = [];
+    for (const a of o.assigns) {
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(a);
+      if (!m) { ctx.err(name + ': improper assignment: -v ' + a + '\n'); return 2; }
+      assigns.push([m[1], inputValue(unescapeArg(toBin(m[2])))]);
+    }
+    let prog;
+    try { prog = new AwkParser(toBin(source)).parseProgram(); }
+    catch (e) {
+      if (!(e instanceof AwkSyntax)) throw e;
+      ctx.err(name + ': line ' + e.line + ': ' + e.message.replace('{NAME}', name) + '\n');
+      return 2;
+    }
+
+    const sink = new Sink(ctx);
+    const rt = new AwkInterp(ctx, prog, sink, name);
+    const argv = new AwkArray();
+    [name].concat(o.operands).forEach((a, i) => { argv.ref(String(i), true).v = inputValue(toBin(a)); });
+    rt.g.set('ARGV', argv); rt.g.set('ARGC', argv.size);
+    if (o.fs !== null) rt.g.set('FS', unescapeArg(toBin(o.fs)));
+    for (const [k, v] of assigns) rt.setVar(k, v);
+
+    try {
+      await driveAwk(rt);
+      await closePipes(rt);
+      return rt.exitCode;
+    } catch (e) {
+      if (e instanceof AwkRuntime) {
+        sink.flush();
+        ctx.err(name + ': run time error: ' + e.message + '\n\tFILENAME="' + rt.str(rt.g.get('FILENAME')) + '" FNR=' + rt.fnr + ' NR=' + rt.nr + '\n');
+        return 2;
+      }
+      if (e instanceof AwkFatal) { sink.flush(); ctx.err(name + ': ' + e.message + '\n'); return 2; }
+      throw e;
+    } finally {
+      rt.flushFiles();
+      sink.flush();
+    }
+  }
+
+  /** Run the interpreter's generator, waiting where it asks to (commands, terminal input, Ctrl-C checks). */
+  async function driveAwk(rt) {
+    const gen = rt.run();
+    let r = gen.next();
+    while (!r.done) {
+      if (r.value === BREATHE) { rt.sink.flush(); await breathe(rt.ctx); }
+      else await r.value.run();
+      r = gen.next();
+    }
+  }
+  /** At exit awk flushes its output, then lets the commands it fed finish. */
+  async function closePipes(rt) {
+    rt.flushFiles();
+    for (const [cmd, p] of Array.from(rt.pipes)) { await rt.runPipe(cmd, p.text); rt.pipes.delete(cmd); }
+  }
+
+  K.cmd.register({
+    name: 'awk', aliases: ['mawk', 'nawk'], pkg: 'mawk', section: 1, path: '/usr/bin/awk',
+    summary: 'pattern scanning and text processing language',
+    synopsis: "awk [-F value] [-v var=value] [--] 'program text' [file ...]\nawk [-F value] [-v var=value] [-f program-file] [--] [file ...]",
+    man: manPage({
+      desc: 'awk reads each input file (or standard input) one record at a time, usually a line, and splits it into fields\n$1, $2, ... $NF. For every record it runs the rules of the program: a pattern followed by an action in braces.\n' +
+        'Without a pattern an action runs for every record; without an action a matching record is printed.\n\n' +
+        'Patterns: BEGIN and END, /regex/, any expression, and ranges "pattern1, pattern2". Statements include print,\nprintf, if/else, while, do, for, for (k in array), delete, next and exit. Built-in variables: NR NF FNR FS OFS\nORS RS FILENAME. Functions: length substr index split sub gsub match sprintf tolower toupper int sqrt sin cos\natan2 log exp rand srand system close, and your own with "function name(args) { ... }".\n\n' +
+        'This is mawk, the awk that Kali uses by default.',
+      opts: [
+        ['-F value', 'Set the field separator FS: a single character, or a regular expression.'],
+        ['-v var=value', 'Assign value to var before the program starts. May be repeated.'],
+        ['-f program-file', 'Read the program from a file instead of the command line. May be repeated.'],
+        ['--', 'End of options.'],
+        ['-W version, --version', 'Show the version and exit.'],
+      ],
+      exit: '0 on success, 2 for a syntax error, a run time error or an unreadable file. exit N sets the status.',
+      examples: [
+        ["awk -F: '{print $1, $NF}' /etc/passwd", 'Print the user name and the shell of each account.'],
+        ["awk '$3 > 100' fruit.txt", 'Print the lines whose third field is larger than 100.'],
+        ["awk '{c[$1]++} END {for (k in c) print c[k], k}' access.log", 'Count how often each first field occurs.'],
+      ],
+    }),
+    run: runAwk,
+  });
+
 })(typeof globalThis !== 'undefined' ? globalThis : this);
