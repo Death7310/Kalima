@@ -1363,6 +1363,37 @@ group('inline terminal: the wide layout is unchanged', async ({ browser }) => {
   } finally { await page.context().close(); }
 });
 
+group('inline terminal: finger-sized controls, and a very short view gives the terminal everything', async ({ browser }) => {
+  const page = await dockPage(browser, { width: 360, height: 740 });
+  try {
+    await page.getByRole('button', { name: 'New terminal tab' }).tap();
+    await page.waitForFunction(() => K.app.tabs.length === 2);
+    for (const sel of ['.k-dock-toggle', '.k-dock-btn', '.k-newtab', '.k-termtab-x']) {
+      const r = await rect(page, sel);
+      assert.ok(r.height >= 28 && r.width >= 28 && (sel === '.k-termtab-x' || (r.height >= 32 && r.width >= 32)), sel + ' is big enough to tap: ' + r.width + 'x' + r.height);
+    }
+    // the handle's touch target reaches beyond its 22px strip
+    const sp = await rect(page, '.k-dock-split');
+    const mid = sp.y + 11;
+    for (const dy of [-10, 10]) {
+      assert.equal(await page.evaluate(([x, y]) => !!document.elementFromPoint(x, y).closest('.k-dock-split'), [180, mid + dy]), true, 'the handle is hit at ' + dy);
+    }
+    await page.setViewportSize({ width: 360, height: 240 });        // landscape phone with the keyboard up
+    await page.waitForFunction(() => document.querySelector('.k-app').classList.contains('is-lessonless'));
+    await page.waitForTimeout(200);
+    const dock = await dockBox(page);
+    const keys = await rect(page, '.k-term:not([hidden]) .kt-keys'); const cur = await rect(page, '.k-term:not([hidden]) .kt-cursor');
+    assert.ok(keys.y + keys.height <= 240 + 1 && keys.height > 20, 'the key bar is inside the view');
+    assert.ok(cur.y >= dock.y && cur.y + cur.height <= keys.y + 1, 'the prompt is visible above the key bar');
+    assert.equal(await page.locator('#k-panel-lesson').isHidden(), true);
+    assert.match(await page.locator('.k-task').innerText(), /STEP 1\/6/i, 'the one-line step summary stays');
+    assert.ok(dock.y + dock.height <= 240 + 1, 'the dock does not run past the bottom edge');
+    await page.setViewportSize({ width: 360, height: 740 });
+    await page.waitForFunction(() => !document.querySelector('.k-app').classList.contains('is-lessonless'));
+    assert.equal(await page.locator('#k-panel-lesson').isVisible(), true, 'the lesson comes back with the room');
+  } finally { await page.context().close(); }
+});
+
 /* ------------------------------------------------------------------- runner */
 const browser = await chromium.launch();
 let failed = 0;

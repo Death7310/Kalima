@@ -94,12 +94,14 @@
  */
 .k-dock-split { display: none; }
 .k-head-end { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.k-dock-toggle { min-height: 30px; padding: 0 0.7em; font-size: 0.82rem; color: var(--k-muted); }
+.k-dock-toggle { min-height: 36px; padding: 0 0.7em; font-size: 0.82rem; color: var(--k-muted); }
 .k-dock-toggle .k-icon { width: 16px; height: 16px; }
 .k-dock-toggle[aria-pressed="true"] { border-color: rgba(106, 169, 255, 0.5); background: var(--k-accent-soft); color: var(--k-accent); }
-.k-dock-btn { flex: none; min-height: 26px; margin: 0 0 4px auto; padding: 0 0.6em; font-size: 0.78rem; color: var(--k-muted); }
+.k-dock-btn { flex: none; min-height: 32px; margin: 0 0 2px auto; padding: 0 0.6em; font-size: 0.78rem; color: var(--k-muted); }
 .k-dock-btn .k-icon { width: 14px; height: 14px; }
 @media (max-width: 899.98px) {
+  .k-termbar .k-newtab { width: 32px; height: 32px; margin-bottom: 2px; }
+  .k-termbar .k-termtab-x { width: 28px; height: 28px; margin-right: 2px; }
   .has-dock .k-lesson { flex: 1 1 0; width: 100%; min-height: 0; }
   .has-dock .k-work { display: flex; flex: none; width: 100%; height: var(--k-dock-h, 40%); }
   .has-dock .k-dock-split {
@@ -110,6 +112,7 @@
     content: ""; position: absolute; left: 50%; top: 9px; width: 44px; height: 4px; margin-left: -22px; border-radius: 2px;
     background: var(--k-line-strong); transition: background var(--k-ease);
   }
+  .k-dock-split::before { content: ""; position: absolute; left: 0; right: 0; top: -12px; bottom: -4px; }      /* a taller target for a finger */
   .k-dock-split:hover::after, .k-dock-split:focus-visible::after, .is-resizing .k-dock-split::after { background: var(--k-accent); }
   .k-dock-split:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--k-accent); }
   .is-resizing, .is-resizing * { user-select: none; -webkit-user-select: none; }
@@ -124,8 +127,8 @@
   .has-dock.is-short .k-panel-head { padding-top: 6px; padding-bottom: 6px; }
   .has-dock.is-short .k-panel-head .k-bar { display: none; }
   /* a pager or editor gets the whole view and the split comes back when it closes */
-  .is-takeover .k-lesson, .is-takeover .k-dock-split { display: none; }
-  .is-takeover .k-work { flex: 1 1 auto; height: auto; }
+  .is-takeover .k-lesson, .is-takeover .k-dock-split, .is-lessonless .k-lesson, .is-lessonless .k-dock-split { display: none; }
+  .is-takeover .k-work, .is-lessonless .k-work { flex: 1 1 auto; height: auto; }
   .is-takeover .k-dock-btn { display: none; }
 }
 

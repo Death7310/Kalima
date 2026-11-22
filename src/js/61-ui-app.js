@@ -15,7 +15,7 @@
 
   const WIDE = '(min-width: 900px)';     // keep in step with the media queries in 20-app.css
   const MAX_TABS = 4;
-  const DOCK_ROWS = 4; const DOCK_LESSON_MIN = 72; const DOCK_STEP = 24; const SHORT_VIEW = 460;   // narrow dock: smallest terminal (rows), smallest lesson text area (px), arrow-key step, height below which the keyboard is assumed up
+  const DOCK_ROWS = 4; const DOCK_LESSON_MIN = 72; const DOCK_LESSON_GIVE_UP = 70; const DOCK_STEP = 24; const SHORT_VIEW = 460;   // narrow dock: smallest terminal (rows), smallest lesson text area (px), arrow-key step, height below which the keyboard is assumed up
   const SIDE_MIN = 300; const SIDE_MAX = 720; const SIDE_DEFAULT = 420; const WORK_MIN = 380;
   const CELEBRATE_MS = 1100;             // how long a finished step shows its success state before the next one opens
   const SPEEDS = [
@@ -225,7 +225,7 @@
     /** Size the dock: the saved height, kept inside limits that leave both parts usable. */
     _layoutDock() {
       const el = this.el;
-      if (!this._dockShown() || el.classList.contains('is-takeover')) { el.classList.remove('is-short'); return; }
+      if (!this._dockShown() || el.classList.contains('is-takeover')) { el.classList.remove('is-short', 'is-lessonless'); return; }
       const bodyH = this.bodyEl.clientHeight;
       if (!bodyH) return;
       el.classList.toggle('is-short', bodyH < SHORT_VIEW);
@@ -233,7 +233,10 @@
       const keys = term && !term.keys.hidden ? term.keys.offsetHeight : 0;
       const task = this.taskEl.hidden ? 0 : this.taskEl.offsetHeight;
       const termMin = Math.ceil(this.btnNewTab.parentNode.offsetHeight + task + 17 + DOCK_ROWS * lh + keys);
-      const lessonMin = this.lessonHead.offsetHeight + DOCK_LESSON_MIN;
+      // a very short view (landscape phone with the keyboard up): a sliver of lesson is no use, so the terminal and the step summary get all of it
+      const lessonless = bodyH - this.dockSplitEl.offsetHeight - termMin < DOCK_LESSON_GIVE_UP;
+      el.classList.toggle('is-lessonless', lessonless);
+      const lessonMin = (this.lessonHead.offsetHeight || 46) + DOCK_LESSON_MIN;
       const max = Math.max(termMin, bodyH - this.dockSplitEl.offsetHeight - lessonMin);
       const want = this.state.dockH == null ? Math.round(bodyH * 0.42) : this.state.dockH;
       const px = Math.round(Math.max(termMin, Math.min(max, want)));
