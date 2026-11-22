@@ -269,7 +269,7 @@ test('gzip error texts and stdin handling', async () => {
 
 /* ------------------------------------------------------------ zip, unzip */
 
-const ZTREE = 'mkdir -p /tmp/z/p/q; cd /tmp/z; echo hi > p/a.txt; seq 1 300 > p/q/b; chmod 600 p/a.txt; touch -d "2026-03-04 05:06:07" p/a.txt';
+const ZTREE = 'mkdir -p /tmp/z/p/q; cd /tmp/z; echo hi > p/a.txt; seq 1 300 > p/q/b; chmod 600 p/a.txt; touch -d "2026-03-04 05:06:08" p/a.txt';
 
 test('zip -r, unzip -l/-lv/-t/-p and the adding messages', async () => {
   const { sh, out } = await setup();
@@ -293,7 +293,7 @@ test('unzip extracts with -d, restores modes and times, and handles existing fil
   await sh(ZTREE + '; zip -qr x.zip p');
   const u = await sh('unzip x.zip -d out');
   assert.equal(u.out, 'Archive:  x.zip\n   creating: out/p/\n extracting: out/p/a.txt' + ' '.repeat(13) + '\n   creating: out/p/q/\n  inflating: out/p/q/b' + ' '.repeat(15) + '\n');
-  assert.equal(await out('stat -c "%a %y" out/p/a.txt'), '600 2026-03-04 05:06:07.000000000 +0000\n');
+  assert.equal(await out('stat -c "%a %y" out/p/a.txt'), '600 2026-03-04 05:06:08.000000000 +0000\n');
   assert.equal(await out('cat out/p/a.txt'), 'hi\n');
   assert.equal((await sh('unzip -n x.zip -d out')).out, 'Archive:  x.zip\n');
   assert.match((await sh('unzip -o x.zip -d out')).out, /extracting: out\/p\/a.txt/);
