@@ -1019,12 +1019,212 @@
     refs: ['ss(8)', 'systemctl(1)', 'services(5)', 'RFC 9293 (TCP)', 'RFC 768 (UDP)', 'RFC 6335 (service names and port numbers)', 'Kali Linux Revealed, ch. 5'],
   };
 
+  /* --------------------------------------------------------- troubleshoot */
+  const eth0State = () => { const i = K.kali.ifaces.find((x) => x.name === 'eth0'); return i ? i.state : null; };
+  const troubleshootLesson = {
+    id: 'net-troubleshoot',
+    title: 'Troubleshooting from the bottom up',
+    minutes: 12,
+    objectives: [
+      'Test a connection layer by layer: link, address, gateway, remote address, name, service',
+      'Tell apart the failures that "Network is unreachable", "Temporary failure in name resolution" and "Name or service not known" describe',
+      'Switch an interface off and on with `ip link set` and recognize what an interface that is down looks like',
+    ],
+    intro: T(
+      'When something on the network does not work, guessing wastes time. Each layer depends on the one below it: a name cannot be resolved without a route to the name server, a route needs an address, and an address needs a working link. If you test from the bottom and stop at the first failure, that failure is where the fault is.',
+      '',
+      'On an engagement this separates "the target is filtered" from "my own workstation lost its connection", and the two need very different notes. In this lesson you check each layer while everything works, then switch the interface off on purpose and watch how each check fails. The last step puts it back.'
+    ),
+    steps: [
+      {
+        id: 'link-addr',
+        prompt: T(
+          'Start at the bottom. The first two layers are the link (is the interface switched on and connected?) and the address (does it have one?). One command shows both:',
+          '',
+          '```',
+          'ip -br a',
+          '```',
+          '',
+          'Read the state of `eth0` in the second column. `UP` means the link is up. Then read the third column for the IPv4 address with its prefix length.'
+        ),
+        hint: 'Type `ip -br a`.' + IF_DOWN,
+        solution: 'ip -br a',
+        check: { cmd: 'ip', out: /^eth0\s+UP\s+10\.10\.10\.5\/24/m },
+      },
+      {
+        id: 'gateway-addr',
+        prompt: T(
+          'Next layer: the gateway, the router that carries traffic out of your segment. Print the routing table and read the line that starts with `default`.',
+          '',
+          'Type the address of the default gateway into the box below.'
+        ),
+        hint: '`ip route` prints the table. The gateway follows the word `via`.',
+        solution: '10.10.10.1',
+        answer: /^(via\s+)?10\.10\.10\.1$/i,
+      },
+      {
+        id: 'ping-gw',
+        prompt: T(
+          'Now test the gateway itself with one ping, which the lesson on `ping` covered:',
+          '',
+          '```',
+          'ping -c 2 10.10.10.1',
+          '```',
+          '',
+          'Replies with `ttl=64` and a time well under a millisecond mean the first hop is healthy. If this fails, nothing beyond it can work, so there is no point testing further out.'
+        ),
+        hint: 'Use `ping -c 2` followed by the gateway address.',
+        solution: 'ping -c 2 10.10.10.1',
+        check: { cmd: 'ping', out: /bytes from 10\.10\.10\.1: icmp_seq=1 / },
+      },
+      {
+        id: 'ping-remote',
+        prompt: T(
+          'The gateway answers, so test something beyond it. Public DNS server `8.8.8.8` in the simulated internet is a common choice, because you give it an address and no name is involved. Ping it twice.',
+          '',
+          'Note the `ttl`. It is lower than the gateway\'s 64, because the packets crossed several routers on the way back.'
+        ),
+        hint: '`ping -c 2 8.8.8.8`.',
+        solution: 'ping -c 2 8.8.8.8',
+        check: { cmd: 'ping', out: /bytes from 8\.8\.8\.8: icmp_seq=1 / },
+      },
+      {
+        id: 'resolve',
+        prompt: T(
+          'Names come next. Programs ask the resolver to turn a name into an address, and the resolver asks the name server listed in `/etc/resolv.conf`. Test that path with the same lookup that most programs use:',
+          '',
+          '```',
+          'getent hosts example.com',
+          '```',
+          '',
+          'The output is an address followed by the name. Using an address in the previous step and a name here lets you tell a routing fault from a naming fault.'
+        ),
+        hint: 'Type `getent hosts example.com`. `ping -c 1 example.com` also resolves the name.',
+        solution: 'getent hosts example.com',
+        check: { any: [{ cmd: 'getent', out: /^\d+\.\d+\.\d+\.\d+\s+example\.com/m }, { cmd: 'ping', out: /PING example\.com \(\d+\.\d+\.\d+\.\d+\)/ }] },
+      },
+      {
+        id: 'service',
+        prompt: T(
+          'The top layer is the service. The lab intranet server at `10.10.10.10` runs a web server. Ask for just the response headers:',
+          '',
+          '```',
+          'curl -sI http://10.10.10.10',
+          '```',
+          '',
+          '`HTTP/1.1 200 OK` on the first line means a program is listening and answering. Every layer under it works too, or you would not have got here. This is your baseline: all six checks pass.'
+        ),
+        hint: 'Type `curl -sI http://10.10.10.10`. `-s` is silent and `-I` fetches the headers only.',
+        solution: 'curl -sI http://10.10.10.10',
+        check: { cmd: 'curl', out: /^HTTP\/1\.1 200/m },
+      },
+      {
+        id: 'down',
+        prompt: T(
+          'Now create a fault on purpose, on your own workstation in the lab. Switch the interface off:',
+          '',
+          '```',
+          'sudo ip link set eth0 down',
+          '```',
+          '',
+          'The command prints nothing. Remember to bring the interface back up at the end. Real interfaces go down for the same reason in real life: a cable is pulled, a driver fails, or someone runs this command.'
+        ),
+        hint: 'Type `sudo ip link set eth0 down` and the password `kali`.',
+        solution: 'sudo ip link set eth0 down',
+        input: ['kali'],
+        check: { cmd: 'ip', fn: () => eth0State() === 'DOWN' },
+      },
+      {
+        id: 'ping-gw-down',
+        prompt: T(
+          'Run the same checks again from the bottom. First `ip -br a` would now show `eth0` as `DOWN`, and `ip route` prints nothing at all, because routes through a down interface are removed.',
+          '',
+          'Now ping the gateway, one packet:',
+          '',
+          '```',
+          'ping -c 1 10.10.10.1',
+          '```',
+          '',
+          'Read the message. `Network is unreachable` is different from "Destination Host Unreachable" in the lesson on `ping`. There the kernel tried to reach a local host and got no answer. Here it has no route and sends nothing. The fault is on your side.'
+        ),
+        hint: 'Type `ping -c 1 10.10.10.1`.',
+        solution: 'ping -c 1 10.10.10.1',
+        check: { cmd: 'ping', out: /Network is unreachable/ },
+      },
+      {
+        id: 'name-down',
+        prompt: T(
+          'Try the name check as well:',
+          '',
+          '```',
+          'ping -c 1 example.com',
+          '```',
+          '',
+          'The error is `Temporary failure in name resolution`, which is not the `Name or service not known` you saw for a name that does not exist. "Temporary failure" means the resolver could not reach a name server to ask. "Not known" means it asked and the answer was that no such name exists.',
+          '',
+          'The visible symptom is a name problem, but the cause is two layers lower. That is why you test from the bottom up.'
+        ),
+        hint: 'Type `ping -c 1 example.com`.',
+        solution: 'ping -c 1 example.com',
+        check: { cmd: 'ping', out: /Temporary failure in name resolution/ },
+      },
+      {
+        id: 'up',
+        prompt: T(
+          'Repair the fault. Switch the interface back on, with the same command and `up` in place of `down`. Then check the result with `ip -br a` (state `UP`) and the gateway ping if you like.',
+          '',
+          'This step passes only when `eth0` is up again. The lessons after this one expect it to be.'
+        ),
+        hint: 'Run `sudo ip link set eth0 up`.',
+        solution: 'sudo ip link set eth0 up',
+        input: ['kali'],
+        check: { cmd: 'ip', fn: () => eth0State() === 'UP' },
+      },
+    ],
+    quiz: [
+      {
+        q: 'You can ping 10.10.10.1 but `ping -c 1 example.com` fails with "Temporary failure in name resolution". Where do you look next?',
+        choices: [
+          'At the link, because the cable must be loose',
+          'At the name server in /etc/resolv.conf: can you reach it, and is it answering?',
+          'At the web server, because it has stopped',
+          'At the MAC address of eth0',
+        ],
+        answer: 1,
+        why: 'The gateway answers, so link, address and gateway are fine. A name lookup that cannot reach its name server fails exactly this way, so check the server address and whether it is reachable.',
+      },
+      {
+        q: 'What is the difference between "Network is unreachable" and "Destination Host Unreachable" from ping?',
+        choices: [
+          'There is none; they are two names for the same message',
+          'The first means the machine has no route to send the packet; the second means it tried a local address and nobody answered',
+          'The first means the target dropped ICMP; the second means the target is switched off',
+          'The first comes from the gateway; the second comes from DNS',
+        ],
+        answer: 1,
+        why: 'With no matching route, your own kernel refuses to send. "Destination Host Unreachable" appears when the packet was sent on a local segment and address resolution found no host.',
+      },
+      {
+        q: 'After `sudo ip link set eth0 down`, what does `ip route` print on this workstation?',
+        choices: [
+          'The same two routes as before',
+          'Only the default route',
+          'Nothing, because the routes that used eth0 are removed',
+          'An error, because eth0 no longer exists',
+        ],
+        answer: 2,
+        why: 'Routes through an interface that is down cannot be used, so the kernel removes them. They return when the interface is switched on again.',
+      },
+    ],
+    refs: ['ip-link(8)', 'ip-route(8)', 'ping(8)', 'getent(1)', 'resolv.conf(5)', 'Kali Linux Revealed, ch. 5'],
+  };
+
   K.lessons.register({
     id: 'net',
     title: 'Networking fundamentals',
     order: 60,
     summary: 'Read your own addresses and routes, test reachability with ping, follow the path a packet takes, see which ports are listening, and find a network fault by working upward from the cable.',
-    lessons: [addressesLesson, routesLesson, pingLesson, pathLesson, portsLesson],
+    lessons: [addressesLesson, routesLesson, pingLesson, pathLesson, portsLesson, troubleshootLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
