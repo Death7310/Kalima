@@ -365,7 +365,7 @@
         ),
         hint: '`kill`, a space, then `%` and the job number that `jobs` shows.',
         solution: 'kill %1',
-        testSolution: 'sleep 300 & kill %1',
+        testSolution: '(sleep 300 & kill %1)',
         check: { cmd: 'kill', argsRe: /%\d+/, exit: 0, not: { cmd: 'kill', argsRe: KILL_SIGNAL } },
       },
       {
@@ -414,7 +414,7 @@
         ),
         hint: 'Start the job with `sleep 900 &`. Then type `kill -KILL %1`, with the job number the shell printed in brackets.',
         solution: 'kill -KILL %1',
-        testSolution: 'sleep 900 & kill -KILL %1',
+        testSolution: '(sleep 900 & kill -KILL %1)',
         check: { any: [
           { cmd: 'kill', argsRe: KILL_SIGNAL, exit: 0, all: [{ cmd: 'kill', argsRe: /%\d+\s*$/ }] },
           { cmd: 'kill', argsRe: KILL_SIGNAL, exit: 0, fn: killedJobByPid },
