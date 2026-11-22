@@ -490,12 +490,211 @@
     refs: ['md5sum(1)', 'sha256sum(1)', 'sha1sum(1)', 'diff(1)', 'NIST FIPS 180-4 (Secure Hash Standard)', 'RFC 6151 (updated security considerations for MD5)'],
   };
 
+  /* ----------------------------------------------------------------- verify */
+  const verifyLesson = {
+    id: 'data-verify',
+    title: 'Verifying a download',
+    minutes: 11,
+    objectives: [
+      'Verify files against a checksum file with `sha256sum -c` and read `OK` and `FAILED`',
+      'Tell a damaged or altered file from a good one and recover from it',
+      'Check only the files you actually have with `--ignore-missing`',
+      'Explain why Kali publishes a signed `SHA256SUMS` file and what the signature adds',
+    ],
+    intro: T(
+      'You will download disk images, tools and updates for as long as you do this work, and a download can be damaged on the way or replaced by someone who wants you to run their version. A checksum is how you tell: the publisher lists the expected digest of every file, and you compute the digest of what you received and compare.',
+      '',
+      '`sha256sum -c` does the comparing for you. In this lesson you check a small training release, damage one file, and read the failure. The last step explains the part a checksum cannot do alone, which is why real Kali images are checked against a signed file.'
+    ),
+    steps: [
+      {
+        id: 'copy',
+        prompt: T(
+          'The release is stored read-only in `' + RELEASE + '`. Copy it into your own practice folder so that you can change files without touching the original:',
+          '',
+          '```',
+          'mkdir -p ~/practice/data',
+          'cp -r ' + RELEASE + ' ~/practice/data/',
+          '```',
+          '',
+          '`mkdir -p` creates the folder and does not complain if it exists. `cp -r` copies a folder and everything in it. Repeating this step later restores the originals.'
+        ),
+        hint: 'Create `~/practice/data` with `mkdir -p`, then use `cp -r` with the release folder as the source and `~/practice/data/` as the destination.',
+        solution: 'mkdir -p ~/practice/data && cp -r ' + RELEASE + ' ~/practice/data/',
+        check: { file: { path: WORK + '/release/SHA256SUMS', exists: true, type: 'file' } },
+      },
+      {
+        id: 'sums',
+        prompt: T(
+          'Go into the copy and read the checksum file that came with it:',
+          '',
+          '```',
+          'cd ~/practice/data/release',
+          'cat SHA256SUMS',
+          '```',
+          '',
+          'Each line is a digest, two spaces, then a file name: exactly the format that `sha256sum` prints, which is what lets `sha256sum` read it back.'
+        ),
+        hint: 'Change into `~/practice/data/release`, then print `SHA256SUMS` with `cat`.',
+        solution: 'cd ~/practice/data/release && cat SHA256SUMS',
+        check: { cmd: 'cat', cwd: WORK + '/release', out: /depot-agent\.sh/ },
+      },
+      {
+        id: 'count',
+        prompt: 'How many files does `SHA256SUMS` list?',
+        hint: 'Count the lines in the output. Each line is one file.',
+        solution: '3',
+        answer: /^(3|three)( files)?$/i,
+      },
+      {
+        id: 'check',
+        prompt: T(
+          'Now let the tool do the comparison. The option `-c` (*check*) reads the digests from the file, computes each digest again and reports:',
+          '',
+          '```',
+          'sha256sum -c SHA256SUMS',
+          '```',
+          '',
+          'Each file is reported as `OK` when its digest matches. The exit status is 0 only when every file matched, which makes the command easy to use in scripts.'
+        ),
+        hint: 'Run `sha256sum` with `-c` and the name of the checksum file.',
+        solution: 'sha256sum -c SHA256SUMS',
+        check: { cmd: 'sha256sum', args: ['-c'], exit: 0, out: /depot-agent\.conf: OK/ },
+      },
+      {
+        id: 'tamper',
+        prompt: T(
+          'Now simulate a bad copy. Real causes are a broken transfer or a file replaced on the way; here you add one line to the configuration yourself:',
+          '',
+          '```',
+          'echo "# edited" >> depot-agent.conf',
+          '```',
+          '',
+          '`>>` appends to the file. One short comment line, which would not change how the program works, is enough to change its digest.'
+        ),
+        hint: 'Use `echo` with `>>` to append text to `depot-agent.conf`.',
+        solution: 'echo "# edited" >> depot-agent.conf',
+        check: { file: { path: WORK + '/release/depot-agent.conf', contains: /# edited/ } },
+      },
+      {
+        id: 'failed',
+        prompt: T(
+          'Run the same check again:',
+          '',
+          '```',
+          'sha256sum -c SHA256SUMS',
+          '```',
+          '',
+          'Read the result line by line. Files that still match say `OK`; the changed one says `FAILED`. At the end `sha256sum` prints a warning counting the mismatches, and the exit status is 1.'
+        ),
+        hint: 'The command is the same as in the earlier check step.',
+        solution: 'sha256sum -c SHA256SUMS',
+        check: { cmd: 'sha256sum', args: ['-c'], exit: 1, out: /depot-agent\.conf: FAILED/ },
+      },
+      {
+        id: 'which',
+        prompt: 'Which file failed the check? Type its name.',
+        hint: 'Look for the line that ends in `FAILED`.',
+        solution: 'depot-agent.conf',
+        answer: /^(\.\/)?depot-agent\.conf$/i,
+      },
+      {
+        id: 'restore',
+        prompt: T(
+          'A `FAILED` file is not to be installed or run. The correct response is to get a fresh copy from the source and check it again, not to edit the file until it passes. Here the original is in `' + RELEASE + '`, so copy the configuration back and verify:',
+          '',
+          '```',
+          'cp ' + RELEASE + '/depot-agent.conf . && sha256sum -c SHA256SUMS',
+          '```',
+          '',
+          'All three lines should read `OK` again. If a fresh copy still failed, the problem would be at the source, and that is worth reporting.'
+        ),
+        hint: 'Copy `depot-agent.conf` from the release folder to the current directory (`.`), then run the check again.',
+        solution: 'cp ' + RELEASE + '/depot-agent.conf . && sha256sum -c SHA256SUMS',
+        check: { cmd: 'sha256sum', args: ['-c'], exit: 0, out: /depot-agent\.conf: OK/ },
+      },
+      {
+        id: 'missing',
+        prompt: T(
+          'A checksum file often lists more files than you downloaded. The Kali `SHA256SUMS` lists every image, and you only fetch one. Simulate this by deleting one file and checking again with `--ignore-missing`:',
+          '',
+          '```',
+          'rm README.txt && sha256sum -c --ignore-missing SHA256SUMS',
+          '```',
+          '',
+          'Without the option, the missing file is reported as `FAILED open or read`. With it, files that are not present are skipped and the ones you have are checked. Run the `cp -r` step again whenever you want the full release back.'
+        ),
+        hint: 'Remove `README.txt` with `rm`, then add `--ignore-missing` to the check.',
+        solution: 'rm README.txt && sha256sum -c --ignore-missing SHA256SUMS',
+        check: { cmd: 'sha256sum', args: ['--ignore-missing'], exit: 0, out: /depot-agent\.sh: OK/, not: { out: /FAILED/ } },
+      },
+      {
+        id: 'signed',
+        info: true,
+        prompt: T(
+          'A checksum proves that your file equals the one the checksum describes. It does not prove that the checksum itself is genuine. If an attacker can replace the image on a mirror, they can replace the `SHA256SUMS` next to it, and everything will report `OK`.',
+          '',
+          'That is why Kali publishes a signature for its `SHA256SUMS` file, `SHA256SUMS.gpg`. A digital signature is made with a private key that only the Kali team holds, and anyone can check it with the matching public key. Checking it, with a tool such as `gpg`, tells you that the checksum file came from the holder of that key and was not altered. You then trust the images through the chain: signature, then checksum file, then image.',
+          '',
+          'The public key has to come from somewhere you trust. The Kali project publishes its key fingerprint on its website, and the documentation describes the exact steps. The training simulator does not include `gpg`, so you read about this step instead of running it; on a real download, do it every time.'
+        ),
+      },
+    ],
+    quiz: [
+      {
+        q: 'You download an image and its `SHA256SUMS` from the same mirror, and the check says `OK`. What have you shown?',
+        choices: [
+          'That the image is genuine, whoever published it',
+          'That the image matches the checksum file, which is only meaningful if that file is genuine',
+          'That the image contains no malware',
+          'That the mirror is Kali\'s own server',
+        ],
+        answer: 1,
+        why: 'The check compares two things from the same place. Someone who controlled the mirror could change both. The signature on the checksum file is what links it to the publisher.',
+      },
+      {
+        q: '`sha256sum -c SHA256SUMS` prints `FAILED` for one file. What is the right next step?',
+        choices: [
+          'Edit the checksum file so that it matches',
+          'Use the file anyway, since one file in three is fine',
+          'Discard the file and download it again from the source, then check again',
+          'Run the check again until it says `OK`',
+        ],
+        answer: 2,
+        why: 'The file is not what the publisher described. Changing the checksum defeats the purpose, and repeating the check on the same bytes gives the same answer.',
+      },
+      {
+        q: 'What does the exit status of `sha256sum -c` tell a script?',
+        choices: [
+          '0 when every listed file matched, non-zero when any did not',
+          'The number of files checked',
+          '0 only when the checksum file is signed',
+          'It is always 0 unless the command is mistyped',
+        ],
+        answer: 0,
+        why: 'The status summarizes the whole run, so a script can stop with `sha256sum -c SHA256SUMS || exit 1` before installing anything.',
+      },
+      {
+        q: 'Which addition to the checksum workflow protects against an attacker who replaces both the image and the `SHA256SUMS` file on a mirror?',
+        choices: [
+          'Using MD5 as well as SHA-256',
+          'Downloading the checksum file twice',
+          'Verifying the publisher\'s digital signature of the checksum file with a key you obtained separately',
+          'Renaming the image',
+        ],
+        answer: 2,
+        why: 'Only the publisher can create a valid signature, so a replaced checksum file fails the signature check. Extra hashes and repeated downloads from the same place prove nothing about who published them.',
+      },
+    ],
+    refs: ['sha256sum(1)', 'cp(1)', 'gpg(1)', 'Kali Linux Revealed, ch. 2 (downloading and verifying the image)'],
+  };
+
   K.lessons.register({
     id: 'data',
     title: 'Encoding, hashing and integrity',
     order: 120,
     summary: 'Read Base64 and hex for what they are, fingerprint files with cryptographic hashes, and verify that a download or a piece of evidence is exactly what it should be.',
-    lessons: [encodeLesson, hashLesson],
+    lessons: [encodeLesson, hashLesson, verifyLesson],
   });
 
 })(typeof globalThis !== 'undefined' ? globalThis : this);
