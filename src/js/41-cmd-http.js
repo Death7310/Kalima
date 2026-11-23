@@ -25,8 +25,7 @@
   }
 
   const percent = (s) => Array.from(U.toBytes(s)).map((c) => (/[A-Za-z0-9\-_.~]/.test(String.fromCharCode(c)) ? String.fromCharCode(c) : '%' + (c < 16 ? '0' : '') + c.toString(16).toUpperCase())).join('');
-  const SPECIAL_HEADERS = { etag: 'ETag', 'www-authenticate': 'WWW-Authenticate', 'x-xss-protection': 'X-XSS-Protection', te: 'TE', dnt: 'DNT' };
-  const titleCase = (n) => SPECIAL_HEADERS[n] || n.replace(/(^|-)([a-z])/g, (x, a, b) => a + b.toUpperCase());
+  const titleCase = (n) => K.net.headerName(n);
 
   /** Split a URL. Returns null when it has no usable host. */
   function parseUrl(raw, defScheme) {

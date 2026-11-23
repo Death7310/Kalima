@@ -530,3 +530,17 @@ test('commands are registered with man pages', async () => {
   const man = await sim.run('man curl');
   assert.match(man.out, /DESCRIPTION/);
 });
+
+test('header names print with one canonical spelling in nc and curl', async () => {
+  const sim = await boot();
+  const { K } = sim;
+  assert.equal(K.net.headerName('etag'), 'ETag');
+  assert.equal(K.net.headerName('www-authenticate'), 'WWW-Authenticate');
+  assert.equal(K.net.headerName('x-xss-protection'), 'X-XSS-Protection');
+  assert.equal(K.net.headerName('content-md5'), 'Content-MD5');
+  assert.equal(K.net.headerName('x-content-type-options'), 'X-Content-Type-Options');
+  const raw = (await sim.run('printf "GET /robots.txt HTTP/1.1\\r\\nHost: web01.halcyon.lab\\r\\n\\r\\n" | nc -w1 10.10.10.10 80')).out;
+  assert.match(raw, /^ETag: "/m);
+  assert.doesNotMatch(raw, /^Etag:/m);
+  assert.match((await sim.run('curl -sI http://web01.halcyon.lab/robots.txt')).out, /^ETag: "/m);
+});

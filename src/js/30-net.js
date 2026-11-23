@@ -22,7 +22,12 @@
   const CITIES = ['fra', 'ams', 'lon', 'par', 'nyc', 'chi', 'dal', 'sjc', 'sea', 'sin', 'tyo', 'syd'];
   const PUBLIC_TLDS = ['com', 'org', 'net', 'io', 'edu', 'gov', 'co', 'dev', 'app', 'info', 'uk', 'de', 'fr', 'nl', 'ca', 'au', 'jp', 'us', 'me', 'ai', 'example'];
 
+  // One spelling for every header name that is printed: each hyphen-separated word capitalised, bar the usual exceptions.
+  const HEADER_EXCEPTIONS = { etag: 'ETag', 'www-authenticate': 'WWW-Authenticate', 'x-xss-protection': 'X-XSS-Protection', 'content-md5': 'Content-MD5', te: 'TE', dnt: 'DNT', 'x-ua-compatible': 'X-UA-Compatible', 'x-webkit-csp': 'X-WebKit-CSP', 'sec-websocket-accept': 'Sec-WebSocket-Accept', 'sec-websocket-key': 'Sec-WebSocket-Key', 'sec-websocket-version': 'Sec-WebSocket-Version', 'sec-websocket-protocol': 'Sec-WebSocket-Protocol', 'sec-websocket-extensions': 'Sec-WebSocket-Extensions', 'content-sha1': 'Content-SHA1', 'x-request-id': 'X-Request-ID', 'x-correlation-id': 'X-Correlation-ID', 'upgrade-insecure-requests': 'Upgrade-Insecure-Requests', 'c-sha': 'C-SHA' };
+  const headerName = (name) => { const n = String(name).toLowerCase(); return HEADER_EXCEPTIONS[n] || n.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase()); };
+
   const net = (K.net = {
+    headerName,
     NetError,
     world: null,
     hosts: [],
@@ -626,9 +631,9 @@
         }
         seg(from === c ? s : c, '.', null, 0, t.rtt);
       };
-      const hdrs = Object.keys(request.headers).filter((k) => k !== 'host').map((k) => k.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase()) + ': ' + request.headers[k]).join('\r\n');
+      const hdrs = Object.keys(request.headers).filter((k) => k !== 'host').map((k) => headerName(k) + ': ' + request.headers[k]).join('\r\n');
       const reqText = isTls ? 'T'.repeat(517) : request.method + ' ' + pathq + ' HTTP/1.1\r\nHost: ' + request.host + (request.port === 80 ? '' : ':' + request.port) + '\r\n' + (hdrs ? hdrs + '\r\n' : '') + '\r\n' + request.body;
-      const resText = isTls ? 'T'.repeat(Math.min(1400, 200 + U.byteLen(res.body))) : 'HTTP/1.1 ' + res.status + ' ' + res.statusText + '\r\n' + Object.keys(res.headers).map((k) => k.replace(/(^|-)([a-z])/g, (m, a, b) => a + b.toUpperCase()) + ': ' + res.headers[k]).join('\r\n') + '\r\n\r\n' + res.body;
+      const resText = isTls ? 'T'.repeat(Math.min(1400, 200 + U.byteLen(res.body))) : 'HTTP/1.1 ' + res.status + ' ' + res.statusText + '\r\n' + Object.keys(res.headers).map((k) => headerName(k) + ': ' + res.headers[k]).join('\r\n') + '\r\n\r\n' + res.body;
       seg(c, '.', null, 0, 0.04);
       send(c, reqText, 0.05);
       send(s, resText, 0.3);
@@ -728,7 +733,7 @@
       let out = 'HTTP/1.1 ' + res.status + ' ' + res.statusText + '\r\n';
       const order = ['server', 'date', 'content-type', 'content-length'];
       const keys = order.filter((k) => res.headers[k] != null).concat(Object.keys(res.headers).filter((k) => order.indexOf(k) < 0));
-      for (const k of keys) out += k.replace(/(^|-)([a-z])/g, (x, a, b) => a + b.toUpperCase()) + ': ' + res.headers[k] + '\r\n';
+      for (const k of keys) out += headerName(k) + ': ' + res.headers[k] + '\r\n';
       out += 'Connection: close\r\n\r\n' + res.body;
       return out;
     },
