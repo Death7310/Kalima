@@ -848,3 +848,26 @@ test('completion offers lab hosts where a host belongs', async () => {
   assert.deepEqual(items('ssh -i ~/.ssh/we'), ['web_key'], 'an identity file is a path');
   assert.deepEqual(items('scp no'), ['notes.txt']);
 });
+
+test('ssh-keygen -F finds hosts in known_hosts, hashed or not', async () => {
+  const sim = await boot();
+  const key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOldKeyOldKeyOldKeyOldKeyOldKeyOldKeyOldKeyOld';
+  await sim.run(`mkdir -p ~/.ssh; printf '# comment\\nweb01.halcyon.lab,10.10.10.10 ${key}\\n' > ~/.ssh/known_hosts`);
+  let r = await sim.run('ssh-keygen -F web01.halcyon.lab');
+  assert.equal(r.code, 0);
+  assert.equal(r.out, `# Host web01.halcyon.lab found: line 2\nweb01.halcyon.lab,10.10.10.10 ${key}\n`);
+  r = await sim.run('ssh-keygen -F nothing.example');
+  assert.equal(r.code, 1); assert.equal(r.out, ''); assert.equal(r.err, '');
+  r = await sim.run('ssh-keygen -lF 10.10.10.10');
+  assert.match(r.out, /^# Host 10\.10\.10\.10 found: line 2\n256 SHA256:\S+ web01\.halcyon\.lab,10\.10\.10\.10 \(ED25519\)\n$/);
+  // hashed names: ssh adds them that way
+  await sim.run('rm ~/.ssh/known_hosts');
+  sim.term.feed('yes', 'student');
+  await sim.run('ssh student@web01.halcyon.lab true');
+  r = await sim.run('ssh-keygen -F web01.halcyon.lab');
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^# Host web01\.halcyon\.lab found: line 1\n\|1\|\S+ ssh-ed25519 AAAA/);
+  r = await sim.run('ssh-keygen -F web01.halcyon.lab -f /nonexistent');
+  assert.equal(r.code, 255);
+  assert.match(r.err, /No such file or directory/);
+});

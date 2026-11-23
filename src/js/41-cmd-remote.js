@@ -950,6 +950,25 @@
     return 0;
   }
 
+  /** ssh-keygen -F: find a host in known_hosts (hashed names too) and print each entry; -l prints fingerprints. */
+  function keygenFindHost(ctx, o, alg, name) {
+    const file = o.f != null ? o.f : ctx.user.home + '/.ssh/known_hosts';
+    let text;
+    try { text = ctx.fs.read(file); } catch (e) { return fatal(ctx, 'ssh-keygen: ' + file + ': ' + e.message); }
+    const lines = text.split('\n');
+    const hits = readKnownHosts(ctx.fs, file).filter((entry) => knownAs(entry, name));
+    for (const entry of hits) {
+      ctx.out('# Host ' + name + ' found: line ' + entry.n + '\n');
+      const line = lines[entry.n - 1].trim();
+      if (o.l) {
+        const key = { type: entry.type, blob: entry.blob }; const info = keyInfo(key);
+        ctx.out(info.bits + ' ' + fingerprint(entry.blob, alg) + ' ' + line.split(/\s+/)[0] + ' (' + info.label + ')\n');
+        if (o.v) ctx.out(randomart(key, alg));
+      } else ctx.out(line + '\n');
+    }
+    return hits.length ? 0 : 1;
+  }
+
   K.cmd.register({
     name: 'ssh-keygen', pkg: 'openssh-client', section: 1,
     summary: 'OpenSSH authentication key utility',
@@ -962,11 +981,12 @@
       '       -t ecdsa | ed25519 | rsa\n              Type of key to create. The default is ed25519.\n       -y     Read a private key file and print the public key to stdout.\n\n' +
       "EXAMPLES\n       ssh-keygen\n              Create an Ed25519 key pair, answering the questions about the file and the passphrase.\n       ssh-keygen -t rsa -b 4096 -f ~/.ssh/lab_rsa -N '' -C 'kali@lab'\n              Create an RSA key without any questions.\n       ssh-keygen -lv -f ~/.ssh/id_ed25519.pub\n              Show a key's fingerprint and randomart image.\n       ssh-keygen -R web01.halcyon.lab\n              Forget the stored host key of web01.",
     async run(ctx) {
-      const g = bsdGetopt(ctx.args, 'loqvya:b:C:E:f:N:R:t:'); // -a (KDF rounds) and -o (new format, long the default) change nothing here
+      const g = bsdGetopt(ctx.args, 'loqvya:b:C:E:f:F:N:R:t:'); // -a (KDF rounds) and -o (new format, long the default) change nothing here
       if (g.err || g.rest.length) { ctx.err((g.err || 'Too many arguments.') + '\n' + KEYGEN_USAGE); return 1; }
       const o = g.opts;
       const alg = String(o.E || 'sha256').toLowerCase();
       if (!DIGEST_SIZE[alg]) return fatal(ctx, 'Invalid hash algorithm "' + o.E + '"');
+      if (o.F != null) return keygenFindHost(ctx, o, alg, o.F);
       if (o.R != null) return keygenRemoveHost(ctx, o, o.R);
       if (!o.l && !o.y) return keygenGenerate(ctx, o, alg);
       const path = await keygenInput(ctx, o);
