@@ -121,11 +121,11 @@
     const o = g.opts;
     if (o.h) { ctx.out(PING_USAGE); return 0; }
     if (o.V) { ctx.println(PING_VERSION); return 0; }
-    if (!g.rest.length) return usageErr(ctx, 'ping', PING_USAGE, 'usage error: Destination address required');
+    if (!g.rest.length) { ctx.eprintln('ping: usage error: Destination address required'); return 2; }
     const count = o.c != null ? intArg(ctx, 'ping', o.c, 1, Number.MAX_SAFE_INTEGER) : Infinity;
     const interval = o.i != null ? intArg(ctx, 'ping', o.i, 0, 2147483647, true) : 1;
-    const size = o.s != null ? intArg(ctx, 'ping', o.s, 0, 2147483647) : 56;
-    const ttl = o.t != null ? intArg(ctx, 'ping', o.t, 0, 255) : undefined;
+    const size = o.s != null ? intArg(ctx, 'ping', o.s, 0, 65507) : 56;
+    const ttl = o.t != null ? intArg(ctx, 'ping', o.t, 1, 255) : undefined;
     const deadline = o.w != null ? intArg(ctx, 'ping', o.w, 0, 2147483647) : 0;
     const wait = o.W != null ? intArg(ctx, 'ping', o.W, 0, 2147483647, true) : 10;
     if ([count, interval, size, ttl, deadline, wait].includes(null)) return 2;
@@ -194,6 +194,7 @@
       }
       if (p.deadline && p.count === Infinity) { await ctx.sleep(Math.max(0, p.deadline * 1000 - t)); t = p.deadline * 1000; }
       else await ctx.sleep(Math.min(p.wait * 1000, 200));
+      if (stats.sent === 1) flushPending(Infinity); // a lone probe lingers long enough to hear the ARP failure
     } catch (e) {
       if (!(e instanceof K.Interrupt)) throw e;
       interrupted = true;
@@ -206,7 +207,7 @@
       const a = stats.rtts; const avg = a.reduce((x, y) => x + y, 0) / a.length;
       const mdev = Math.sqrt(a.reduce((x, y) => x + y * y, 0) / a.length - avg * avg);
       ctx.println('rtt min/avg/max/mdev = ' + [Math.min.apply(null, a), avg, Math.max.apply(null, a), mdev].map((x) => x.toFixed(3)).join('/') + ' ms');
-    } else if (stats.errs && first.err) ctx.println('pipe ' + stats.sent);
+    } else if (stats.errs && first.err && stats.sent > 1) ctx.println('pipe ' + stats.sent);
     return stats.recv ? 0 : 1;
   }
 
@@ -1059,7 +1060,7 @@
       if (o.n || !name) return h.ip;
       return o.b ? name + ' (' + h.ip + ')' : name;
     };
-    const live = ctx.isTTY && !o.r && !o.json && !o.csv;
+    const live = ctx.isTTY && !o.r && !o.w && !o.json && !o.csv;
     if (live) return mtrLive(ctx, { hops, cycle, label, target, dest, interval, o });
     for (let c = 0; c < cycles; c++) { cycle(); if (c < cycles - 1) await ctx.sleep(interval * 1000); }
     await ctx.sleep(Math.min(interval * 1000, 1000));
@@ -1139,6 +1140,59 @@
 
   const SS_USAGE = 'Usage: ss [ OPTIONS ]\n       ss [ OPTIONS ] [ FILTER ]\n   -h, --help          this message\n   -V, --version       output version information\n   -n, --numeric       don\'t resolve service names\n   -r, --resolve       resolve host names\n   -a, --all           display all sockets\n   -l, --listening     display listening sockets\n   -o, --options       show timer information\n   -e, --extended      show detailed socket information\n   -m, --memory        show socket memory usage\n   -p, --processes     show process using socket\n   -i, --info          show internal TCP information\n   -s, --summary       show socket usage summary\n   -4, --ipv4          display only IP version 4 sockets\n   -6, --ipv6          display only IP version 6 sockets\n   -0, --packet        display PACKET sockets\n   -t, --tcp           display only TCP sockets\n   -u, --udp           display only UDP sockets\n   -d, --dccp          display only DCCP sockets\n   -w, --raw           display only RAW sockets\n   -x, --unix          display only Unix domain sockets\n   -H, --no-header     Suppress header line\n   -O, --oneline       socket\'s data printed on a single line\n\n   -A, --query=QUERY, --socket=QUERY\n       QUERY := {all|inet|tcp|udp|raw|unix|unix_dgram|unix_stream|unix_seqpacket|packet|netlink|vsock_stream|vsock_dgram|tipc}[,QUERY]\n\n   -D, --diag=FILE     Dump raw information about TCP sockets to FILE\n   -F, --filter=FILE   read filter information from FILE\n       FILTER := [ state STATE-FILTER ] [ EXPRESSION ]\n       STATE-FILTER := {all|connected|synchronized|bucket|big|TCP-STATES}\n         TCP-STATES := {established|syn-sent|syn-recv|fin-wait-{1,2}|time-wait|closed|close-wait|last-ack|listening|closing}\n          connected := {established|syn-sent|syn-recv|fin-wait-{1,2}|time-wait|close-wait|last-ack|closing}\n       synchronized := {established|syn-recv|fin-wait-{1,2}|time-wait|close-wait|last-ack|closing}\n          bucket := {syn-recv|time-wait}\n             big := {established|syn-sent|fin-wait-{1,2}|closed|close-wait|last-ack|listening|closing}\n';
 
+  /** `ss -s`: counters derived from the sockets this machine really has. */
+  function ssSummary(ctx) {
+    const rows = localSockets(ctx);
+    const n = (proto, v6) => rows.filter((r) => r.proto === proto && (v6 == null || r.v6 === v6)).length;
+    const tcp = n('tcp'); const udp = n('udp');
+    const row = (name, v4, v6) => name + '\t  ' + pad(String(v4 + v6), 9) + ' ' + pad(String(v4), 9) + ' ' + pad(String(v6), 9);
+    ctx.println(['Total: ' + (180 + tcp + udp), 'TCP:   ' + tcp + ' (estab 0, closed 0, orphaned 0, timewait 0)', '',
+      'Transport Total     IP        IPv6', row('RAW', 0, 1), row('UDP', n('udp', false), n('udp', true)), row('TCP', n('tcp', false), n('tcp', true)),
+      row('INET', n('tcp', false) + n('udp', false), n('tcp', true) + n('udp', true) + 1), row('FRAG', 0, 0)].join('\n'));
+    return 0;
+  }
+
+  /** The FILTER words of ss: `state X`, and `sport/dport/src/dst OP value` joined by and/or. */
+  function ssFilter(words) {
+    const STATES = { listening: 'LISTEN', established: 'ESTAB', unconnected: 'UNCONN', all: null, connected: 'ESTAB', 'syn-sent': 'SYN-SENT', 'syn-recv': 'SYN-RECV', 'time-wait': 'TIME-WAIT', closed: 'CLOSE', 'close-wait': 'CLOSE-WAIT', 'last-ack': 'LAST-ACK', closing: 'CLOSING', 'fin-wait-1': 'FIN-WAIT-1', 'fin-wait-2': 'FIN-WAIT-2' };
+    const toks = words.join(' ').replace(/([()])/g, ' $1 ').split(/\s+/).filter(Boolean);
+    const res = { state: null, test: null };
+    let i = 0;
+    const bad = (w) => ({ err: 'Error: an inet prefix is expected rather than "' + w + '".' });
+    while (toks[i] === 'state' || toks[i] === 'exclude' || toks[i] === 'excl') {
+      const neg = toks[i] !== 'state'; const st = (toks[i + 1] || '').toLowerCase(); i += 2;
+      if (!(st in STATES)) return bad(st);
+      const want = STATES[st]; const prev = res.state;
+      res.state = (r) => (prev ? prev(r) : true) && (want == null ? !neg : (r.state === want) !== neg) && (st !== 'connected' || r.state !== 'LISTEN');
+    }
+    const portOf = (v) => { const x = v.replace(/^.*:/, ''); if (x === '*' || x === '') return null; if (/^\d+$/.test(x)) return +x; const hit = Object.keys(SERVICES).find((k) => SERVICES[k] === x); return hit ? +hit : NaN; };
+    const cmp = { '=': (a, b) => a === b, '==': (a, b) => a === b, eq: (a, b) => a === b, '!=': (a, b) => a !== b, ne: (a, b) => a !== b, neq: (a, b) => a !== b, '>=': (a, b) => a >= b, ge: (a, b) => a >= b, '<=': (a, b) => a <= b, le: (a, b) => a <= b, '>': (a, b) => a > b, gt: (a, b) => a > b, '<': (a, b) => a < b, lt: (a, b) => a < b };
+    let bail = null;
+    const term = () => {
+      const t = toks[i++];
+      if (t === '(') { const e = orExpr(); if (toks[i] === ')') i++; return e; }
+      if (t === 'not' || t === '!') { const e = term(); return (r) => !e(r); }
+      if (!['sport', 'dport', 'src', 'dst', 'dev', 'autobound'].includes(t)) { bail = bail || t; return () => true; }
+      let op = '=';
+      if (cmp[toks[i]]) op = toks[i++];
+      const val = toks[i++] || '';
+      const isPort = t === 'sport' || t === 'dport';
+      const side = t === 'sport' || t === 'src' ? 'l' : 'p';
+      if (t === 'dev' || t === 'autobound') return () => true;
+      if (isPort) { const want = portOf(val); if (Number.isNaN(want)) { bail = bail || val; return () => true; } return (r) => { const have = side === 'l' ? r.lport : r.pport === '*' ? 0 : r.pport; return want != null && cmp[op](have, want); }; }
+      const host = val.replace(/:[^:]*$/, '') ; const wantPort = /:[^:]+$/.test(val) ? portOf(val) : undefined;
+      return (r) => {
+        const a = (side === 'l' ? (r.star ? '*' : r.laddr) : r.star ? '*' : r.paddr).replace(/%.*/, '');
+        const ok = (host === '' || host === '*' || a === host || (a === '0.0.0.0' && host === '0.0.0.0') || (a === '*' && host === '*')) && (wantPort === undefined || wantPort === (side === 'l' ? r.lport : r.pport));
+        return op === '!=' || op === 'ne' || op === 'neq' ? !ok : ok;
+      };
+    };
+    const andExpr = () => { let e = term(); while (toks[i] === 'and' || toks[i] === '&' || toks[i] === '&&') { i++; const a = e; const b = term(); e = (r) => a(r) && b(r); } return e; };
+    const orExpr = () => { let e = andExpr(); while (toks[i] === 'or' || toks[i] === '|' || toks[i] === '||') { i++; const a = e; const b = andExpr(); e = (r) => a(r) || b(r); } return e; };
+    if (i < toks.length) { res.test = orExpr(); if (bail) return bad(bail); }
+    return res;
+  }
+
   async function ssRun(ctx) {
     const g = K.getopt(ctx.args, { short: 'hVnraloemMpiOsHtudwx046A:D:F:f:bKNEzSTQCc', long: ['help', 'version', 'numeric', 'resolve', 'all', 'listening', 'options', 'extended', 'memory', 'processes', 'info', 'summary', 'ipv4', 'ipv6', 'packet', 'tcp', 'udp', 'raw', 'unix', 'dccp', 'no-header', 'oneline', 'query=', 'socket=', 'diag=', 'filter='], alias: { help: 'h', version: 'V', numeric: 'n', resolve: 'r', all: 'a', listening: 'l', options: 'o', extended: 'e', memory: 'm', processes: 'p', info: 'i', summary: 's', ipv4: '4', ipv6: '6', packet: '0', tcp: 't', udp: 'u', raw: 'w', unix: 'x', 'no-header': 'H', oneline: 'O' } });
     if (g.err) { ctx.eprintln('ss: ' + g.err); ctx.err(SS_USAGE); return 1; }
@@ -1148,7 +1202,11 @@
     const anyProto = o.t || o.u || o.x || o.w || o.d || o['0'];
     const f = { tcp: !anyProto || !!o.t, udp: !anyProto || !!o.u, listening: !!o.l, all: !!o.a, v4: !!o['4'], v6: !!o['6'] };
     if (o.x && !o.t && !o.u) { f.tcp = false; f.udp = false; }
-    const rows = selectSockets(ctx, f);
+    if (o.s) return ssSummary(ctx);
+    const flt = ssFilter(g.rest);
+    if (flt.err) { ctx.eprintln(flt.err); return 1; }
+    if (flt.state) f.all = true;
+    const rows = selectSockets(ctx, f).filter((r) => (!flt.state || flt.state(r)) && (!flt.test || flt.test(r)));
     const netid = (f.tcp ? 1 : 0) + (f.udp ? 1 : 0) + (o.x ? 1 : 0) > 1;
     const text = rows.map((r) => {
       const star = r.star ? '*' : r.v6 ? '[' + r.laddr + ']' : r.laddr;
@@ -1210,7 +1268,7 @@
   }
 
   async function netstatRun(ctx) {
-    const g = K.getopt(ctx.args, { short: 'rIiMgsvWnNecoplaFCZtuUSwxd46hVAc:', long: ['route', 'interfaces', 'groups', 'statistics', 'verbose', 'wide', 'numeric', 'numeric-hosts', 'numeric-ports', 'numeric-users', 'symbolic', 'extend', 'programs', 'timers', 'continuous', 'listening', 'all', 'fib', 'cache', 'tcp', 'udp', 'raw', 'unix', 'help', 'version', 'ipv4', 'ipv6', 'masquerade', 'udplite', 'sctp', 'context'], alias: { route: 'r', interfaces: 'i', numeric: 'n', programs: 'p', listening: 'l', all: 'a', tcp: 't', udp: 'u', raw: 'w', unix: 'x', help: 'h', version: 'V', extend: 'e', wide: 'W', verbose: 'v', ipv4: '4', ipv6: '6' } });
+    const g = K.getopt(ctx.args, { short: 'rIiMgsvWnNecoplaFCZtuUSwxd46hVA:', long: ['route', 'interfaces', 'groups', 'statistics', 'verbose', 'wide', 'numeric', 'numeric-hosts', 'numeric-ports', 'numeric-users', 'symbolic', 'extend', 'programs', 'timers', 'continuous', 'listening', 'all', 'fib', 'cache', 'tcp', 'udp', 'raw', 'unix', 'help', 'version', 'ipv4', 'ipv6', 'masquerade', 'udplite', 'sctp', 'context'], alias: { route: 'r', interfaces: 'i', numeric: 'n', programs: 'p', listening: 'l', all: 'a', tcp: 't', udp: 'u', raw: 'w', unix: 'x', help: 'h', version: 'V', extend: 'e', wide: 'W', verbose: 'v', ipv4: '4', ipv6: '6' } });
     if (g.err) { ctx.eprintln('netstat: ' + g.err); ctx.err(NETSTAT_USAGE); return 1; }
     const o = g.opts; const m = ctx.machine;
     if (o.h) { ctx.out(NETSTAT_USAGE); return 0; }
@@ -1220,6 +1278,15 @@
       const lines = ['Kernel IP routing table', 'Destination     Gateway         Genmask         Flags   MSS Window  irtt Iface'];
       for (const r of rows) lines.push(pad(r.dst, 15) + ' ' + pad(r.via, 15) + ' ' + pad(r.mask, 15) + ' ' + pad(r.flags, 5) + ' ' + padL(0, 5) + ' ' + pad('0', 6) + ' ' + padL(0, 5) + ' ' + r.dev);
       ctx.println(lines.join('\n'));
+      return 0;
+    }
+    if (o.g) {
+      ctx.println(['IPv6/IPv4 Group Memberships', 'Interface       RefCnt Group', '--------------- ------ ---------------------'].concat(netToolsOrder(m).filter((i) => isUp(i)).map((i) => pad(i.name, 15) + ' ' + pad('1', 6) + ' all-systems.mcast.net')).join('\n'));
+      return 0;
+    }
+    if (o.i && o.e) {
+      const list = netToolsOrder(m).filter((i) => o.a || isUp(i));
+      ctx.println('Kernel Interface table\n' + list.map((i) => ifconfigBlock(m, i)).join('\n'));
       return 0;
     }
     if (o.i) {
@@ -1242,9 +1309,10 @@
       const proc = o.p ? ' ' + pad(visibleProc(ctx, r) ? r.pid + '/' + r.prog : '-', 20) : '';
       lines.push(pad(r.proto + (r.v6 ? '6' : ''), 5) + ' ' + padL(r.recvq, 6) + ' ' + padL(r.sendq, 6) + ' ' + pad(local, 23) + ' ' + pad(foreign, 23) + ' ' + pad(r.proto === 'tcp' ? r.state : '', 11).slice(0, 11) + proc);
     }
-    if (o.a && !o.t && !o.u || o.x) {
-      lines.push('Active UNIX domain sockets (' + (o.l && !o.a ? 'only servers' : 'servers and established') + ')', 'Proto RefCnt Flags       Type       State         I-Node   Path');
-      for (const u of UNIX_SOCKETS) lines.push(pad(u[0], 5) + ' ' + pad(String(u[1]), 6) + ' ' + pad(u[2], 11) + ' ' + pad(u[3], 10) + ' ' + pad(u[4], 13) + ' ' + pad(String(u[5]), 8) + ' ' + u[6]);
+    if (o.x || !(o.t || o.u || o.w || o['4'] || o['6'])) {
+      const servers = o.l && !o.a ? 'only servers' : o.a ? 'servers and established' : 'w/o servers';
+      lines.push('Active UNIX domain sockets (' + servers + ')', 'Proto RefCnt Flags       Type       State         I-Node   ' + (o.p ? 'PID/Program name    ' : '') + 'Path');
+      for (const u of UNIX_SOCKETS.filter((x) => (o.a ? true : o.l ? x[4] === 'LISTENING' : x[4] !== 'LISTENING'))) lines.push(pad(u[0], 5) + ' ' + pad(String(u[1]), 6) + ' ' + pad(u[2], 11) + ' ' + pad(u[3], 10) + ' ' + pad(u[4], 13) + ' ' + pad(String(u[5]), 8) + ' ' + (o.p ? pad(ctx.isRoot ? '1/init' : '-', 19) + ' ' : '') + u[6]);
     }
     ctx.println(lines.join('\n'));
     return 0;

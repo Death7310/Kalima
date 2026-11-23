@@ -81,7 +81,7 @@ test('ping: name and routing errors', async () => {
 test('ping: option checking, usage and version', async () => {
   const sim = await net();
   let r = await sim.run('ping');
-  assert.match(r.err, /^ping: usage error: Destination address required\nUsage\n  ping \[options\] <destination>/);
+  assert.equal(r.err, 'ping: usage error: Destination address required\n');
   assert.equal(r.code, 2);
   r = await sim.run('ping -z 10.10.10.1');
   assert.match(r.err, /^ping: invalid option -- 'z'\nUsage/);
@@ -590,4 +590,56 @@ test('completion: hosts for ping, interfaces and keywords for ip', async () => {
   assert.ok(ip.complete({ words: ['ip', ''], index: 1, cur: '' }).includes('route'));
   assert.deepEqual(ip.complete({ words: ['ip', 'link', 'set', 'dev', ''], index: 4, cur: '', ctx: { machine: sim.machine } }), ['lo', 'eth0']);
   assert.ok(ip.complete({ words: ['ip', 'addr', ''], index: 2, cur: '' }).includes('add'));
+});
+
+/* --------------------------------------------------- review regressions */
+
+test('ping: bare ping prints only the usage error; -t and -s ranges', async () => {
+  const sim = await net();
+  let r = await sim.run('ping');
+  assert.equal(r.err, 'ping: usage error: Destination address required\n');
+  assert.equal(r.code, 2);
+  r = await sim.run('ping -c1 -t 0 8.8.8.8');
+  assert.equal(r.err, "ping: invalid argument: '0': out of range: 1 <= value <= 255\n");
+  assert.equal(r.code, 2);
+  r = await sim.run('ping -c1 -s 70000 10.10.10.10');
+  assert.equal(r.err, "ping: invalid argument: '70000': out of range: 0 <= value <= 65507\n");
+});
+
+test('ping: a single probe to a missing LAN host reports Host Unreachable', async () => {
+  const sim = await net();
+  const r = await sim.run('ping -c1 10.10.10.99');
+  assert.match(r.out, /\nFrom 10\.10\.10\.5 icmp_seq=1 Destination Host Unreachable\n\n--- 10\.10\.10\.99 ping statistics ---\n1 packets transmitted, 0 received, \+1 errors, 100% packet loss, time 0ms\n$/);
+  assert.equal(r.code, 1);
+});
+
+test('mtr: -w alone means report mode', async () => {
+  const sim = await net();
+  sim.term.isTTY = true;
+  const r = await sim.run('mtr -w -c 1 -n 10.10.10.10');
+  assert.match(r.out, /^Start: /);
+});
+
+test('ss: -s summary and FILTER expressions', async () => {
+  const sim = await net();
+  await sim.run('sudo systemctl start ssh');
+  const s = await sim.out('ss -s');
+  assert.match(s, /^Total: \d+\nTCP:   2 \(estab 0, closed 0, orphaned 0, timewait 0\)\n\nTransport Total     IP        IPv6\nRAW\t  /);
+  const one = await sim.out('ss -ltnH sport = :22');
+  assert.equal(one.trim().split('\n').length, 2);
+  assert.equal(await sim.out('ss -ltnH sport = :80'), '');
+  assert.equal((await sim.out("ss -ltnH '( sport = :80 or sport = :ssh )'")).trim().split('\n').length, 2);
+  assert.equal(await sim.out('ss -tnH state established'), '');
+  const bad = await sim.run('ss -tln foo');
+  assert.equal(bad.code, 1);
+});
+
+test('netstat: -c is a flag, -g, -ie, and the UNIX section of -nlp', async () => {
+  const sim = await net();
+  const c = await sim.run('netstat -c');
+  assert.equal(c.code, 0);
+  assert.match(await sim.out('netstat -g'), /^IPv6\/IPv4 Group Memberships\nInterface       RefCnt Group\n/);
+  assert.match(await sim.out('netstat -ie'), /^Kernel Interface table\neth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>/);
+  const l = await sim.out('sudo netstat -nlp');
+  assert.match(l, /Active UNIX domain sockets \(only servers\)\nProto RefCnt Flags       Type       State         I-Node   PID\/Program name    Path\nunix  2      \[ ACC \]     STREAM     LISTENING     \d+ +1\/init +\/run/);
 });
