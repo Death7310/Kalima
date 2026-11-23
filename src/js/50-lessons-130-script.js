@@ -20,6 +20,32 @@
   const SETUP = 'mkdir -p ~/practice/script && cd ~/practice/script';
   const inWork = { cwd: /\/practice\/script$/ };
 
+  /* ------------------------------------------------------------ practice files */
+  // A grepable (-oG) scan of six lab hosts in the format nmap writes. The tab characters are real tabs.
+  const GNMAP = T(
+    '# Nmap 7.98 scan initiated Fri Nov 13 10:02:11 2026 as: nmap -sS -oG lab-tcp.gnmap 10.10.10.10 10.10.10.20 10.10.10.30 10.10.10.40 10.10.10.60 10.10.10.70',
+    'Host: 10.10.10.10 (web01.halcyon.lab)\tStatus: Up',
+    'Host: 10.10.10.10 (web01.halcyon.lab)\tPorts: 22/open/tcp//ssh///, 80/open/tcp//http///, 443/open/tcp//https///\tIgnored State: closed (997)',
+    'Host: 10.10.10.20 (files01.halcyon.lab)\tStatus: Up',
+    'Host: 10.10.10.20 (files01.halcyon.lab)\tPorts: 21/open/tcp//ftp///, 22/open/tcp//ssh///, 111/open/tcp//rpcbind///, 139/open/tcp//netbios-ssn///, 445/open/tcp//microsoft-ds///, 2049/open/tcp//nfs///\tIgnored State: closed (994)',
+    'Host: 10.10.10.30 (db01.halcyon.lab)\tStatus: Up',
+    'Host: 10.10.10.30 (db01.halcyon.lab)\tPorts: 22/open/tcp//ssh///, 3306/open/tcp//mysql///\tIgnored State: closed (998)',
+    'Host: 10.10.10.40 (mail01.halcyon.lab)\tStatus: Up',
+    'Host: 10.10.10.40 (mail01.halcyon.lab)\tPorts: 25/open/tcp//smtp///, 110/open/tcp//pop3///, 143/open/tcp//imap///, 587/open/tcp//submission///, 993/open/tcp//imaps///\tIgnored State: closed (995)',
+    'Host: 10.10.10.60 (printer.halcyon.lab)\tStatus: Up',
+    'Host: 10.10.10.60 (printer.halcyon.lab)\tPorts: 80/open/tcp//http///, 443/open/tcp//https///, 515/open/tcp//printer///, 631/open/tcp//ipp///, 9100/open/tcp//jetdirect///\tIgnored State: closed (995)',
+    'Host: 10.10.10.70 (dev01.halcyon.lab)\tStatus: Up',
+    'Host: 10.10.10.70 (dev01.halcyon.lab)\tPorts: 22/open/tcp//ssh///, 3000/open/tcp//ppp///, 8080/open/tcp//http-proxy///, 5432/filtered/tcp//postgresql///\tIgnored State: closed (996)',
+    '# Nmap done at Fri Nov 13 10:02:14 2026 -- 6 IP addresses (6 hosts up) scanned in 3.12 seconds',
+    '');
+
+  K.fsSeeds.push((machine) => {
+    if (machine.profile !== 'kali') return;
+    let mtime = Date.UTC(2026, 9, 26, 9, 12);
+    try { mtime = machine.vfs.stat('/usr/share/kalima/README').mtime; } catch (e) { /* content pack not loaded: keep the default */ }
+    machine.vfs.seed('/usr/share/kalima/scans/lab-tcp.gnmap', GNMAP, { mode: 0o644, uid: 0, gid: 0, mtime });
+  });
+
   /* ---------------------------------------------------------------- first */
   const firstLesson = {
     id: 'script-first',
@@ -119,7 +145,7 @@
         ),
         hint: 'With `printf`, put the whole text in single quotes and write `\\n` where each line ends, then redirect with `> notes.sh`.',
         solution: 'printf \'#!/bin/bash\\nclient="Halcyon Freight"\\necho "Notes for $client"\\necho "Run by $(whoami) on $(hostname)"\\necho "Working in $(pwd)"\\n\' > notes.sh',
-        check: { file: { path: WORK + '/notes.sh', exists: true, contains: /^#!\/bin\/bash\n[\s\S]*\$\(whoami\)[\s\S]*\$\(hostname\)/ } },
+        check: { line: /notes\.sh/, file: { path: WORK + '/notes.sh', exists: true, contains: /^#!\/bin\/bash\n[\s\S]*\$\(whoami\)[\s\S]*\$\(hostname\)/ } },
       },
       {
         id: 'denied',
@@ -302,7 +328,7 @@
         ),
         hint: 'Use `printf` with `\\n` between the addresses and redirect into `hosts.txt`, or write the file in an editor.',
         solution: 'printf \'10.10.10.10\\n10.10.10.20\\n10.10.10.30\\n\' > hosts.txt',
-        check: { file: { path: WORK + '/hosts.txt', exists: true, contains: /^10\.10\.10\.10\n10\.10\.10\.20\n10\.10\.10\.30\n?$/ } },
+        check: { line: /hosts\.txt/, file: { path: WORK + '/hosts.txt', exists: true, contains: /^10\.10\.10\.10\n10\.10\.10\.20\n10\.10\.10\.30\n?$/ } },
       },
       {
         id: 'while-read',
@@ -348,7 +374,7 @@
         ),
         hint: 'Write it in an editor, or with one `printf` where each `\\n` ends a line. Mind the single quotes around the text.',
         solution: 'printf \'' + GREET + '\' > greet.sh',
-        check: { file: { path: WORK + '/greet.sh', exists: true, contains: /\$#[\s\S]*exit 2[\s\S]*\$1/ } },
+        check: { line: /greet\.sh/, file: { path: WORK + '/greet.sh', exists: true, contains: /\$#[\s\S]*exit 2[\s\S]*\$1/ } },
       },
       {
         id: 'args-run',
@@ -497,7 +523,7 @@
         ),
         hint: 'Use `printf` with `\\n` between the addresses, or an editor. The file belongs in `~/engagement`.',
         solution: 'printf \'10.10.10.10\\n10.10.10.20\\n10.10.10.30\\n10.10.10.50\\n10.10.10.77\\n192.0.2.9\\n\' > ~/engagement/targets.txt',
-        check: { file: { path: '/home/kali/engagement/targets.txt', exists: true, contains: /^10\.10\.10\.10\n10\.10\.10\.20\n10\.10\.10\.30\n10\.10\.10\.50\n10\.10\.10\.77\n192\.0\.2\.9\n?$/ } },
+        check: { line: /targets\.txt/, file: { path: '/home/kali/engagement/targets.txt', exists: true, contains: /^10\.10\.10\.10\n10\.10\.10\.20\n10\.10\.10\.30\n10\.10\.10\.50\n10\.10\.10\.77\n192\.0\.2\.9\n?$/ } },
       },
       {
         id: 'ping-one',
@@ -562,7 +588,7 @@
         ),
         hint: 'Typing it into `nano ~/engagement/sweep.sh` is the most natural way. Save with Ctrl-O, Enter, then leave with Ctrl-X. The solution shows the one-line `printf` form.',
         solution: SWEEP_PRINTF.replace('> sweep.sh', '> ~/engagement/sweep.sh'),
-        check: { file: { path: '/home/kali/engagement/sweep.sh', exists: true, contains: /^#!\/bin\/bash\n[\s\S]*while read[\s\S]*case[\s\S]*ping -c 1 -W 1[\s\S]*done/ } },
+        check: { line: /sweep\.sh/, file: { path: '/home/kali/engagement/sweep.sh', exists: true, contains: /^#!\/bin\/bash\n[\s\S]*while read[\s\S]*case[\s\S]*ping -c 1 -W 1[\s\S]*done/ } },
       },
       {
         id: 'run',
@@ -668,7 +694,229 @@
     refs: ['ping(8)', 'bash(1), the case and if commands', 'NIST SP 800-115, section on network discovery'],
   };
 
-  const lessons = [firstLesson, flowLesson, sweepLesson];
+  const REPORT = [
+    '#!/bin/bash',
+    '# report.sh FILE - summarize a grepable scan file',
+    '# exit status: 0 nothing to review, 1 cleartext services found, 2 usage, 3 file unreadable',
+    'usage() {',
+    '  echo "usage: $0 scan.gnmap" >&2',
+    '  exit 2',
+    '}',
+    'open_ports() {',
+    '  grep Ports: "$1" | grep -o "[0-9]*/open/tcp" | cut -d/ -f1 | sort -n | uniq -c | sort -rn',
+    '}',
+    'hosts_with_port() {',
+    '  grep -E "(Ports: |, )$2/open/tcp" "$1" | cut -d " " -f2',
+    '}',
+    '[ $# -eq 1 ] || usage',
+    'if [ ! -r "$1" ]; then',
+    '  echo "$0: cannot read $1" >&2',
+    '  exit 3',
+    'fi',
+    'echo "Hosts with open ports: $(grep -c Ports: "$1")"',
+    'echo "Most common open ports (hosts, port):"',
+    'open_ports "$1" | head -3',
+    'flagged=0',
+    'for port in 21 23 110 143; do',
+    '  for ip in $(hosts_with_port "$1" "$port"); do',
+    '    echo "REVIEW: cleartext port $port open on $ip"',
+    '    flagged=1',
+    '  done',
+    'done',
+    'exit $flagged',
+    '',
+  ];
+  const REPORT_PRINTF = 'printf \'' + REPORT.join('\\n').replace(/%/g, '%%') + '\' > report.sh';
+  const reportLesson = {
+    id: 'script-report',
+    title: 'Functions and a summary report',
+    minutes: 12,
+    objectives: [
+      'Turn a pipeline into a function and call it with an argument',
+      'Summarize a saved grepable scan file: hosts and hosts per open port',
+      'Give a script exit codes that mean something to whoever runs it next',
+    ],
+    intro: T(
+      'Scan output is only useful once someone has read it. After a scan you often have a file of raw results and need a short, correct summary for your notes: how many hosts, which services are common, what deserves a second look. Doing that by hand twice invites mistakes.',
+      '',
+      'In this lesson you build the pipeline on a saved scan, wrap it in functions so each piece has a name, and give the finished script exit codes that another script, or you next week, can rely on. Nothing here touches the network: you work from a file.'
+    ),
+    steps: [
+      {
+        id: 'setup',
+        prompt: T(
+          'A grepable scan of six lab hosts is saved at `/usr/share/kalima/scans/lab-tcp.gnmap`. Practice files there are read-only, so copy it to your own folder and work there:',
+          '',
+          '```',
+          'mkdir -p ~/practice/script && cp /usr/share/kalima/scans/lab-tcp.gnmap ~/practice/script/ && cd ~/practice/script',
+          '```'
+        ),
+        hint: 'Create the folder with `mkdir -p`, copy with `cp` into it, and `cd` there.',
+        solution: 'mkdir -p ~/practice/script && cp /usr/share/kalima/scans/lab-tcp.gnmap ~/practice/script/ && cd ~/practice/script',
+        check: { cwd: /\/practice\/script$/, file: { path: WORK + '/lab-tcp.gnmap', exists: true, contains: /Ports: / } },
+      },
+      {
+        id: 'ports-lines',
+        prompt: T(
+          'The `-oG` format puts everything about one host on one line, which is what makes it easy to search. The `Ports:` line lists each port as `number/state/protocol//service///`, separated by commas. Show those lines:',
+          '',
+          '```',
+          'grep Ports: lab-tcp.gnmap',
+          '```',
+          '',
+          'The `Status: Up` lines and the `#` comment lines carry no port data, so `grep` leaves them out.'
+        ),
+        hint: 'Search for the word `Ports:` in the file.',
+        solution: 'grep Ports: lab-tcp.gnmap',
+        check: { cmd: 'grep', out: /Ports: 22\/open\/tcp\/\/ssh/ },
+      },
+      {
+        id: 'ports-q',
+        prompt: 'Read the output. Which host has port `3306` open? Give its name or its address.',
+        hint: 'Look for `3306/open/tcp//mysql` in the lines, and read the host at the start of that line.',
+        solution: 'db01',
+        answer: /^(db01(\.halcyon\.lab)?|10\.10\.10\.30)$/i,
+      },
+      {
+        id: 'count',
+        prompt: T(
+          'Now count how many hosts have each port open. The pieces: `grep -o` prints only the part of each line that matches, here every `port/open/tcp` item; `cut -d/ -f1` keeps the number before the first slash; `sort -n | uniq -c` counts equal numbers; `sort -rn` puts the biggest count first.',
+          '',
+          '```',
+          'grep Ports: lab-tcp.gnmap | grep -o "[0-9]*/open/tcp" | cut -d/ -f1 | sort -n | uniq -c | sort -rn',
+          '```',
+          '',
+          'Each output line is a count and a port number. A port that is only filtered, such as `5432/filtered`, does not match `/open/` and is not counted.'
+        ),
+        hint: 'Five commands joined by pipes: `grep`, `grep -o`, `cut`, `sort -n | uniq -c`, `sort -rn`.',
+        solution: 'grep Ports: lab-tcp.gnmap | grep -o "[0-9]*/open/tcp" | cut -d/ -f1 | sort -n | uniq -c | sort -rn',
+        check: { cmd: 'uniq', out: /^\s*4 22$/m, line: /grep/ },
+      },
+      {
+        id: 'count-q',
+        prompt: 'How many hosts have port `22` (SSH) open? Answer with the number.',
+        hint: 'It is the count printed next to `22` at the top of the output.',
+        solution: '4',
+        answer: ['4', 'four'],
+      },
+      {
+        id: 'function',
+        prompt: T(
+          'A *function* gives a pipeline a name so you can use it again. Inside the function, `$1` is the first argument it was called with. Define one for the pipeline you just built and call it on the file, in a single line:',
+          '',
+          '```',
+          'open_ports() { grep Ports: "$1" | grep -o "[0-9]*/open/tcp" | cut -d/ -f1 | sort -n | uniq -c | sort -rn; }; open_ports lab-tcp.gnmap',
+          '```',
+          '',
+          'The body goes between `{` and `}`, with a semicolon before the closing brace when it is on one line. The result is the same table as before. In the next step the same functions go into a script file.'
+        ),
+        hint: 'Name it, add `()` and braces around the pipeline, replace the file name with `"$1"`, then call it with the file name.',
+        solution: 'open_ports() { grep Ports: "$1" | grep -o "[0-9]*/open/tcp" | cut -d/ -f1 | sort -n | uniq -c | sort -rn; }; open_ports lab-tcp.gnmap',
+        check: { line: /\w+\s*\(\)\s*\{[^}]*"\$1"[^}]*\}\s*;\s*\w+\s+\S/, out: /^\s*4 22$/m },
+      },
+      {
+        id: 'write',
+        prompt: T(
+          'Now the whole report as a script, `report.sh`. Write it in an editor, or with one `printf` (the solution shows one). Read it before you run it:',
+          '',
+          '```',
+          REPORT.join('\n').trim(),
+          '```',
+          '',
+          'Three functions do the work. `usage` prints a message to the error stream and exits with status 2. `open_ports` is your pipeline. `hosts_with_port` prints the addresses of hosts with a given port open: the field after the first space on a `Host:` line is the address. The main part checks its input before doing anything: exactly one argument (`$# -eq 1`) and a readable file (`-r`). At the end `exit $flagged` passes on 0 or 1.'
+        ),
+        hint: 'An editor is fine: `nano report.sh`, paste or type the text, Ctrl-O, Enter, Ctrl-X. The solution is a `printf` that writes it for you.',
+        solution: REPORT_PRINTF,
+        check: { line: /report\.sh/, file: { path: WORK + '/report.sh', exists: true, contains: /^#!\/bin\/bash\n[\s\S]*usage\(\)[\s\S]*open_ports\(\)[\s\S]*hosts_with_port\(\)[\s\S]*exit \$flagged/ } },
+      },
+      {
+        id: 'run',
+        prompt: T(
+          'Make it executable, run it on the scan and print the exit status:',
+          '',
+          '```',
+          'chmod +x report.sh && ./report.sh lab-tcp.gnmap; echo "status $?"',
+          '```',
+          '',
+          'The report gives the host count and the three most common open ports, then one `REVIEW` line for each cleartext service it found (FTP on 21, Telnet on 23, POP3 on 110, IMAP on 143). Telnet is not open on any host here. Because something was flagged, the status is `1`, as the comment at the top of the script promises.'
+        ),
+        hint: 'After `chmod +x`, run `./report.sh lab-tcp.gnmap` and print `$?` on the same line.',
+        solution: 'chmod +x report.sh && ./report.sh lab-tcp.gnmap; echo "status $?"',
+        check: { out: /^Hosts with open ports: 6$/m, fn: (ev) => /^status 1$/m.test(outOf(ev)) },
+      },
+      {
+        id: 'run-q',
+        prompt: 'How many `REVIEW` lines did the report print? Answer with the number.',
+        hint: 'Count the lines that begin with `REVIEW:` in the output above.',
+        solution: '3',
+        answer: ['3', 'three'],
+      },
+      {
+        id: 'errors',
+        prompt: T(
+          'Exit codes are for the caller. A wrapper script, or you next week, should be able to tell "the report found something" from "you used it wrongly" from "the file is not there" without reading text. Test the two failure paths, with no argument and then with a file that does not exist:',
+          '',
+          '```',
+          './report.sh; echo $?; ./report.sh nofile.gnmap; echo $?',
+          '```',
+          '',
+          'You should see a usage message and `2`, then a "cannot read" message and `3`. Using distinct, documented numbers is the convention: `0` for success, and the others for the cases you list in the script\'s header comment.'
+        ),
+        hint: 'Run the script twice on one line: first with nothing after it, then with a file name that is not there, printing `$?` after each.',
+        solution: './report.sh; echo $?; ./report.sh nofile.gnmap; echo $?',
+        check: { out: /usage: .*report\.sh scan\.gnmap/, fn: (ev) => /cannot read nofile\.gnmap\n3/.test(outOf(ev)) && /\n2\n/.test(outOf(ev)) },
+      },
+    ],
+    quiz: [
+      {
+        q: 'Inside a function, what is `$1`?',
+        choices: [
+          'The first argument of the script, always',
+          'The first argument the function was called with',
+          'The exit status of the last command',
+          'The name of the function',
+        ],
+        answer: 1,
+        why: 'A function has its own positional parameters, so `$1` refers to the first argument of the call, such as `open_ports "$1"` or `open_ports lab-tcp.gnmap`.',
+      },
+      {
+        q: 'In `grep -o "[0-9]*/open/tcp"`, what does `-o` change?',
+        choices: [
+          'It opens the file in an editor',
+          'It prints only the matching part of each line, not the whole line',
+          'It prints only lines that do not match',
+          'It searches for the pattern only once in the file',
+        ],
+        answer: 1,
+        why: 'With `-o` grep prints each match on its own line instead of the whole line, which is what lets the pipeline turn a long `Ports:` line into a list of ports.',
+      },
+      {
+        q: 'Why does the script exit with different numbers for "usage error", "unreadable file" and "found something to review"?',
+        choices: [
+          'Bash requires every exit code to be different',
+          'So that a person or another script can tell the cases apart without parsing the text',
+          'Because exit codes above 3 are not allowed',
+          'To make the output longer',
+        ],
+        answer: 1,
+        why: 'The exit status is the one value a caller reliably receives. Distinct, documented codes let a calling script react to each case, as `grep` does with 0 for a match, 1 for none and 2 for an error.',
+      },
+      {
+        q: 'A scan file lists `5432/filtered/tcp//postgresql///` for one host. Does the report count port 5432 as open?',
+        choices: [
+          'Yes, because the port appears in the file',
+          'No, because the pattern asks for `/open/` and this port is filtered, meaning no answer reached the scanner',
+          'Yes, but only for databases',
+          'No, because 5432 is too large a number',
+        ],
+        answer: 1,
+        why: 'The summary only matches `/open/`. A filtered port is one the scanner could not classify because something dropped its probes. It is not evidence either way, so it should not be reported as open.',
+      },
+    ],
+    refs: ['bash(1), the section on Shell Functions', 'grep(1)', 'nmap(1), grepable output (-oG)', 'NIST SP 800-115, section on reporting'],
+  };
+
+  const lessons = [firstLesson, flowLesson, sweepLesson, reportLesson];
 
   K.lessons.register({
     id: 'script',
