@@ -773,3 +773,20 @@ test('cp -b, --backup, -l, -s and --parents; mv -b', async () => {
   await sh('echo n > n; mv -b n a');
   assert.equal(await out('cat a~'), 'a\n');
 });
+
+test('file: truncated zip is data, CSV text, unreadable file, sticky directory, bad option line', async () => {
+  const { sh, out } = await setup();
+  await sh('mkdir /tmp/f1; cd /tmp/f1; printf "PK\\003\\004" > fk.zip; printf "a,b\\n1,2\\n" > c.csv; printf "a,b,c\\n1,2\\n" > bad.csv; printf "a,b\\n" > one.csv');
+  assert.equal(await out('file fk.zip'), 'fk.zip: data\n');
+  assert.equal(await out('file c.csv bad.csv one.csv'), 'c.csv:   CSV ASCII text\nbad.csv: ASCII text\none.csv: ASCII text\n');
+  assert.equal(await out('file /etc/shadow'), '/etc/shadow: regular file, no read permission\n');
+  assert.equal(await out('file /tmp'), '/tmp: sticky, directory\n');
+  const r = await sh('file --bogus');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /^file: unrecognized option '--bogus'\nUsage: file /);
+});
+
+test('mktemp error names the template as given', async () => {
+  const { sh } = await setup();
+  assert.equal((await sh('mktemp /nonexist/XXXXXX')).err, "mktemp: failed to create file via template '/nonexist/XXXXXX': No such file or directory\n");
+});

@@ -1564,13 +1564,14 @@
       if (o.t || o.p != null || implied) dir = dirOpt || ctx.env.TMPDIR || '/tmp';
       const fill = m[1].replace(/X/g, () => TEMP_CHARS[Math.floor(K.net.rand() * TEMP_CHARS.length)]);
       let name = template.slice(0, template.length - m[1].length) + fill + suffix;
-      if (dir != null) name = joinPath(dir, name);
+      let shownTemplate = template + suffix;
+      if (dir != null) { name = joinPath(dir, name); shownTemplate = joinPath(dir, shownTemplate); }
       if (!o.u) {
         try {
           if (o.d) ctx.fs.mkdir(name, { mode: 0o700 }); else ctx.fs.write(name, '', { mode: 0o600 });
         } catch (e) {
           if (!isFsError(e)) throw e;
-          if (!o.q) ctx.eprintln('mktemp: failed to create ' + (o.d ? 'directory' : 'file') + ' via template ' + q(name.replace(/[^/]*$/, (b) => b)) + ': ' + e.message);
+          if (!o.q) ctx.eprintln('mktemp: failed to create ' + (o.d ? 'directory' : 'file') + ' via template ' + q(shownTemplate) + ': ' + e.message);
           return 1;
         }
       }
@@ -1656,10 +1657,14 @@
   /** Classify file content. Returns {desc, mime, enc}. */
   function sniff(ctx, path, st) {
     const bin = (desc, mime) => ({ desc, mime, enc: 'binary' });
-    if (st.isDir) return bin('directory', 'inode/directory');
+    if (st.isDir) return bin((st.mode & 0o4000 ? 'setuid, ' : '') + (st.mode & 0o2000 ? 'setgid, ' : '') + (st.mode & 0o1000 ? 'sticky, ' : '') + 'directory', 'inode/directory');
     if (st.isDev) return bin('character special (' + (DEV_SPECIAL[st.dev] || [0, 0]).join('/') + ')', 'inode/chardevice');
     let s;
-    try { s = ctx.fs.read(path); } catch (e) { if (!isFsError(e)) throw e; return { error: e }; }
+    try { s = ctx.fs.read(path); } catch (e) {
+      if (!isFsError(e)) throw e;
+      if (e.code === 'EACCES') return bin(st.mode & 0o4000 ? 'setuid regular file, no read permission' : 'regular file, no read permission', 'application/octet-stream');
+      return { error: e };
+    }
     return sniffContent(s, path);
   }
 
@@ -1675,7 +1680,7 @@
     if (s.startsWith('\x1f\x8b')) return bin(describeGzip(s), 'application/gzip');
     if (s.startsWith('BZh')) return bin('bzip2 compressed data, block size = ' + (s.charCodeAt(3) - 48) * 100 + 'k', 'application/x-bzip2');
     if (s.startsWith('\xfd7zXZ')) return bin('XZ compressed data, checksum CRC64', 'application/x-xz');
-    if (s.startsWith('PK\x03\x04')) {
+    if (s.startsWith('PK\x03\x04') && s.length >= 10) {
       const v = s.charCodeAt(4); const method = { 0: 'store', 8: 'deflate' }[s.charCodeAt(8)] || 'deflate';
       return bin('Zip archive data, at least v' + Math.floor(v / 10) + '.' + (v % 10) + ' to extract, compression method=' + method, 'application/zip');
     }
@@ -1724,7 +1729,22 @@
     if (/^[[{]/.test(head)) {
       try { JSON.parse(s); return text('JSON text data', 'application/json'); } catch (e) { /* plain text */ }
     }
+    if (looksLikeCsv(s)) return text('CSV ' + tail(), 'text/csv');
     return text(tail(), 'text/plain');
+  }
+
+  /** file(1) 5.45 calls text CSV when 2 or more lines all have the same number (at least 2) of comma separated fields. */
+  function looksLikeCsv(s) {
+    const lines = s.replace(/\r?\n$/, '').split(/\r?\n/);
+    if (lines.length < 2 || lines.length > 5000) return false;
+    let want = -1;
+    for (const line of lines) {
+      let n = 1; let inq = false;
+      for (const ch of line) { if (ch === '"') inq = !inq; else if (ch === ',' && !inq) n++; }
+      if (inq || n < 2) return false;
+      if (want < 0) want = n; else if (n !== want) return false;
+    }
+    return true;
   }
 
   function describeFile(ctx, f, o) {
@@ -1749,7 +1769,7 @@
     man: 'DESCRIPTION\n       file tests each argument in an attempt to classify it. There are three sets of tests, performed in this order: filesystem tests, magic tests, and language tests. The first test that succeeds causes the file type to be printed.\n\nOPTIONS\n       -b, --brief\n              do not prepend filenames to output lines\n       -i, --mime\n              output MIME type strings instead of the more traditional human readable ones\n       --mime-type, --mime-encoding\n              output only the MIME type or only the encoding\n       -L, --dereference\n              follow symlinks\n       -h, --no-dereference\n              do not follow symlinks (default)\n\nEXAMPLES\n       file /bin/ls\n              Show that /bin/ls is an ELF executable.\n       file -b payload.bin\n              Print the type without the file name.',
     async run(ctx) {
       const g = ctx.getopt({ short: 'bchiLlNnprsSvzZEkdFf:', long: ['brief', 'mime', 'mime-type', 'mime-encoding', 'dereference', 'no-dereference', 'help', 'version', 'separator='], alias: { brief: 'b', mime: 'i', dereference: 'L', 'no-dereference': 'h' } });
-      if (g.err) { ctx.err(FILE_USAGE); return 1; }
+      if (g.err) { ctx.err('file: ' + g.err + '\n' + FILE_USAGE); return 1; }
       if (g.opts.version) { ctx.out('file-5.45\nmagic file from /etc/magic:/usr/share/misc/magic\n'); return 0; }
       if (g.opts.help) { ctx.out('Usage: file [OPTION...] [FILE...]\nDetermine type of FILEs.\n\n  -b, --brief                do not prepend filenames to output lines\n  -i, --mime                 output MIME type strings (--mime-type and\n                             --mime-encoding)\n  -L, --dereference          follow symlinks\n  -h, --no-dereference       don\'t follow symlinks (default)\n      --help                 display this help and exit\n      --version              output version information and exit\n'); return 0; }
       const files = g.rest.length ? g.rest : null;
