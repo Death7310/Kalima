@@ -247,3 +247,38 @@ test('openssl: rand is seeded and man page exists', async () => {
   assert.notEqual(a, await out('openssl rand -hex 16'));
   assert.match(await out('man openssl'), /DESCRIPTION/);
 });
+
+/* ------------------------------------------------------- od, hexdump */
+// od expectations were taken from GNU od 9.4 on the same input.
+const ODIN = `printf 'hello world\\n1 apple\\n'`;
+table('od: formats compared with GNU od', [
+  [`printf 'hello world\\n' | od`, '0000000 062550 066154 020157 067567 066162 005144\n0000014\n'],
+  [`printf 'a\\tb\\n' | od -c`, '0000000   a  \\t   b  \\n\n0000004\n'],
+  [`printf 'abcdefg' | od -An -tx1`, ' 61 62 63 64 65 66 67\n'],
+  [`printf 'abcdefg' | od -t d4 -t x1`, '0000000  1684234849     6776421\n        61 62 63 64 65 66 67\n0000007\n'],
+  [`printf 'ab\\n' | od -a -x`, '0000000   a   b  nl\n           6261    000a\n0000003\n'],
+  [`printf 'abcdefg' | od -Ax -j2 -N3 -c`, '000002   c   d   e\n000005\n'],
+  [`printf 'abcd' | od --endian=big -tx2`, '0000000 6162 6364\n0000004\n'],
+  [`printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' | od -c`, '0000000   a   a   a   a   a   a   a   a   a   a   a   a   a   a   a   a\n*\n0000040   a   a   a   a   a   a   a   a   a   a   a   a   a\n0000055\n'],
+  [`printf 'abcd' | od -tx1z -w2`, '0000000 61 62  >ab<\n0000002 63 64  >cd<\n0000004\n'],
+  [`printf '\\x00\\x00\\x00?' | od -f`, '0000000             0.5\n0000004\n'],
+]);
+
+table('od: errors', [
+  [`od -A z h.txt`, '', "od: invalid output address radix 'z'; it must be one character from [doxn]\n", 1],
+  [`od -t q h.txt`, '', "od: invalid character 'q' in type string ‘q’\n", 1],
+  [`od -j 99 h.txt`, '', 'od: cannot skip past end of combined input\n', 1],
+  [`od nofile`, '', 'od: nofile: No such file or directory\n', 1],
+  [`od -Z`, '', "od: invalid option -- 'Z'\nTry 'od --help' for more information.\n", 1],
+]);
+
+table('hexdump: default, canonical and byte formats', [
+  [`printf 'hello\\n' | hexdump`, '0000000 6568 6c6c 0a6f\n0000006\n'],
+  [`printf 'hello world, this is hexdump\\n' | hexdump -C`, '00000000  68 65 6c 6c 6f 20 77 6f  72 6c 64 2c 20 74 68 69  |hello world, thi|\n00000010  73 20 69 73 20 68 65 78  64 75 6d 70 0a           |s is hexdump.|\n0000001d\n'],
+  [`printf 'abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopxyz' | hexdump -C`, '00000000  61 62 63 64 65 66 67 68  69 6a 6b 6c 6d 6e 6f 70  |abcdefghijklmnop|\n*\n00000030  78 79 7a                                          |xyz|\n00000033\n'],
+  [`printf 'abc' | hexdump -bc`, '0000000 141 142 143\n          a   b   c\n0000003\n'],
+  [`printf 'abcdefghijklmnop' | hexdump -d`, '0000000 25185 25699 26213 26727 27241 27755 28269 28783\n0000010\n'],
+  [`printf 'abcdef' | hexdump -n 2 -s 3 -C`, '00000003  64 65                                             |de|\n00000005\n'],
+  [`hexdump -Z`, '', "hexdump: invalid option -- 'Z'\nTry 'hexdump --help' for more information.\n", 1],
+  [`printf 'abc' | hexdump -C | head -1 | wc -l`, '1\n'],
+]);

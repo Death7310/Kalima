@@ -3543,5 +3543,281 @@ EXAMPLES
     },
   });
 
+  /* ---------------------------------------------------------------- od */
+  const BYTE_MULT = { b: 512, KB: 1e3, K: 1024, KiB: 1024, MB: 1e6, M: 1048576, MiB: 1048576, GB: 1e9, G: 2 ** 30, GiB: 2 ** 30, TB: 1e12, T: 2 ** 40, TiB: 2 ** 40, PB: 1e15, P: 2 ** 50, PiB: 2 ** 50 };
+  /** Parse a BYTES argument (decimal or 0x hex, optional multiplier suffix); null when invalid. */
+  function parseBytes(s) {
+    const m = /^(0[xX][0-9a-fA-F]+|\d+)([A-Za-z]*)$/.exec(s);
+    if (!m || (m[2] && !(m[2] in BYTE_MULT))) return null;
+    return Number(m[1]) * (m[2] ? BYTE_MULT[m[2]] : 1);
+  }
+  const ASCII_NAMES = ['nul', 'soh', 'stx', 'etx', 'eot', 'enq', 'ack', 'bel', 'bs', 'ht', 'nl', 'vt', 'ff', 'cr', 'so', 'si', 'dle', 'dc1', 'dc2', 'dc3', 'dc4', 'nak', 'syn', 'etb', 'can', 'em', 'sub', 'esc', 'fs', 'gs', 'rs', 'us', 'sp'];
+  const C_ESCAPES = { 0: '\\0', 7: '\\a', 8: '\\b', 9: '\\t', 10: '\\n', 11: '\\v', 12: '\\f', 13: '\\r' };
+  /** printf "%g" of the shortest round-trip digits, switching to exponent form at `prec` digits. */
+  function fmtShortG(x, prec, single) {
+    if (Number.isNaN(x)) return 'nan';
+    if (!Number.isFinite(x)) return x < 0 ? '-inf' : 'inf';
+    if (x === 0) return Object.is(x, -0) ? '-0' : '0';
+    let digits;
+    if (single) for (digits = 0; digits < 8 && Math.fround(Number(x.toExponential(digits))) !== x; digits++);
+    const [mant, ex] = (single ? x.toExponential(digits) : x.toExponential()).split('e');
+    const e = Number(ex);
+    if (e < -4 || e >= prec) return mant + 'e' + (e < 0 ? '-' : '+') + String(Math.abs(e)).padStart(2, '0');
+    return String(Number(x.toFixed(Math.max(0, Math.min(100, mant.replace(/[-.]/g, '').length - 1 - e)))));
+  }
+  const INT_SIZES = { C: 1, S: 2, I: 4, L: 8 };
+  const FLOAT_SIZES = { F: 4, D: 8, L: 8 };
+  /** Parse one -t TYPE string into [{kind, size, z}] or an error message. */
+  function parseOdTypes(str, q) {
+    const specs = []; let i = 0;
+    while (i < str.length) {
+      const kind = str[i++];
+      if (!'acdfoux'.includes(kind)) return { err: "invalid character '" + kind + "' in type string " + q(str) };
+      let size = kind === 'f' ? 8 : 4;
+      if (kind === 'a' || kind === 'c') size = 1;
+      else {
+        const m = /^(\d+|[A-Z])/.exec(str.slice(i));
+        if (m) {
+          i += m[1].length;
+          size = /\d/.test(m[1]) ? Number(m[1]) : (kind === 'f' ? FLOAT_SIZES : INT_SIZES)[m[1]];
+          const ok = kind === 'f' ? [4, 8] : [1, 2, 4, 8];
+          if (!ok.includes(size)) {
+            return { err: 'invalid type string ' + q(str) + ";\nthis system doesn't provide a " + m[1] + '-byte ' + (kind === 'f' ? 'floating point' : 'integral') + ' type' };
+          }
+        }
+      }
+      const z = str[i] === 'z'; if (z) i++;
+      specs.push({ kind, size, z });
+    }
+    return { specs };
+  }
+  const odFieldWidth = ({ kind, size }) => {
+    if (kind === 'a' || kind === 'c') return 3;
+    if (kind === 'f') return size === 4 ? 15 : 24;
+    const bits = 8 * size;
+    if (kind === 'x') return 2 * size;
+    if (kind === 'o') return Math.ceil(bits / 3);
+    return (kind === 'd' ? 1 : 0) + String(2n ** BigInt(kind === 'd' ? bits - 1 : bits)).length;
+  };
+  function odItem(spec, bytes, pos, size, big) {
+    const raw = new Uint8Array(size);
+    for (let k = 0; k < size; k++) raw[k] = pos + k < bytes.length ? bytes[pos + k] : 0;
+    if (!big) raw.reverse(); // raw is now in big-endian order
+    const view = new DataView(raw.buffer);
+    const asBig = () => { let v = 0n; for (const x of raw) v = (v << 8n) | BigInt(x); return v; };
+    const { kind } = spec;
+    if (kind === 'a') { const b = bytes[pos] & 0x7f; return b <= 32 ? ASCII_NAMES[b] : b === 127 ? 'del' : String.fromCharCode(b); }
+    if (kind === 'c') { const b = bytes[pos]; return b in C_ESCAPES ? C_ESCAPES[b] : b >= 32 && b < 127 ? String.fromCharCode(b) : b.toString(8).padStart(3, '0'); }
+    if (kind === 'f') return fmtShortG(size === 4 ? view.getFloat32(0) : view.getFloat64(0), size === 4 ? 9 : 17, size === 4);
+    const v = asBig();
+    if (kind === 'x') return v.toString(16).padStart(2 * size, '0');
+    if (kind === 'o') return v.toString(8).padStart(Math.ceil(8 * size / 3), '0');
+    if (kind === 'u') return v.toString();
+    return BigInt.asIntN(8 * size, v).toString();
+  }
+  const lcm = (a, b) => { let x = a; let y = b; while (y) [x, y] = [y, x % y]; return (a / x) * b; };
+
+  function odDump(ctx, bytes, o) {
+    const { specs, radix, width, verbose } = o;
+    const addrWidth = radix === 'x' ? 6 : 7;
+    const base = { o: 8, d: 10, x: 16 }[radix];
+    const addr = (n) => (radix === 'n' ? '' : n.toString(base).padStart(addrWidth, '0'));
+    const lines = [];
+    // With several formats every column grid is stretched to the widest line so items line up.
+    const total = Math.max(...specs.map((s) => (width / s.size) * (odFieldWidth(s) + 1)));
+    const rowFor = (spec, chunk) => {
+      const w = Math.floor(total / (width / spec.size)) - 1;
+      let row = '';
+      for (let p = 0; p < chunk.length; p += spec.size) row += ' ' + odItem(spec, chunk, p, spec.size, o.big).padStart(w);
+      if (spec.z) {
+        row = row.padEnd(total);
+        row += '  >' + Array.from(chunk, (b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.')).join('') + '<';
+      }
+      return row;
+    };
+    let prev = null; let squeezing = false;
+    for (let pos = 0; pos < bytes.length; pos += width) {
+      const chunk = bytes.subarray(pos, pos + width);
+      const full = chunk.length === width;
+      if (!verbose && full && prev && prev.length === width && chunk.every((b, i) => b === prev[i])) {
+        if (!squeezing) lines.push('*');
+        squeezing = true; prev = chunk; continue;
+      }
+      squeezing = false; prev = chunk;
+      specs.forEach((spec, i) => lines.push((i === 0 ? addr(pos + o.skipped) : ' '.repeat(radix === 'n' ? 0 : addrWidth)) + rowFor(spec, chunk)));
+    }
+    if (radix !== 'n') lines.push(addr(bytes.length + o.skipped));
+    ctx.out(lines.map((l) => l + '\n').join(''));
+  }
+
+  gnu({
+    name: 'od',
+    summary: 'dump files in octal and other formats',
+    synopsis: 'od [OPTION]... [FILE]...',
+    man: `DESCRIPTION
+       Write an unambiguous representation, octal bytes by default, of FILE to
+       standard output. With no FILE, or when FILE is -, read standard input.
+
+OPTIONS
+       -A, --address-radix=RADIX   file offsets in [d]ecimal, [o]ctal, he[x] or [n]one
+       -j, --skip-bytes=BYTES      skip BYTES input bytes first
+       -N, --read-bytes=BYTES      limit dump to BYTES input bytes
+       -t, --format=TYPE           output format: a, c, d, f, o, u or x, with optional size
+       -v, --output-duplicates     do not use * to mark line suppression
+       -w[BYTES], --width[=BYTES]  output BYTES bytes per output line
+       -a -b -c -d -f -i -l -o -s -x   traditional format shortcuts
+
+EXAMPLES
+       od -c /etc/hostname
+       echo -n hello | od -An -tx1`,
+    spec: { short: 'A:j:N:t:vw::abcdfilosx', long: ['address-radix=', 'skip-bytes=', 'read-bytes=', 'format=', 'output-duplicates', 'width=?', 'endian=', 'help', 'version'], alias: { 'address-radix': 'A', 'skip-bytes': 'j', 'read-bytes': 'N', format: 't', 'output-duplicates': 'v', width: 'w' } },
+    async run(ctx, g) {
+      const bad = (m) => { ctx.err('od: ' + m + '\n'); return 1; };
+      let radix = 'o';
+      if (g.opts.A !== undefined) {
+        const a = String(g.opts.A);
+        if (a.length !== 1 || !'doxn'.includes(a)) return bad("invalid output address radix '" + a + "'; it must be one character from [doxn]");
+        radix = a;
+      }
+      const num = (key, flag) => {
+        if (g.opts[key] === undefined) return { v: undefined };
+        const v = parseBytes(String(g.opts[key]));
+        return v === null ? { err: 'invalid -' + flag + " argument '" + g.opts[key] + "'" } : { v };
+      };
+      const skip = num('j', 'j'); if (skip.err) return bad(skip.err);
+      const limit = num('N', 'N'); if (limit.err) return bad(limit.err);
+      let big = false;
+      if (g.opts.endian !== undefined) {
+        if (!['big', 'little'].includes(g.opts.endian)) return bad('invalid argument ' + quote(ctx, String(g.opts.endian)) + " for '--endian'\nValid arguments are:\n  - 'little'\n  - 'big'\nTry 'od --help' for more information.");
+        big = g.opts.endian === 'big';
+      }
+      const specs = [];
+      const shortcuts = { a: 'a', b: 'o1', c: 'c', d: 'u2', f: 'fF', i: 'dI', l: 'dL', o: 'o2', s: 'd2', x: 'x2' };
+      for (const [k, v] of g.seq) {
+        if (k !== 't' && !(k in shortcuts)) continue;
+        const t = parseOdTypes(k === 't' ? String(v) : shortcuts[k], (x) => quote(ctx, x));
+        if (t.err) return bad(t.err);
+        specs.push(...t.specs);
+      }
+      if (!specs.length) specs.push(...parseOdTypes('o2').specs);
+      const unit = specs.reduce((a, s) => lcm(a, s.size), 1);
+      let width = 16;
+      if (g.opts.w !== undefined) {
+        const w = g.opts.w === true || g.opts.w === '' ? 32 : parseBytes(String(g.opts.w));
+        if (w === null || w === 0) return bad("invalid -w argument '" + g.opts.w + "'");
+        width = w;
+      }
+      if (width % unit) { ctx.err('od: warning: invalid width ' + width + '; using ' + unit + ' instead\n'); width = unit; }
+      else if (width < unit) width = unit;
+      const { inputs, failed } = await readFiles(ctx, g.rest);
+      const parts = inputs.map((i) => bytesOf(i.text));
+      let bytes = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let at = 0; for (const p of parts) { bytes.set(p, at); at += p.length; }
+      const skipped = skip.v || 0;
+      if (skipped > bytes.length) { if (!failed) ctx.err('od: cannot skip past end of combined input\n'); return 1; }
+      bytes = bytes.subarray(skipped, limit.v === undefined ? undefined : skipped + limit.v);
+      if (failed && !inputs.length) return 1;
+      odDump(ctx, bytes, { specs, radix, width, verbose: !!g.opts.v, big, skipped });
+      return failed ? 1 : 0;
+    },
+  });
+
+  /* ----------------------------------------------------------- hexdump */
+  const hexByteChar = (b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : '.');
+  /** Row builders for the fixed display formats; each returns the text after the offset. */
+  const HEXDUMP_FORMATS = {
+    b: { unit: 1, per: 16, item: (v) => ' ' + v.toString(8).padStart(3, '0') },
+    c: { unit: 1, per: 16, item: (v) => ' ' + (v in C_ESCAPES ? C_ESCAPES[v] : v >= 32 && v < 127 ? String.fromCharCode(v) : v.toString(8).padStart(3, '0')).padStart(3) },
+    d: { unit: 2, per: 8, item: (v) => ' ' + String(v).padStart(5, '0') },
+    o: { unit: 2, per: 8, item: (v) => ' ' + v.toString(8).padStart(6, '0') },
+    x: { unit: 2, per: 8, item: (v) => ' ' + v.toString(16).padStart(4, '0') },
+  };
+  function hexdumpCanonical(chunk, pos) {
+    let hex = '';
+    for (let i = 0; i < 16; i++) hex += (i === 8 ? ' ' : '') + (i < chunk.length ? chunk[i].toString(16).padStart(2, '0') + ' ' : '   ');
+    return pos.toString(16).padStart(8, '0') + '  ' + hex + ' |' + Array.from(chunk, hexByteChar).join('') + '|';
+  }
+  function hexdumpRow(fmt, chunk) {
+    let row = '';
+    for (let i = 0; i < chunk.length; i += fmt.unit) {
+      let v = chunk[i]; if (fmt.unit === 2) v |= (i + 1 < chunk.length ? chunk[i + 1] : 0) << 8;
+      row += fmt.item(v);
+    }
+    return row;
+  }
+  K.cmd.register({
+    name: 'hexdump',
+    aliases: ['hd'],
+    pkg: 'bsdextrautils',
+    summary: 'display file contents in hexadecimal, decimal, octal, or ascii',
+    synopsis: 'hexdump [options] file...',
+    man: `DESCRIPTION
+       Display the contents of the given files, or standard input, in a
+       user-specified format. The default format shows 16-bit words in
+       hexadecimal; identical lines are replaced by a single asterisk.
+
+OPTIONS
+       -b, --one-byte-octal      one-byte octal display
+       -c, --one-byte-char       one-byte character display
+       -C, --canonical           canonical hex+ASCII display
+       -d, --two-bytes-decimal   two-byte decimal display
+       -o, --two-bytes-octal     two-byte octal display
+       -x, --two-bytes-hex       two-byte hexadecimal display
+       -n, --length length       interpret only length bytes of input
+       -s, --skip offset         skip offset bytes from the beginning
+       -v, --no-squeezing        output identical lines
+
+EXAMPLES
+       hexdump -C /etc/hostname
+       echo -n hi | hexdump`,
+    async run(ctx) {
+      if (ctx.args.length === 1 && ctx.args[0] === '--help') { ctx.out(HEXDUMP_HELP); return 0; }
+      if (ctx.args.length === 1 && (ctx.args[0] === '-V' || ctx.args[0] === '--version')) { ctx.out('hexdump from util-linux 2.40.2\n'); return 0; }
+      const g = K.getopt(ctx.args, { short: 'bcCdn:os:vxV', long: ['one-byte-octal', 'one-byte-char', 'canonical', 'two-bytes-decimal', 'two-bytes-octal', 'two-bytes-hex', 'length=', 'skip=', 'no-squeezing', 'version', 'help'], alias: { 'one-byte-octal': 'b', 'one-byte-char': 'c', canonical: 'C', 'two-bytes-decimal': 'd', 'two-bytes-octal': 'o', 'two-bytes-hex': 'x', length: 'n', skip: 's', 'no-squeezing': 'v' } });
+      if (g.err) { ctx.err('hexdump: ' + g.err + "\nTry 'hexdump --help' for more information.\n"); return 1; }
+      const num = (key) => {
+        if (g.opts[key] === undefined) return 0;
+        const v = parseBytes(String(g.opts[key]));
+        if (v === null) { ctx.err('hexdump: invalid number: ' + g.opts[key] + '\n'); return null; }
+        return v;
+      };
+      const length = g.opts.n === undefined ? Infinity : num('n'); const skip = num('s');
+      if (length === null || skip === null) return 1;
+      const kinds = [];
+      for (const [k] of g.seq) if (k === 'C' || k in HEXDUMP_FORMATS) kinds.push(k);
+      if (!kinds.length) kinds.push('default');
+      const { inputs, failed } = await readFiles(ctx, g.rest);
+      if (!inputs.length) return 1;
+      const parts = inputs.map((i) => bytesOf(i.text));
+      let bytes = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let at = 0; for (const p of parts) { bytes.set(p, at); at += p.length; }
+      bytes = bytes.subarray(skip, length === Infinity ? undefined : skip + length);
+      if (!bytes.length) return failed ? 1 : 0;
+      const canonical = kinds[0] === 'C';
+      const offW = canonical ? 8 : 7;
+      const lines = []; let prev = null; let squeezing = false;
+      for (let pos = 0; pos < bytes.length; pos += 16) {
+        const chunk = bytes.subarray(pos, pos + 16);
+        if (!g.opts.v && prev && chunk.length === 16 && chunk.every((b, i) => b === prev[i])) {
+          if (!squeezing) lines.push('*');
+          squeezing = true; continue;
+        }
+        squeezing = false; prev = chunk;
+        const off = pos + skip;
+        kinds.forEach((k, i) => {
+          if (k === 'C') lines.push(hexdumpCanonical(chunk, off));
+          else {
+            const body = hexdumpRow(HEXDUMP_FORMATS[k === 'default' ? 'x' : k], chunk);
+            lines.push((i === 0 ? off.toString(16).padStart(offW, '0') : ' '.repeat(offW)) + body);
+          }
+        });
+      }
+      lines.push((bytes.length + skip).toString(16).padStart(offW, '0'));
+      ctx.out(lines.map((l) => l + '\n').join(''));
+      return failed ? 1 : 0;
+    },
+  });
+  const HEXDUMP_HELP = `\nUsage:\n hexdump [options] <file>...\n\nDisplay file contents in hexadecimal, decimal, octal, or ascii.\n\nOptions:\n -b, --one-byte-octal      one-byte octal display\n -c, --one-byte-char       one-byte character display\n -C, --canonical           canonical hex+ASCII display\n -d, --two-bytes-decimal   two-byte decimal display\n -e, --format <format>     display format string\n -f, --format-file <file>  file that contains format strings\n -L, --color[=<mode>]      interpret color formatting specifiers\n                             colors are enabled by default\n -n, --length <length>     interpret only length bytes of input\n -o, --two-bytes-octal     two-byte octal display\n -s, --skip <offset>       skip offset bytes from the beginning\n -v, --no-squeezing        output identical lines\n -x, --two-bytes-hex       two-byte hexadecimal display\n\n -h, --help                display this help\n -V, --version             display version\n\nFor more details see hexdump(1).\n`;
+
   K.textKit = { gnu, readFiles, stdinText, quote, breathe, bytesOf, HELP, VERSION, usageTry };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

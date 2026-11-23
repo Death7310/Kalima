@@ -285,6 +285,7 @@
    *   opts[name]  = true | string (last occurrence)
    *   all[name]   = array of every value given
    *   count[name] = number of occurrences (e.g. -vvv -> 3)
+   *   seq = every [name, value] in command-line order (for options whose order matters, like od -c -x)
    *   rest        = positional arguments
    *   err         = null | GNU-style message without the program name, e.g. "invalid option -- 'z'"
    */
@@ -304,12 +305,13 @@
       else long[l] = 'none';
     }
     const alias = spec.alias || {};
-    const res = { opts: {}, all: {}, count: {}, rest: [], err: null };
+    const res = { opts: {}, all: {}, count: {}, seq: [], rest: [], err: null };
     const set = (name, val) => {
       name = alias[name] || name;
       res.opts[name] = val;
       (res.all[name] = res.all[name] || []).push(val);
       res.count[name] = (res.count[name] || 0) + 1;
+      res.seq.push([name, val]);
     };
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
