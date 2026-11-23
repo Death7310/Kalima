@@ -134,7 +134,7 @@
           switch (m[4]) {
             case 's': s = a === undefined ? '' : String(a); if (prec != null) s = s.slice(0, prec); break;
             case 'b': s = a === undefined ? '' : echoEscapes(String(a)).s; break;
-            case 'q': s = a === undefined ? "''" : /^[A-Za-z0-9_\/.:=@%+,-]+$/.test(a) ? a : "'" + String(a).replace(/'/g, "'\\''") + "'"; break;
+            case 'q': s = a === undefined || a === '' ? "''" : /^[A-Za-z0-9_\/.:=@%+,-]+$/.test(a) ? a : /[\x00-\x1f\x7f]/.test(a) ? "$'" + String(a).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\t/g, '\\t').replace(/[\x00-\x1f\x7f]/g, (c) => '\\' + c.charCodeAt(0).toString(8).padStart(3, '0')) + "'" : String(a).replace(/([^A-Za-z0-9_\/.:=@%+,-])/g, '\\$1'); break;
             case 'c': s = a === undefined ? '' : String(a).charAt(0); break;
             case 'd': case 'i': case 'u': { const v = Math.trunc(numArg()); s = String(Math.abs(v)); if (prec != null) s = s.padStart(prec, '0'); if (v < 0) s = '-' + s; else if (flags.includes('+')) s = '+' + s; else if (flags.includes(' ')) s = ' ' + s; break; }
             case 'x': s = (Math.trunc(numArg()) >>> 0).toString(16); if (flags.includes('#')) s = '0x' + s; break;
@@ -189,9 +189,10 @@
       this.umask = this.parent ? this.parent.umask : 0o022;
       this.status = 0;
       this.lastBgPid = 0;
-      this.opts = { xtrace: false, errexit: false, nounset: false, pipefail: false, noclobber: false, nullglob: false, dotglob: false };
+      this.opts = { xtrace: false, errexit: false, nounset: false, pipefail: false, noclobber: false, nullglob: false, dotglob: false, noglob: false };
       this.pipeStatus = [0];
       this.noErrexit = 0;
+      this.dirStack = [];
       this.loopDepth = 0;
       this.funcDepth = 0;
       this.localStack = [];
@@ -242,7 +243,7 @@
     }
 
     /* ------------------------------------------------------------- variables */
-    setVar(name, value, exp) { this.vars.set(name, String(value)); this.arrays.delete(name); if (exp) this.exported.add(name); }
+    setVar(name, value, exp) { if (name === 'OPTIND') { this.optind = parseInt(value, 10) || 1; this._optSub = 0; return; } this.vars.set(name, String(value)); this.arrays.delete(name); if (exp) this.exported.add(name); }
     unsetVar(name) { this.vars.delete(name); this.arrays.delete(name); this.exported.delete(name); }
     /* arrays: indexed arrays are 0-based in bash and 1-based in zsh; associative ones are keyed by string */
     arrBase() { return this.flavor === 'zsh' ? 1 : 0; }
@@ -295,7 +296,7 @@
     /** run one parsed assignment (NAME=value, NAME+=value, NAME=(...), NAME[i]=value) */
     async runAssign(a, io, exp) {
       const name = a.name;
-      if (this.readonly.has(name)) throw new ShellError(this.msgPrefix() + name + ': ' + (this.flavor === 'zsh' ? 'read-only variable' : 'readonly variable'));
+      if (this.readonly.has(name)) throw new ShellError(this.flavor === 'zsh' ? this.msgPrefix() + 'read-only variable: ' + name : this.msgPrefix() + name + ': readonly variable');
       if (a.arr) {
         const assoc = this.arrays.has(name) && this.arrays.get(name).assoc;
         const items = [];
@@ -429,8 +430,8 @@
           if (name === '@') out.push({ s: this.positional.join(' '), list: this.positional.slice() });
           else {
             const v = this.getVar(name);
-            if (v == null && this.opts.nounset && /^[A-Za-z_]/.test(name)) throw new ShellError(this.msgPrefix() + name + ': ' + (this.flavor === 'zsh' ? 'parameter not set' : 'unbound variable'));
-            out.push({ s: v == null ? '' : v });
+            if (v == null && this.opts.nounset && /^[A-Za-z_]/.test(name)) throw Object.assign(new ShellError(this.msgPrefix() + name + ': ' + (this.flavor === 'zsh' ? 'parameter not set' : 'unbound variable')), { fatal: true });
+            out.push({ s: v == null ? '' : v, split: this.flavor === 'zsh' && this.arrays.has(name) });
           }
         }
       }
@@ -468,7 +469,7 @@
       else if (name === '*') { v = this.positional.length ? this.positional.join(this.ifsFirst()) : null; }
       else if (this.arrays.has(name) && this.flavor === 'zsh' && !this.arrays.get(name).assoc && rest && /^:-?\d/.test(rest)) { list = this.arrValues(name); v = list.join(' '); }
       else v = this.getVar(name);
-      if (v == null && this.opts.nounset && !/^[-+=?]|^:[-+=?]/.test(rest) && /^[A-Za-z_]/.test(name)) throw new ShellError(this.msgPrefix() + name + ': ' + (this.flavor === 'zsh' ? 'parameter not set' : 'unbound variable'));
+      if (v == null && this.opts.nounset && !/^[-+=?]|^:[-+=?]/.test(rest) && /^[A-Za-z_]/.test(name)) throw Object.assign(new ShellError(this.msgPrefix() + name + ': ' + (this.flavor === 'zsh' ? 'parameter not set' : 'unbound variable')), { fatal: true });
       const res = (s2) => (list && subscript !== '*' ? { s: s2, list: s2 === v ? list : null } : { s: s2 });
       if (!rest) return list && subscript !== '*' ? { s: v == null ? '' : v, list } : { s: v == null ? '' : v };
       let mm;
@@ -631,10 +632,11 @@
           const text = f.map((x) => x.s).join('');
           if (!f.length && !(any && w.quoted && fields.length === 1)) { if (!(w.quoted && fields.length === 1)) continue; }
           if (text === '' && !w.quoted) continue;
-          const hasGlob = !o.noGlob && f.some((x) => x.glob && /[*?\[]/.test(x.s));
+          const hasGlob = !o.noGlob && !this.opts.noglob && f.some((x) => x.glob && /[*?\[]/.test(x.s));
           if (hasGlob) {
             const matches = this.glob(f);
             if (matches.length) { results.push.apply(results, matches); continue; }
+            if (this.opts.nullglob) continue;
           }
           results.push(text);
         }
@@ -679,7 +681,7 @@
           let names;
           try { names = this.machine.vfs.readdir(dirPath, { cred: this.cred }); } catch (e) { continue; }
           const re = toRe(comp);
-          const showDot = comp[0].s[0] === '.';
+          const showDot = comp[0].s[0] === '.' || this.opts.dotglob;
           for (const nme of names) {
             if (nme[0] === '.' && !showDot) continue;
             if (!re.test(nme)) continue;
@@ -736,6 +738,8 @@
       catch (e) {
         if (e instanceof K.ExitSignal) code = e.code;
         else if (e instanceof K.Interrupt) code = 130;
+        else if (e instanceof ReturnSignal) code = e.code;
+        else if (e instanceof BreakSignal || e instanceof ContinueSignal) code = 0;
         else throw e;
       }
       return { code, out, err, output: all };
@@ -755,7 +759,11 @@
             if (it.bg) st = this.startJob(it.node, io);
             else st = await this.execNode(it.node, io);
             this.status = st;
-            if (st !== 0 && this.opts.errexit && !this.noErrexit && !it.bg) throw new K.ExitSignal(st);
+            if (st !== 0 && !this.noErrexit && !it.bg) {
+              const et = this.traps.get('ERR');
+              if (et != null && !this._inErr) { this._inErr = true; try { await this.execSource(et, io); } finally { this._inErr = false; } }
+              if (this.opts.errexit) throw new K.ExitSignal(st);
+            }
           }
           return st;
         }
@@ -996,6 +1004,7 @@
       c.readonly = new Set(this.readonly);
       c.opts = Object.assign({}, this.opts);
       c.traps = new Map(this.traps);
+      c.dirStack = this.dirStack.slice();
       c.cmdString = this.cmdString;
       c.aliases = new Map(this.aliases);
       c.functions = new Map(this.functions);
@@ -1020,15 +1029,19 @@
       try {
         for (const w of node.words) argv.push.apply(argv, await this.expandWord(w, io));
       } catch (e) {
-        if (e instanceof ShellError) { io.err(e.message + '\n'); this.status = 1; return 1; }
+        if (e instanceof ShellError) { io.err(e.message + '\n'); this.status = 1; if (e.fatal && !this.interactive) throw new K.ExitSignal(1); return 1; }
         throw e;
       }
       const assigns = [];
+      const bare = !argv.length;
       try {
-        for (const a of node.assigns) {
-          let v = await this.expandSingle(a.word, io);
-          if (a.append) v = (this.getVar(a.name) || '') + v;
-          assigns.push([a.name, v]);
+        if (!bare) {
+          for (const a of node.assigns) {
+            if (a.arr || a.index != null) continue;
+            let v = await this.expandSingle(a.word, io);
+            if (a.append) v = (this.getVar(a.name) || '') + v;
+            assigns.push([a.name, v]);
+          }
         }
       } catch (e) {
         if (e instanceof ShellError) { io.err(e.message + '\n'); this.status = 1; return 1; }
@@ -1037,8 +1050,12 @@
       const r = await this.applyRedirs(node.redirs, io);
       if (r.error) { io.err(r.error + '\n'); this.status = 1; return 1; }
       const cio = r.io;
-      if (!argv.length) {
-        for (const [k, v] of assigns) this.setVar(k, v, this.exported.has(k));
+      if (bare) {
+        try { for (const a of node.assigns) await this.runAssign(a, cio, this.exported.has(a.name)); }
+        catch (e) {
+          if (e instanceof ShellError) { io.err(e.message + '\n'); this.status = 1; return 1; }
+          throw e;
+        }
         return node.assigns.length ? 0 : this.status;
       }
       if (this.opts.xtrace) cio.err('+ ' + argv.join(' ') + '\n');
@@ -1121,7 +1138,7 @@
           return 127;
         }
       }
-      io.err(this.flavor === 'zsh' ? 'zsh: command not found: ' + name + '\n' : this.flavor + ': ' + name + ': command not found\n');
+      io.err(this.flavor === 'zsh' ? 'zsh: command not found: ' + name + '\n' : this.msgPrefix() + name + ': command not found\n');
       return 127;
     }
 
@@ -1172,6 +1189,16 @@
       return 126;
     }
 
+    /** Run the EXIT trap (once) when a non-interactive shell ends. */
+    async exitTrap(io) {
+      const cmd = this.traps.get('EXIT');
+      if (cmd == null) return;
+      this.traps.delete('EXIT');
+      const st = this.status;
+      try { await this.execSource(cmd, io); } catch (e) { if (!(e instanceof K.ExitSignal)) throw e; }
+      this.status = st;
+    }
+
     /** Execute a script's source text in a child shell. argv[0] is the script name. */
     async runScript(text, argv, io, flavor) {
       const child = this.child({ flavor: flavor || 'bash' });
@@ -1183,7 +1210,7 @@
         if (e instanceof ReturnSignal) return e.code;
         if (e instanceof BreakSignal || e instanceof ContinueSignal) return 0;
         throw e;
-      } finally { child.dispose(); }
+      } finally { try { await child.exitTrap(io); } catch (e) { /* trap failed */ } child.dispose(); }
     }
 
     async runDef(def, argv, io) {
@@ -1593,7 +1620,14 @@
         switch (bin) {
           case '=': case '==': return sh._dbl ? K.util.globToRe(r).test(l) : l === r;
           case '!=': return sh._dbl ? !K.util.globToRe(r).test(l) : l !== r;
-          case '=~': try { return new RegExp(r).test(l); } catch (e) { return false; }
+          case '=~': {
+            let mm;
+            try { mm = new RegExp(r).exec(l); } catch (e) { return false; }
+            if (!mm) { if (sh.flavor !== 'zsh') sh.arrays.set('BASH_REMATCH', { assoc: false, v: [] }); return false; }
+            if (sh.flavor === 'zsh') { sh.setVar('MATCH', mm[0]); sh.arrays.set('match', { assoc: false, v: Array.from(mm).slice(1).map((x) => (x == null ? '' : x)) }); }
+            else sh.arrays.set('BASH_REMATCH', { assoc: false, v: Array.from(mm).map((x) => (x == null ? '' : x)) });
+            return true;
+          }
           case '<': return l < r; case '>': return l > r;
           case '-eq': return num(l) === num(r); case '-ne': return num(l) !== num(r);
           case '-lt': return num(l) < num(r); case '-le': return num(l) <= num(r);
@@ -1635,20 +1669,27 @@
     true: () => 0,
     false: () => 1,
     cd(ctx) {
-      const sh = this; let target = ctx.args.filter((a) => a !== '--' && a !== '-P' && a !== '-L')[0];
+      const sh = this; const args = ctx.args.filter((a) => a !== '--' && a !== '-P' && a !== '-L');
+      let target = args[0];
+      const zsh = sh.flavor === 'zsh';
+      const fail = (msg, t) => { ctx.err(zsh ? 'cd: ' + msg + ': ' + t + '\n' : sh.msgPrefix() + 'cd: ' + t + ': ' + msg + '\n'); return 1; };
       let print = false;
-      if (target == null) target = sh.getVar('HOME') || '/';
-      else if (target === '-') { target = sh.getVar('OLDPWD') || sh.cwd; print = true; }
+      if (args.length > 1) {
+        if (zsh) return fail('string not in pwd', args[0]);
+        ctx.err(sh.msgPrefix() + 'cd: too many arguments\n'); return 1;
+      }
+      if (target == null) { target = sh.getVar('HOME'); if (!target) { ctx.err(sh.msgPrefix() + 'cd: HOME not set\n'); return 1; } }
+      else if (target === '-') { target = sh.getVar('OLDPWD'); if (!target) { ctx.err(sh.msgPrefix() + 'cd: ' + (zsh ? 'no such file or directory: ' : 'OLDPWD not set') + '\n'); return 1; } print = true; }
       const abs = VFS.abs(target, sh.cwd);
       let st;
       try { st = sh.machine.vfs.stat(abs, { cred: sh.cred }); }
-      catch (e) { ctx.err('cd: ' + sh.fsMsg(e) + ': ' + target + '\n'); return 1; }
-      if (!st.isDir) { ctx.err('cd: not a directory: ' + target + '\n'); return 1; }
-      if (!sh.machine.vfs.access(sh.machine.vfs.lookup(abs), sh.cred, 'x')) { ctx.err('cd: permission denied: ' + target + '\n'); return 1; }
+      catch (e) { return fail(zsh ? sh.fsMsg(e) : e.message, target); }
+      if (!st.isDir) return fail(zsh ? 'not a directory' : 'Not a directory', target);
+      if (!sh.machine.vfs.access(sh.machine.vfs.lookup(abs), sh.cred, 'x')) return fail(zsh ? 'permission denied' : 'Permission denied', target);
       sh.setVar('OLDPWD', sh.cwd, true);
       sh.cwd = abs;
       sh.setVar('PWD', abs, true);
-      if (print) ctx.out((abs === sh.user.home ? '~' : abs) + '\n');
+      if (print) ctx.out((zsh && abs === sh.user.home ? '~' : abs) + '\n');
       return 0;
     },
     pwd(ctx) { ctx.out(this.cwd + '\n'); return 0; },
@@ -1689,18 +1730,38 @@
     set(ctx) {
       const sh = this; const a = ctx.args;
       if (!a.length) { for (const k of Array.from(sh.vars.keys()).sort()) ctx.out(k + '=' + sh.vars.get(k) + '\n'); return 0; }
+      const LONG = { errexit: 'errexit', nounset: 'nounset', xtrace: 'xtrace', pipefail: 'pipefail', noclobber: 'noclobber', noglob: 'noglob', verbose: 'verbose', allexport: 'allexport' };
+      const SHORT = { e: 'errexit', u: 'nounset', x: 'xtrace', C: 'noclobber', f: 'noglob', v: 'verbose', a: 'allexport' };
       for (let i = 0; i < a.length; i++) {
         if (a[i] === '--') { sh.positional = a.slice(i + 1); break; }
         if (/^[-+][a-zA-Z]+$/.test(a[i])) {
-          if (a[i].includes('x')) sh.opts.xtrace = a[i][0] === '-';
-          if (a[i].includes('o')) i++;
+          const on = a[i][0] === '-';
+          for (const c of a[i].slice(1)) {
+            if (c === 'o') {
+              const nm = a[++i];
+              if (nm == null) { for (const k of Object.keys(LONG)) ctx.out(K.util.padEnd(k, 16) + (sh.opts[k] ? 'on' : 'off') + '\n'); continue; }
+              if (LONG[nm]) sh.opts[nm] = on;
+              else { ctx.err(sh.msgPrefix() + (sh.flavor === 'zsh' ? 'no such option: ' + nm : 'set: ' + nm + ': invalid option name') + '\n'); return 1; }
+            } else if (SHORT[c]) sh.opts[SHORT[c]] = on;
+          }
           continue;
         }
         sh.positional = a.slice(i); break;
       }
       return 0;
     },
-    setopt() { return 0; }, unsetopt() { return 0; }, shopt() { return 0; }, autoload() { return 0; }, compinit() { return 0; },
+    setopt(ctx) { for (const x of ctx.args) { const n = x.toLowerCase().replace(/_/g, ''); if (n in this.opts) this.opts[n] = true; else if (n.startsWith('no') && n.slice(2) in this.opts) this.opts[n.slice(2)] = false; } return 0; },
+    unsetopt(ctx) { for (const a of ctx.args) { const n = a.toLowerCase().replace(/_/g, ''); if (n in this.opts) this.opts[n] = false; } return 0; },
+    shopt(ctx) {
+      let on = null; const names = [];
+      for (const a of ctx.args) { if (a === '-s') on = true; else if (a === '-u') on = false; else if (a[0] !== '-') names.push(a); }
+      let st = 0;
+      for (const n of names) {
+        if (n in this.opts && on != null) this.opts[n] = on;
+        else if (n in this.opts) { ctx.out(K.util.padEnd(n, 16) + '\t' + (this.opts[n] ? 'on' : 'off') + '\n'); if (!this.opts[n]) st = 1; }
+      }
+      return st;
+    }, autoload() { return 0; }, compinit() { return 0; },
     bindkey() { return 0; }, zstyle() { return 0; }, ulimit(ctx) { ctx.out('unlimited\n'); return 0; }, disown() { return 0; }, hash() { return 0; },
     local(ctx) {
       const sh = this;
@@ -1716,13 +1777,46 @@
       return 0;
     },
     declare(ctx) {
-      const sh = this; let exp = false;
+      const sh = this; let exp = false; let ro = false; let assoc = false; let arr = false; let print = false;
+      const q = (v) => (/^[A-Za-z0-9_\/.:=@%+,-]+$/.test(v) ? v : "'" + v.replace(/'/g, "'\\''") + "'");
+      const names = [];
       for (const arg of ctx.args) {
-        if (/^-/.test(arg)) { if (arg.includes('x')) exp = true; continue; }
-        const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:=([\s\S]*))?$/.exec(arg);
-        if (m) sh.setVar(m[1], m[2] == null ? (sh.getVar(m[1]) || '') : m[2], exp);
+        if (/^[-+][A-Za-z]+$/.test(arg)) {
+          if (arg[0] === '+') continue;
+          if (arg.includes('x')) exp = true;
+          if (arg.includes('r')) ro = true;
+          if (arg.includes('A')) assoc = true;
+          if (arg.includes('a')) arr = true;
+          if (arg.includes('p')) print = true;
+          continue;
+        }
+        names.push(arg);
       }
-      return 0;
+      if (ctx.name === 'readonly') ro = true;
+      if (!names.length) {
+        if (ro) for (const k of Array.from(sh.readonly).sort()) ctx.out((sh.flavor === 'zsh' ? 'readonly ' : 'declare -r ') + k + '=' + q(sh.getVar(k) || '') + '\n');
+        return 0;
+      }
+      let st = 0;
+      for (const arg of names) {
+        const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:=([\s\S]*))?$/.exec(arg);
+        if (!m) { ctx.err(sh.msgPrefix() + (sh.flavor === 'zsh' ? 'not valid in this context: ' + arg : ctx.name + ': `' + arg + "': not a valid identifier") + '\n'); st = 1; continue; }
+        const n = m[1];
+        if (print) {
+          if (sh.arrays.has(n)) { const a = sh.arrays.get(n); ctx.out((sh.flavor === 'zsh' ? 'typeset -' + (a.assoc ? 'A' : 'a') + ' ' + n + '=(' : 'declare -' + (a.assoc ? 'A' : 'a') + ' ' + n + '=(') + sh.arrValues(n).map((x) => q(x)).join(' ') + ')\n'); }
+          else if (sh.vars.has(n)) ctx.out((sh.flavor === 'zsh' ? 'typeset ' : 'declare -- ') + n + '=' + q(sh.vars.get(n)) + '\n');
+          else { ctx.err(sh.msgPrefix() + (sh.flavor === 'zsh' ? n + ' not found' : ctx.name + ': ' + n + ': not found') + '\n'); st = 1; }
+          continue;
+        }
+        if (sh.readonly.has(n)) { ctx.err(sh.msgPrefix() + (sh.flavor === 'zsh' ? 'read-only variable: ' + n : n + ': readonly variable') + '\n'); st = 1; continue; }
+        if (assoc && !(sh.arrays.has(n) && sh.arrays.get(n).assoc)) { sh.vars.delete(n); sh.arrays.set(n, { assoc: true, v: new Map() }); }
+        else if (arr && !sh.arrays.has(n)) { const cur = sh.vars.get(n); sh.vars.delete(n); sh.arrays.set(n, { assoc: false, v: cur == null || cur === '' ? [] : [cur] }); }
+        if (m[2] != null) sh.setVar(n, m[2], exp || sh.exported.has(n));
+        else if (!sh.arrays.has(n) && !sh.vars.has(n) && ctx.name !== 'readonly' && !exp) { /* declared, unset */ }
+        else if (exp) sh.exported.add(n);
+        if (ro) sh.readonly.add(n);
+      }
+      return st;
     },
     typeset(ctx) { return BUILTINS.declare.call(this, ctx); },
     readonly(ctx) { return BUILTINS.declare.call(this, ctx); },
@@ -1774,7 +1868,7 @@
       if (!ctx.args.length) { ctx.err(ctx.name + ': not enough arguments\n'); return 1; }
       let text;
       try { text = sh.fs.read(ctx.args[0]); }
-      catch (e) { ctx.err(ctx.name + ': ' + sh.fsMsg(e) + ': ' + ctx.args[0] + '\n'); return 127; }
+      catch (e) { ctx.err(sh.flavor === 'zsh' ? ctx.name + ': ' + sh.fsMsg(e) + ': ' + ctx.args[0] + '\n' : sh.msgPrefix() + ctx.args[0] + ': ' + e.message + '\n'); return 1; }
       const savedPos = sh.positional;
       if (ctx.args.length > 1) sh.positional = ctx.args.slice(1);
       sh.sourceDepth++;
@@ -1807,16 +1901,33 @@
     async exec(ctx) { if (!ctx.args.length) return 0; const st = await this.execArgv(ctx.args, ctx.io); throw new K.ExitSignal(st); },
     type(ctx) {
       const sh = this; let st = 0;
+      const flags = ctx.args.filter((n) => /^-[atpfPw]+$/.test(n)).join('');
+      const all = flags.includes('a'); const tOnly = flags.includes('t'); const wOnly = flags.includes('w');
       for (const n of ctx.args) {
-        if (n[0] === '-') continue;
-        if (sh.aliases.has(n)) ctx.out(n + ' is an alias for ' + sh.aliases.get(n) + '\n');
-        else if (K.shlex.RESERVED.has(n)) ctx.out(n + ' is a reserved word\n');
-        else if (sh.functions.has(n)) ctx.out(n + ' is a shell function\n');
-        else if (BUILTINS[n]) ctx.out(n + ' is a shell builtin\n');
-        else {
-          const p = sh.which(n);
-          if (p) ctx.out(n + ' is ' + p + '\n'); else { ctx.out(n + ' not found\n'); st = 1; }
+        if (/^-[atpfPw]+$/.test(n)) continue;
+        let found = false;
+        const say = (kind, text) => {
+          found = true;
+          if (tOnly) ctx.out(kind + '\n');
+          else if (wOnly) ctx.out(n + ': ' + kind + '\n');
+          else ctx.out(text + '\n');
+        };
+        if (sh.aliases.has(n)) { say('alias', n + ' is an alias for ' + sh.aliases.get(n)); if (!all) continue; }
+        if (K.shlex.RESERVED.has(n)) { say('keyword', n + ' is a reserved word'); if (!all) continue; }
+        if (sh.functions.has(n)) { say('function', n + ' is a shell function'); if (!all) continue; }
+        if (BUILTINS[n]) { say('builtin', n + ' is a shell builtin'); if (!all) continue; }
+        const paths = [];
+        const p = sh.which(n);
+        if (p) paths.push(p);
+        if (all) {
+          for (const dir of (sh.getVar('PATH') || '').split(':')) {
+            if (!dir || n.indexOf('/') >= 0) continue;
+            const q = VFS.abs(dir + '/' + n, sh.cwd);
+            try { const t = sh.machine.vfs.stat(q, { cred: sh.cred }); if (t.isFile && paths.indexOf(q) < 0 && sh.machine.vfs.access(sh.machine.vfs.lookup(q), sh.cred, 'x')) paths.push(q); } catch (e) { /* none */ }
+          }
         }
+        for (const q of paths) say('file', n + ' is ' + q);
+        if (!found) { if (!tOnly) { if (wOnly) ctx.out(n + ': none\n'); else if (sh.flavor === 'zsh') ctx.out(n + ' not found\n'); else ctx.err(sh.msgPrefix() + 'type: ' + n + ': not found\n'); } st = 1; }
       }
       return st;
     },
@@ -1857,23 +1968,54 @@
       finally { this._dbl = false; }
     },
     async read(ctx) {
-      const sh = this; const a = ctx.args.slice(); let prompt = ''; let hidden = false; const names = [];
+      const sh = this; const a = ctx.args.slice(); let prompt = ''; let hidden = false; let raw = false; let arrName = null; let nchars = null; const names = [];
       for (let i = 0; i < a.length; i++) {
         if (a[i] === '-p') { prompt = a[++i] || ''; continue; }
-        if (a[i] === '-s') { hidden = true; continue; }
-        if (a[i] === '-r') continue;
-        if (/^-[rs]+$/.test(a[i])) { if (a[i].includes('s')) hidden = true; continue; }
+        if (a[i] === '-a' || a[i] === '-A') { arrName = a[++i]; continue; }
+        if (a[i] === '-n' || a[i] === '-N') { nchars = parseInt(a[++i], 10) || null; continue; }
+        if (a[i] === '-d' || a[i] === '-t' || a[i] === '-u' || a[i] === '-i') { i++; continue; }
+        if (/^-[a-zA-Z]+$/.test(a[i])) { if (a[i].includes('s')) hidden = true; if (a[i].includes('r')) raw = true; continue; }
         const m = /^([A-Za-z_][A-Za-z0-9_]*)\?(.*)$/.exec(a[i]); // zsh: read "var?prompt"
-        if (m) { names.push(m[1]); prompt = m[2]; continue; }
+        if (m && sh.flavor === 'zsh') { names.push(m[1]); prompt = m[2]; continue; }
         names.push(a[i]);
       }
-      if (!names.length) names.push('REPLY');
-      const line = await ctx.readLine(prompt, { hidden });
-      if (line == null) { for (const n of names) sh.setVar(n, ''); return 1; }
-      const parts = line.trim().split(/[ \t]+/);
-      names.forEach((n, i) => { sh.setVar(n, i === names.length - 1 ? parts.slice(i).join(' ') : parts[i] || ''); });
+      if (!names.length && arrName == null) names.push('REPLY');
+      let line = await ctx.readLine(prompt, { hidden });
+      const eof = line == null;
+      if (eof) line = '';
+      if (nchars != null) line = line.slice(0, nchars);
+      if (!raw) line = line.replace(/\\(.)/g, '$1');
+      const ifsV = sh.vars.get('IFS');
+      const ifs = ifsV == null ? ' \t\n' : ifsV;
+      const isWs = (c) => c === ' ' || c === '\t' || c === '\n';
+      const fields = [];
+      if (ifs === '') fields.push(line);
+      else {
+        let i = 0; const n = line.length;
+        const skipWs = () => { while (i < n && ifs.indexOf(line[i]) >= 0 && isWs(line[i])) i++; };
+        skipWs();
+        const limit = arrName != null ? Infinity : names.length;
+        while (i < n && fields.length < limit) {
+          if (fields.length === limit - 1) { let rest = line.slice(i); while (rest.length && ifs.indexOf(rest[rest.length - 1]) >= 0 && isWs(rest[rest.length - 1])) rest = rest.slice(0, -1); fields.push(rest); i = n; break; }
+          let j = i; while (j < n && ifs.indexOf(line[j]) < 0) j++;
+          fields.push(line.slice(i, j)); i = j;
+          if (i < n) { if (!isWs(line[i])) i++; skipWs(); }
+        }
+      }
+      if (arrName != null) { sh.vars.delete(arrName); sh.arrays.set(arrName, { assoc: false, v: fields }); return eof ? 1 : 0; }
+      names.forEach((nm, i) => { sh.setVar(nm, fields[i] == null ? '' : fields[i]); });
+      return eof ? 1 : 0;
+    },
+    mapfile(ctx) {
+      const sh = this; let strip = false; let name = null;
+      for (const x of ctx.args) { if (/^-[a-zA-Z]+$/.test(x)) { if (x.includes('t')) strip = true; } else name = x; }
+      name = name || (sh.flavor === 'zsh' ? 'reply' : 'MAPFILE');
+      const text = ctx.stdin == null ? '' : ctx.stdin;
+      const items = text === '' ? [] : text.split(/(?<=\n)/).map((l) => (strip ? l.replace(/\n$/, '') : l));
+      sh.vars.delete(name); sh.arrays.set(name, { assoc: false, v: items });
       return 0;
     },
+    readarray(ctx) { return BUILTINS.mapfile.call(this, ctx); },
     umask(ctx) {
       const sh = this;
       if (!ctx.args.length) { ctx.out((sh.flavor === 'zsh' ? '0' : '0') + sh.umask.toString(8).padStart(3, '0').slice(-3).padStart(sh.flavor === 'zsh' ? 2 : 3, '0') + '\n'); return 0; }
@@ -1907,7 +2049,100 @@
       if (job.code === 143) { sh.term.signal.reset(); return 130; }
       return job.code;
     },
-    bg(ctx) { ctx.err('bg: no current job\n'); return 1; },
+    bg(ctx) {
+      const found = this.findJob(ctx.args[0], 'bg');
+      if (found.err) { ctx.err(found.err); return 1; }
+      if (this.flavor === 'zsh') { ctx.err('bg: job already in background\n'); return 1; }
+      ctx.err(this.msgPrefix() + 'bg: job ' + found.job.id + ' already in background\n');
+      return 0;
+    },
+    trap(ctx) {
+      const sh = this; const a = ctx.args.slice();
+      const NUM = { 0: 'EXIT', 1: 'HUP', 2: 'INT', 3: 'QUIT', 9: 'KILL', 15: 'TERM', 17: 'CHLD', 18: 'CONT', 19: 'STOP' };
+      const norm = (x) => { x = String(x).toUpperCase().replace(/^SIG/, ''); return /^\d+$/.test(x) ? (NUM[parseInt(x, 10)] || x) : x; };
+      if (a[0] === '-l') { ctx.out('HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM\n'); return 0; }
+      if (!a.length || a[0] === '-p') { for (const [sig, cmd] of sh.traps) ctx.out("trap -- '" + cmd.replace(/'/g, "'\\''") + "' " + (sh.flavor === 'zsh' ? 'SIG' + sig : sig) + '\n'); return 0; }
+      if (a[0] === '--') a.shift();
+      let cmd = a.shift();
+      if (!a.length) { a.push(cmd); cmd = '-'; }
+      let st = 0;
+      for (const sg of a) {
+        const n = norm(sg);
+        if (!/^(EXIT|ERR|DEBUG|RETURN|HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM|CHLD|CONT|STOP|TSTP|TTIN|TTOU|WINCH)$/.test(n)) { ctx.err(sh.msgPrefix() + (sh.flavor === 'zsh' ? 'trap: undefined signal: ' + sg : 'trap: ' + sg + ': invalid signal specification') + '\n'); st = 1; continue; }
+        if (cmd === '-') sh.traps.delete(n); else sh.traps.set(n, cmd);
+      }
+      return st;
+    },
+    let(ctx) {
+      const sh = this; let v = 0;
+      if (!ctx.args.length) { ctx.err(sh.msgPrefix() + 'let: expression expected\n'); return 1; }
+      for (const e of ctx.args) {
+        try { v = arith(e, (n) => sh.getVar(n), (n, val) => sh.setVar(n, val)); }
+        catch (err) { ctx.err(sh.msgPrefix() + (sh.flavor === 'zsh' ? '' : 'let: ') + err.message + '\n'); return 1; }
+      }
+      return v === 0 ? 1 : 0;
+    },
+    getopts(ctx) {
+      const sh = this;
+      if (ctx.args.length < 2) { ctx.err(sh.msgPrefix() + (sh.flavor === 'zsh' ? 'not enough arguments' : 'getopts: usage: getopts optstring name [arg ...]') + '\n'); return sh.flavor === 'zsh' ? 1 : 2; }
+      const spec = ctx.args[0]; const name = ctx.args[1];
+      const args = ctx.args.length > 2 ? ctx.args.slice(2) : sh.positional;
+      const silent = spec[0] === ':'; const sp = spec.replace(/^:/, '');
+      let idx = sh.optind >= 1 ? sh.optind : 1;
+      let sub = sh._optSub || 0;
+      const done = () => { sh._optSub = 0; sh.optind = idx; sh.setVar(name, '?'); return 1; };
+      const arg = args[idx - 1];
+      if (arg === undefined || arg === '-' || arg[0] !== '-') return done();
+      if (arg === '--') { idx++; return done(); }
+      const ch = arg[1 + sub]; const pos = sp.indexOf(ch);
+      const who = sh.scriptName || sh.flavor;
+      const adv = () => { sub++; if (1 + sub >= arg.length) { idx++; sub = 0; } };
+      if (pos < 0 || ch === ':') {
+        if (silent) { sh.setVar(name, '?'); sh.setVar('OPTARG', ch); } else { ctx.err(who + ': illegal option -- ' + ch + '\n'); sh.setVar(name, '?'); sh.unsetVar('OPTARG'); }
+        adv();
+      } else if (sp[pos + 1] === ':') {
+        if (arg.length > 2 + sub) { sh.setVar('OPTARG', arg.slice(2 + sub)); sh.setVar(name, ch); idx++; sub = 0; }
+        else if (idx < args.length) { sh.setVar('OPTARG', args[idx]); sh.setVar(name, ch); idx += 2; sub = 0; }
+        else {
+          if (silent) { sh.setVar(name, ':'); sh.setVar('OPTARG', ch); } else { ctx.err(who + ': option requires an argument -- ' + ch + '\n'); sh.setVar(name, '?'); sh.unsetVar('OPTARG'); }
+          idx++; sub = 0;
+        }
+      } else { sh.setVar(name, ch); sh.unsetVar('OPTARG'); adv(); }
+      sh._optSub = sub; sh.optind = idx;
+      return 0;
+    },
+    dirs(ctx) {
+      const sh = this; const home = sh.user.home;
+      const ab = (p) => (p === home ? '~' : home !== '/' && p.indexOf(home + '/') === 0 ? '~' + p.slice(home.length) : p);
+      const all = [sh.cwd].concat(sh.dirStack).map(ab);
+      if (ctx.args.includes('-c')) { sh.dirStack = []; return 0; }
+      if (ctx.args.includes('-v')) { all.forEach((d, i) => ctx.out(i + '\t' + d + '\n')); return 0; }
+      if (ctx.args.includes('-p')) { all.forEach((d) => ctx.out(d + '\n')); return 0; }
+      ctx.out(all.join(' ') + '\n'); return 0;
+    },
+    pushd(ctx) {
+      const sh = this; const args = ctx.args.filter((x) => x !== '--');
+      const old = sh.cwd;
+      if (!args.length) {
+        if (!sh.dirStack.length) { ctx.err(sh.flavor === 'zsh' ? 'pushd: no other directory\n' : sh.msgPrefix() + 'pushd: no other directory\n'); return 1; }
+        const top = sh.dirStack.shift(); sh.dirStack.unshift(old);
+        const st = BUILTINS.cd.call(sh, sh.makeCtx(['cd', top], ctx.io)); if (st) { sh.dirStack.shift(); sh.dirStack.unshift(top); return st; }
+      } else {
+        const st = BUILTINS.cd.call(sh, sh.makeCtx(['cd', args[0]], ctx.io));
+        if (st) return st;
+        sh.dirStack.unshift(old);
+      }
+      return BUILTINS.dirs.call(sh, ctx);
+    },
+    popd(ctx) {
+      const sh = this;
+      if (!sh.dirStack.length) { ctx.err(sh.flavor === 'zsh' ? 'popd: directory stack empty\n' : sh.msgPrefix() + 'popd: directory stack empty\n'); return 1; }
+      const top = sh.dirStack[0];
+      const st = BUILTINS.cd.call(sh, sh.makeCtx(['cd', top], ctx.io));
+      if (st) return st;
+      sh.dirStack.shift();
+      return BUILTINS.dirs.call(sh, ctx);
+    },
     async wait() { await Promise.all(this.jobs.map((j) => j.promise)); return 0; },
     kill(ctx) {
       const sh = this; const m = sh.machine; let st = 0; let sigName = 'TERM';
@@ -1993,7 +2228,7 @@
       if (e instanceof K.ExitSignal) return e.code;
       if (e instanceof ReturnSignal) return e.code;
       throw e;
-    } finally { child.dispose(); }
+    } finally { try { await child.exitTrap(ctx.io); } catch (e) { /* trap failed */ } child.dispose(); }
   }
   K.cmd.register({ name: 'bash', pkg: 'bash', summary: 'GNU Bourne-Again SHell', synopsis: 'bash [options] [command_string | file]', run: (ctx) => shellCommand(ctx, 'bash') });
   K.cmd.register({ name: 'sh', pkg: 'dash', summary: 'command interpreter (shell)', synopsis: 'sh [-c command_string | file]', run: (ctx) => shellCommand(ctx, 'sh') });

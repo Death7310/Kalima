@@ -697,3 +697,79 @@ test('ls: unreadable subdirectory under -R exits 1 and prints no header for it',
   assert.equal(r.out, '');
   assert.equal(r.code, 2);
 });
+
+/* ------------------------------------------------ review round 2 regressions */
+
+test('cp and mv to "name/" that does not exist fail like the real tools', async () => {
+  const { sh } = await setup();
+  await sh('mkdir /tmp/r2; cd /tmp/r2; echo a > a');
+  const r = await sh('cp a nodir/');
+  assert.equal(r.code, 1);
+  assert.equal(r.err, "cp: cannot create regular file 'nodir/': Not a directory\n");
+  assert.equal((await sh('ls')).out, 'a\n');
+  const m = await sh('mv a nodir/');
+  assert.equal(m.err, "mv: cannot move 'a' to 'nodir/': Not a directory\n");
+  await sh('mkdir sd'); assert.equal((await sh('cp -r sd newd/')).code, 0);
+});
+
+test('cp -i and mv -i print the prompt on stderr when stdin is redirected and fail on EOF', async () => {
+  const { sh } = await setup();
+  await sh('mkdir /tmp/r3; cd /tmp/r3; echo a > a; echo b > b');
+  const r = await sh('cp -i a b < /dev/null');
+  assert.equal(r.err, "cp: overwrite 'b'? ");
+  assert.equal(r.code, 1);
+  assert.equal((await sh('cat b')).out, 'b\n');
+  const m = await sh('mv -i a b < /dev/null');
+  assert.equal(m.err, "mv: overwrite 'b'? ");
+  assert.equal(m.code, 1);
+});
+
+test('mv reports permission denied from stat, mkdir shows the operand as typed', async () => {
+  const { sh } = await setup();
+  await sh('mkdir -p /tmp/r4/np; cd /tmp/r4; touch np/x; echo f > f; chmod 000 np');
+  assert.equal((await sh('mv np/x .')).err, "mv: cannot stat 'np/x': Permission denied\n");
+  assert.equal((await sh('mkdir f/g/h')).err, "mkdir: cannot create directory 'f/g/h': Not a directory\n");
+  assert.equal((await sh('mkdir -p f/g/h')).err, "mkdir: cannot create directory 'f': Not a directory\n");
+});
+
+test('chmod by a non-owner fails even when the mode would not change; -f is silent', async () => {
+  const { sh } = await setup();
+  const r = await sh('chmod a+x /usr/bin/ls');
+  assert.equal(r.err, "chmod: changing permissions of '/usr/bin/ls': Operation not permitted\n");
+  assert.equal(r.code, 1);
+  const q = await sh('chmod -f 777 /etc/passwd');
+  assert.equal(q.err, '');
+  assert.equal(q.code, 1);
+});
+
+test('rmdir . says Invalid argument; touch accepts -h', async () => {
+  const { sh } = await setup();
+  await sh('mkdir /tmp/r5; cd /tmp/r5; touch f');
+  assert.equal((await sh('rmdir .')).err, "rmdir: failed to remove '.': Invalid argument\n");
+  assert.equal((await sh('touch -h f')).code, 0);
+});
+
+test('ls -Q, -w and --indicator-style', async () => {
+  const { sh } = await setup();
+  await sh('mkdir /tmp/r6; cd /tmp/r6; mkdir d; touch a');
+  assert.equal((await sh('ls -Q')).out, '"a"\n"d"\n');
+  assert.equal((await sh('ls --indicator-style=slash')).out, 'a\nd/\n');
+  assert.equal((await sh('ls -w 3 -C')).out, 'a\nd\n');
+});
+
+test('cp -b, --backup, -l, -s and --parents; mv -b', async () => {
+  const { sh, out } = await setup();
+  await sh('mkdir /tmp/r7; cd /tmp/r7; echo a > a; echo b > b');
+  await sh('cp -b a b');
+  assert.equal(await out('cat b~'), 'b\n');
+  assert.equal(await out('cat b'), 'a\n');
+  await sh('cp --backup=numbered a b; cp --backup=numbered a b');
+  assert.equal(await out('ls'), 'a\nb\nb~\nb.~1~\nb.~2~\n');
+  await sh('cp -l a hard; cp -s a soft');
+  assert.match(await out('ls -l hard soft'), /hard\n.*soft -> a\n/);
+  assert.equal(await out('stat -c %h a'), '2\n');
+  await sh('mkdir -p x/y dest; echo q > x/y/f; cp --parents x/y/f dest');
+  assert.equal(await out('cat dest/x/y/f'), 'q\n');
+  await sh('echo n > n; mv -b n a');
+  assert.equal(await out('cat a~'), 'a\n');
+});

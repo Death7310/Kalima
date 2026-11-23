@@ -86,7 +86,7 @@ test('ping: option checking, usage and version', async () => {
   r = await sim.run('ping -z 10.10.10.1');
   assert.match(r.err, /^ping: invalid option -- 'z'\nUsage/);
   r = await sim.run('ping -c 0 10.10.10.1');
-  assert.equal(r.err, "ping: invalid argument: '0': out of range: 1 <= value <= 9007199254740991\n");
+  assert.equal(r.err, "ping: invalid argument: '0': out of range: 1 <= value <= 9223372036854775807\n");
   r = await sim.run('ping -c x 10.10.10.1');
   assert.equal(r.err, "ping: invalid argument: 'x'\n");
   assert.equal((await sim.run('ping -V')).out, 'ping from iputils 20250605\n');
@@ -642,4 +642,44 @@ test('netstat: -c is a flag, -g, -ie, and the UNIX section of -nlp', async () =>
   assert.match(await sim.out('netstat -ie'), /^Kernel Interface table\neth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>/);
   const l = await sim.out('sudo netstat -nlp');
   assert.match(l, /Active UNIX domain sockets \(only servers\)\nProto RefCnt Flags       Type       State         I-Node   PID\/Program name    Path\nunix  2      \[ ACC \]     STREAM     LISTENING     \d+ +1\/init +\/run/);
+});
+
+/* ------------------------------------------------- review regressions */
+
+test('ip route lists routes in kernel order (ascending address, default first)', async () => {
+  const sim = await net();
+  await sim.run('sudo ip route add 192.168.50.0/24 via 10.10.10.1');
+  await sim.run('sudo ip route add 10.20.0.0/16 via 10.10.10.1');
+  const lines = (await sim.out('ip route')).trim().split('\n').map((l) => l.split(' ')[0]);
+  assert.deepEqual(lines, ['default', '10.10.10.0/24', '10.20.0.0/16', '192.168.50.0/24']);
+  const n = (await sim.out('netstat -rn')).split('\n').slice(2, -1).map((l) => l.split(/\s+/)[0]);
+  assert.deepEqual(n, ['0.0.0.0', '10.10.10.0', '10.20.0.0', '192.168.50.0']);
+});
+
+test('ping: broadcast address needs -b, count limit text matches iputils', async () => {
+  const sim = await net();
+  const r = await sim.run('ping -c 1 10.10.10.255');
+  assert.equal(r.err, 'ping: Do you want to ping broadcast? Then -b. If not, check your local firewall rules\n');
+  assert.equal(r.code, 2);
+  assert.equal((await sim.run('ping -c 0 10.10.10.1')).err, "ping: invalid argument: '0': out of range: 1 <= value <= 9223372036854775807\n");
+});
+
+test('arp: an unresolvable name is Unknown host', async () => {
+  const sim = await net();
+  const r = await sim.run('arp nosuchhost.halcyon.lab');
+  assert.equal(r.err, 'nosuchhost.halcyon.lab: Unknown host\n');
+  assert.equal(r.code, 1);
+});
+
+test('nmcli: -g and -f filter device show, networking and radio switches work', async () => {
+  const sim = await net();
+  assert.equal(await sim.out('nmcli -g IP4.ADDRESS dev show eth0'), '10.10.10.5/24\n');
+  assert.equal(await sim.out('nmcli -t -f GENERAL.DEVICE dev show eth0'), 'GENERAL.DEVICE:eth0\n');
+  assert.equal((await sim.run('sudo nmcli networking off')).code, 0);
+  assert.equal(await sim.out('nmcli networking'), 'disabled\n');
+  assert.match((await sim.run('ping -c 1 10.10.10.1')).err, /Network is unreachable/);
+  await sim.run('sudo nmcli networking on');
+  assert.equal((await sim.run('ping -c 1 10.10.10.1')).code, 0);
+  await sim.run('sudo nmcli radio wifi off');
+  assert.match(await sim.out('nmcli radio'), /enabled\s+disabled\s+enabled\s+enabled/);
 });

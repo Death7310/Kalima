@@ -214,7 +214,7 @@
   }
 
   const LS_SPEC = {
-    short: 'laAhRtrSdF1inCpsUxfgoGvXcuLZmHqbkw:I:',
+    short: 'laAhRtrSdF1inCpsUxfgoGvXcuLZmHqbkQw:I:',
     long: ['color=?', 'all', 'almost-all', 'human-readable', 'recursive', 'reverse', 'directory', 'classify', 'numeric-uid-gid',
       'inode', 'group-directories-first', 'si', 'time-style=', 'sort=', 'indicator-style=', 'dereference', 'literal', 'hide-control-chars', 'quote-name', 'full-time', 'hide=', 'ignore=', 'width=', 'escape', 'kibibytes'],
     alias: { ignore: 'I', width: 'w', escape: 'b', kibibytes: 'k', all: 'a', 'almost-all': 'A', 'human-readable': 'h', recursive: 'R', reverse: 'r', directory: 'd', classify: 'F', 'numeric-uid-gid': 'n', inode: 'i', dereference: 'L', 'quote-name': 'Q' },
@@ -231,9 +231,10 @@
       ignorePats: [].concat(g.all.I || [], g.all.ignore || [], o.hide && !o.all && !o.a ? [o.hide] : []).filter((x) => typeof x === 'string').map(globRe),
       context: !!o.Z, across: !!o.x, commas: !!o.m, columns: !!(o.C || o.x), noOwner: !!o.g, noGroup: !!(o.o || o.G), followCmd: !!o.H,
       long: isLong, numeric: !!o.n, all: !!(o.a || o.f), almost: !!o.A, human: !!o.h,
-      recursive: !!o.R, reverse: !!o.r, dirOnly: !!o.d, classify: !!o.F, indicator: !!(o.F || o.p), inode: !!o.i, blocks: !!o.s,
+      recursive: !!o.R, reverse: !!o.r, dirOnly: !!o.d, classify: !!o.F || o['indicator-style'] === 'classify', indicator: !!(o.F || o.p) || ['classify', 'slash', 'file-type'].includes(o['indicator-style']), inode: !!o.i, blocks: !!o.s,
       color, sortBy, dirsFirst: !!o['group-directories-first'], follow: !!o.L, oneColumn: !!o[1], fullTime: o['full-time'] != null,
-      tty: ctx.isTTY, width: ctx.cols || 80, collate: collator(ctx.env),
+      quote: !!o.Q, indStyle: typeof o['indicator-style'] === 'string' ? o['indicator-style'] : null,
+      tty: ctx.isTTY, width: (o.w != null && parseInt(o.w, 10) > 0 ? parseInt(o.w, 10) : ctx.cols || 80), collate: collator(ctx.env),
       timeStyle: o['full-time'] ? 'full-iso' : o['time-style'] || null,
     };
   }
@@ -284,7 +285,7 @@
   function lsRender(ctx, o, entries, withTotal) {
     const needQuote = o.tty && entries.some((e) => quoteName(e.name) !== e.name);
     const cell = (e) => {
-      let text = (o.context ? '? ' : '') + (o.tty ? quoteName(e.name) : e.name);
+      let text = (o.context ? '? ' : '') + (o.quote ? '"' + e.name.replace(/(["\\])/g, '\\$1') + '"' : o.tty ? quoteName(e.name) : e.name);
       const plainLen = text.length;
       const key = o.color ? colorKey(e.st, e.orphan) : null;
       if (key) text = e.orphan && key === 'or' ? '\x1b[0m' + paint(LS_COLOR.ln, text) : paint(LS_COLOR[key], text);
@@ -694,6 +695,7 @@
 
   /** Ask a yes/no question; anything starting with y or Y is a yes. */
   async function confirm(ctx, prompt) {
+    if (ctx.stdin != null) ctx.err(prompt); // redirected stdin: the real tools still print the prompt on stderr
     const line = await ctx.readLine(prompt);
     return line != null && /^y/i.test(line);
   }
@@ -777,7 +779,7 @@
           } else make(dir, true);
         } catch (e) {
           if (!isFsError(e)) throw e;
-          ctx.eprintln('mkdir: cannot create directory ' + q(e.code === 'ENOTDIR' && e.path ? e.path : dir) + ': ' + e.message); status = 1;
+          ctx.eprintln('mkdir: cannot create directory ' + q(g.opts.p && e.code === 'ENOTDIR' && e.path ? e.path : dir) + ': ' + e.message); status = 1;
         }
       }
       return status;
@@ -799,6 +801,7 @@
           current = path;
           if (g.opts.v) ctx.println('rmdir: removing directory, ' + q(path));
           if (!ctx.fs.lstat(path).isDir) throw new K.FsError('ENOTDIR', path);
+          if (/(^|\/)\.$/.test(path)) { const err = new K.FsError('EINVAL', path); err.message = 'Invalid argument'; throw err; }
           ctx.fs.rmdir(path);
         };
         try {
@@ -824,7 +827,7 @@
     man: 'DESCRIPTION\n       Update the access and modification times of each FILE to the current time. A FILE argument that does not exist is created empty, unless -c is supplied.\n\nOPTIONS\n       -a, -m change only the access time or only the modification time\n       -c, --no-create\n              do not create any files\n       -d, --date=STRING\n              parse STRING and use it instead of current time\n       -r, --reference=FILE\n              use this file\'s times instead of current time\n       -t STAMP\n              use [[CC]YY]MMDDhhmm[.ss] instead of current time\n\nEXAMPLES\n       touch notes.txt\n              Create notes.txt or refresh its timestamp.\n       touch -d "2026-01-01 12:00" old.log\n              Give old.log a fixed date.',
     help: "  -a                     change only the access time\n  -c, --no-create        do not create any files\n  -d, --date=STRING      parse STRING and use it instead of current time\n  -m                     change only the modification time\n  -r, --reference=FILE   use this file's times instead of current time\n  -t [[CC]YY]MMDDhhmm[.ss]  use specified time instead of current time\n",
     authors: 'Paul Rubin, Arnold Robbins, Jim Kingdon, David MacKenzie, and Randy Smith',
-    spec: { short: 'acfmd:r:t:', long: ['no-create', 'date=', 'reference=', 'time='], alias: { 'no-create': 'c', date: 'd', reference: 'r' } },
+    spec: { short: 'acfhmd:r:t:', long: ['no-dereference', 'no-create', 'date=', 'reference=', 'time='], alias: { 'no-create': 'c', date: 'd', reference: 'r' } },
     main(ctx, g) {
       if (!g.rest.length) return missingOperand(ctx, 'file operand');
       const now = K.clock.now();
@@ -1016,9 +1019,15 @@
     if (dstat) {
       if (o.n) return true;
       if (o.u && dstat.mtime >= sst.mtime) return true;
-      if (o.i && !(await confirm(ctx, 'cp: overwrite ' + q(dst) + '? '))) return true;
+      if (o.i && !(await confirm(ctx, 'cp: overwrite ' + q(dst) + '? '))) return false;
     }
-    if (sst.isLink) {
+    if (o.backup && dstat && !dstat.isDir) { try { ctx.fs.rename(dst, backupName(ctx, dst, o.backup, o.suffix)); dstat = null; } catch (e) { return cpFail(ctx, 'cannot backup', dst, e); } }
+    if ((o.hard || o.sym) && !sst.isLink) {
+      try {
+        if (dstat) { if (!o.f) throw new K.FsError('EEXIST', dst); ctx.fs.unlink(dst); }
+        if (o.sym) ctx.fs.symlink(src, dst); else hardLink(ctx, src, dst);
+      } catch (e) { return cpFail(ctx, 'cannot create ' + (o.sym ? 'symbolic' : 'hard') + ' link', dst, e); }
+    } else if (sst.isLink) {
       try { if (dstat) ctx.fs.unlink(dst); ctx.fs.symlink(sst.target, dst); } catch (e) { return cpFail(ctx, 'cannot create symbolic link', dst, e); }
     } else {
       let data;
@@ -1031,6 +1040,26 @@
     if (o.v) ctx.println(q(src) + ' -> ' + q(dst));
     if (o.preserve) preserveAttrs(ctx, o, dst, sst);
     return true;
+  }
+
+  /** GNU backup file name for `cp -b` / `mv -b` (--backup=simple|numbered|existing). */
+  function backupName(ctx, dst, mode, suffix) {
+    suffix = suffix || '~';
+    const dir = dst.indexOf('/') >= 0 ? dst.slice(0, dst.lastIndexOf('/') + 1) : '';
+    const base = dst.slice(dir.length);
+    let names = [];
+    try { names = ctx.fs.readdir(dir || '.'); } catch (e) { /* fall through to simple */ }
+    const numbered = names.filter((n) => n.startsWith(base + '.~') && /^\.~\d+~$/.test(n.slice(base.length)));
+    if (mode === 'numbered' || (mode === 'existing' && numbered.length)) {
+      const max = numbered.reduce((a, n) => Math.max(a, parseInt(n.slice(base.length + 2), 10)), 0);
+      return dir + base + '.~' + (max + 1) + '~';
+    }
+    return dst + suffix;
+  }
+  function backupMode(v) {
+    if (v == null || v === false) return null;
+    if (v === true || v === '') return 'existing';
+    return { none: null, off: null, simple: 'simple', never: 'simple', numbered: 'numbered', t: 'numbered', existing: 'existing', nil: 'existing' }[v] || 'existing';
   }
 
   function cpFail(ctx, what, path, e, suffix) {
@@ -1063,6 +1092,13 @@
     const destIsDir = !g.opts.T && ctx.fs.isDir(dest);
     if ((args.length > 1 || g.opts.t != null) && !destIsDir) { ctx.eprintln(ctx.name + ': target ' + q(dest) + ': ' + notDirReason(ctx, dest)); return 1; }
     let status = 0;
+    if (!destIsDir && !g.opts.T && args.length === 1 && dest.length > 1 && dest.endsWith('/')) {
+      const st0 = tryLstat(ctx, args[0]);
+      if (st0 && (!st0.isDir || ctx.name === 'mv') && !ctx.fs.exists(dest)) {
+        ctx.eprintln(ctx.name === 'mv' ? 'mv: cannot move ' + q(args[0]) + ' to ' + q(dest) + ': Not a directory' : 'cp: cannot create regular file ' + q(dest) + ': Not a directory');
+        return 1;
+      }
+    }
     for (const src of args) {
       const target = destIsDir ? joinPath(dest, VFS.basename(src.replace(/\/+$/, '') || src)) : dest;
       try { if (!(await op(src, target))) status = 1; } catch (e) {
@@ -1078,17 +1114,33 @@
     man: 'DESCRIPTION\n       Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.\n\nOPTIONS\n       -a, --archive\n              same as -dR --preserve=all\n       -f, --force\n              if an existing destination file cannot be opened, remove it and try again\n       -i     prompt before overwrite\n       -n     do not overwrite an existing file\n       -p     preserve mode, ownership and timestamps\n       -r, -R, --recursive\n              copy directories recursively\n       -t DIRECTORY\n              copy all SOURCE arguments into DIRECTORY\n       -u     copy only when the SOURCE file is newer than the destination file or when the destination file is missing\n       -v, --verbose\n              explain what is being done\n\nEXAMPLES\n       cp -r ~/engagement ~/engagement.bak\n              Back up a directory tree.\n       cp -v a.txt b.txt /tmp\n              Copy two files into /tmp.',
     help: "  -a, --archive                same as -dR --preserve=all\n  -f, --force                  if an existing destination file cannot be\n                                 opened, remove it and try again\n  -i, --interactive            prompt before overwrite\n  -n, --no-clobber             do not overwrite an existing file\n  -p                           same as --preserve=mode,ownership,timestamps\n  -R, -r, --recursive          copy directories recursively\n  -t, --target-directory=DIRECTORY  copy all SOURCE arguments into DIRECTORY\n  -T, --no-target-directory    treat DEST as a normal file\n  -u, --update                 copy only when the SOURCE file is newer\n  -v, --verbose                explain what is being done\n",
     authors: 'Torbjorn Granlund, David MacKenzie, and Jim Meyering',
-    spec: { short: 'afinpPLdrRuvt:T', long: ['archive', 'force', 'interactive', 'no-clobber', 'preserve=?', 'recursive', 'update', 'verbose', 'target-directory=', 'no-target-directory', 'dereference', 'no-dereference'],
+    spec: { short: 'afinpPLdrRuvt:TblsxS:', long: ['backup=?', 'suffix=', 'link', 'symbolic-link', 'parents', 'one-file-system', 'archive', 'force', 'interactive', 'no-clobber', 'preserve=?', 'recursive', 'update', 'verbose', 'target-directory=', 'no-target-directory', 'dereference', 'no-dereference'],
       alias: { archive: 'a', force: 'f', interactive: 'i', 'no-clobber': 'n', recursive: 'r', R: 'r', update: 'u', verbose: 'v', 'target-directory': 't', 'no-target-directory': 'T', dereference: 'L', 'no-dereference': 'P' } },
     async main(ctx, g) {
       const p = g.opts;
       const recursive = !!(p.r || p.a);
       if (p.n) ctx.eprintln('cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead');
       const o = {
-        recursive, f: !!p.f, i: !!p.i, n: !!p.n, u: !!p.u, v: !!p.v,
+        recursive, f: !!p.f, i: !!p.i, n: !!p.n, u: !!p.u, v: !!p.v, hard: !!(p.l || p.link), sym: !!(p.s || p['symbolic-link']),
+        backup: backupMode(p.backup != null ? p.backup : p.b ? true : null), suffix: p.S || p.suffix || null,
         preserve: !!(p.p || p.a || p.preserve), owner: !!(p.a || (p.p && ctx.isRoot)) && ctx.isRoot,
         deref: p.L ? true : (p.P || p.d || p.a || recursive) ? false : true,
       };
+      if (p.parents) {
+        const dir = g.opts.t != null ? g.opts.t : g.rest[g.rest.length - 1];
+        const srcs = g.opts.t != null ? g.rest : g.rest.slice(0, -1);
+        if (!dir || !srcs.length) return missingOperand(ctx, 'file operand');
+        if (!ctx.fs.isDir(dir)) { ctx.eprintln('cp: target ' + q(dir) + ': ' + notDirReason(ctx, dir)); return 1; }
+        let status = 0;
+        for (const src of srcs) {
+          const rel = src.replace(/^\/+/, '');
+          const parts = rel.split('/'); let cur = dir;
+          try { for (const part of parts.slice(0, -1)) { cur = joinPath(cur, part); if (!ctx.fs.exists(cur)) ctx.fs.mkdir(cur); } } catch (e) { if (!isFsError(e)) throw e; ctx.eprintln('cp: cannot make directory ' + q(cur) + ': ' + e.message); status = 1; continue; }
+          if (!tryLstat(ctx, src)) { ctx.eprintln('cp: cannot stat ' + q(src) + ': No such file or directory'); status = 1; continue; }
+          if (!(await copyTree(ctx, o, src, joinPath(dir, rel), true))) status = 1;
+        }
+        return status;
+      }
       return transfer(ctx, g, (src, dst) => copyTree(ctx, o, src, dst, true), o, (s, d) => 'cannot stat ' + q(s));
     },
   });
@@ -1100,13 +1152,14 @@
     man: 'DESCRIPTION\n       Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.\n\nOPTIONS\n       -f, --force\n              do not prompt before overwriting\n       -i, --interactive\n              prompt before overwrite\n       -n, --no-clobber\n              do not overwrite an existing file\n       -t DIRECTORY\n              move all SOURCE arguments into DIRECTORY\n       -u, --update\n              move only when the SOURCE file is newer than the destination\n       -v, --verbose\n              explain what is being done\n\nEXAMPLES\n       mv report.txt report-final.txt\n              Rename a file.\n       mv -v *.log /tmp/logs\n              Move every log file into a directory.',
     help: "  -f, --force                  do not prompt before overwriting\n  -i, --interactive            prompt before overwrite\n  -n, --no-clobber             do not overwrite an existing file\n  -t, --target-directory=DIRECTORY  move all SOURCE arguments into DIRECTORY\n  -T, --no-target-directory    treat DEST as a normal file\n  -u, --update                 move only when the SOURCE file is newer\n  -v, --verbose                explain what is being done\n",
     authors: 'Mike Parker, David MacKenzie, and Jim Meyering',
-    spec: { short: 'finuvt:T', long: ['force', 'interactive', 'no-clobber', 'update', 'verbose', 'target-directory=', 'no-target-directory'],
+    spec: { short: 'finuvt:TbS:', long: ['backup=?', 'suffix=', 'force', 'interactive', 'no-clobber', 'update', 'verbose', 'target-directory=', 'no-target-directory'],
       alias: { force: 'f', interactive: 'i', 'no-clobber': 'n', update: 'u', verbose: 'v', 'target-directory': 't', 'no-target-directory': 'T' } },
     async main(ctx, g) {
       const p = g.opts;
       const move = async (src, dst) => {
-        const sst = tryLstat(ctx, src);
-        if (!sst) { ctx.eprintln('mv: cannot stat ' + q(src) + ': No such file or directory'); return false; }
+        let sst = null; let why = 'No such file or directory';
+        try { sst = ctx.fs.lstat(src); } catch (e) { if (!isFsError(e)) throw e; why = e.message; }
+        if (!sst) { ctx.eprintln('mv: cannot stat ' + q(src) + ': ' + why); return false; }
         const dstat = tryLstat(ctx, dst);
         if (dstat) {
           if (sameFile(ctx, src, dst) && ctx.fs.abs(src) === ctx.fs.abs(dst)) { ctx.eprintln('mv: ' + q(src) + ' and ' + q(dst) + ' are the same file'); return false; }
@@ -1114,7 +1167,9 @@
           if (!sst.isDir && dstat.isDir) { ctx.eprintln('mv: cannot overwrite directory ' + q(dst) + ' with non-directory'); return false; }
           if (p.n) { ctx.eprintln('mv: not replacing ' + q(dst)); return false; }
           if (p.u && dstat.mtime >= sst.mtime) return true;
-          if (p.i && !p.f && !(await confirm(ctx, 'mv: overwrite ' + q(dst) + '? '))) return true;
+          if (p.i && !p.f && !(await confirm(ctx, 'mv: overwrite ' + q(dst) + '? '))) return false;
+          const bm = backupMode(p.backup != null ? p.backup : p.b ? true : null);
+          if (bm && !dstat.isDir) { try { ctx.fs.rename(dst, backupName(ctx, dst, bm, p.S || p.suffix)); } catch (e) { if (!isFsError(e)) throw e; ctx.eprintln('mv: cannot backup ' + q(dst) + ': ' + e.message); return false; } }
         }
         if (sst.isDir && (ctx.fs.abs(dst) + '/').indexOf(ctx.fs.abs(src).replace(/\/$/, '') + '/') === 0) {
           ctx.eprintln('mv: cannot move ' + q(src) + ' to a subdirectory of itself, ' + q(dst)); return false;
@@ -1191,10 +1246,9 @@
       } else if (applyMode(spec, 0, false, ctx.shell.umask) == null) {
         ctx.eprintln('chmod: invalid mode: ' + q(spec)); ctx.eprintln("Try 'chmod --help' for more information."); return 1;
       }
-      const status = await eachTarget(ctx, files, !!g.opts.R, 'changing permissions of', (p, st, shown) => {
+      const status = await eachTarget(g.opts.f ? Object.assign(Object.create(ctx), { eprintln() {}, err() {} }) : ctx, files, !!g.opts.R, 'changing permissions of', (p, st, shown) => {
         const next = refMode != null ? refMode : applyMode(spec, st.mode, st.isDir, ctx.shell.umask);
         const target = st.isLink ? ctx.fs.stat(p) : st;
-        if (target.mode === next && !g.opts.c && !g.opts.v) return;
         const old = target.mode & 0o7777;
         ctx.fs.chmod(p, next);
         const text = (m) => octal4(m) + ' (' + rwxString(m) + ')';

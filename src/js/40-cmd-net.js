@@ -52,7 +52,7 @@
     const bad = float ? !/^\d*\.?\d+$/.test(val) : !/^[+-]?\d+$/.test(val);
     if (bad) { ctx.eprintln(tool + ": invalid argument: '" + val + "'"); return null; }
     const n = float ? parseFloat(val) : parseInt(val, 10);
-    if (n < min || n > max) { ctx.eprintln(tool + ": invalid argument: '" + val + "': out of range: " + min + ' <= value <= ' + max); return null; }
+    if (n < min || n > max) { ctx.eprintln(tool + ": invalid argument: '" + val + "': out of range: " + min + ' <= value <= ' + (max === Number.MAX_SAFE_INTEGER ? '9223372036854775807' : max)); return null; }
     return n;
   }
 
@@ -143,6 +143,8 @@
     if (o['6']) { ctx.eprintln('ping: ' + target + ': Address family for hostname not supported'); return 2; }
     const dest = lookup(ctx, target);
     if (dest.err) { ctx.eprintln('ping: ' + target + ': ' + RESOLVE_MSG[dest.err]); return 2; }
+    const bcast = machine.ifaces.some((i) => i.kind !== 'loopback' && i.ip && i.bits < 31 && U.intToIp(U.parseCidr(i.ip + '/' + i.bits).broadcast) === dest.ip);
+    if (bcast && !o.b) { ctx.eprintln('ping: Do you want to ping broadcast? Then -b. If not, check your local firewall rules'); return 2; }
     const numeric = !!(o.n || dest.literal);
     const shown = dest.literal ? target : dest.name;
     const first = net.route(machine, dest.ip);
@@ -409,7 +411,8 @@
     if (r.metric) parts.push('metric', r.metric);
     return parts.join(' ') + ' ';
   }
-  const displayOrder = (a, b) => (a.dst === 'default' ? -1 : U.ipToInt(a.dst)) - (b.dst === 'default' ? -1 : U.ipToInt(b.dst)) || routeBits(a) - routeBits(b);
+  const dstKey = (r) => (r.dst === 'default' ? -1 : U.ipToInt(String(r.dst).split('/')[0]));
+  const displayOrder = (a, b) => dstKey(a) - dstKey(b) || routeBits(a) - routeBits(b);
   function localTable(m) {
     const out = [];
     for (const i of m.ifaces) {
@@ -1534,7 +1537,8 @@
     let entries = Array.from(m.arp.values()).filter((e) => !o.i || e.dev === o.i);
     if (g.rest.length) {
       const dest = lookup(ctx, g.rest[0]);
-      entries = dest.err ? [] : entries.filter((e) => e.ip === dest.ip);
+      if (dest.err) { ctx.eprintln(g.rest[0] + ': Unknown host'); return 1; }
+      entries = entries.filter((e) => e.ip === dest.ip);
       if (!entries.length) { ctx.println((dest.err ? g.rest[0] : g.rest[0]) + ' (' + (dest.ip || g.rest[0]) + ') -- no entry'); return o.a ? 0 : 1; }
     }
     if (!entries.length) return 0;
@@ -1604,6 +1608,16 @@
     return 0;
   }
 
+  /** -f/-g/-t applied to a key: value listing (device show, connection show). */
+  function nmFilterKv(o, text) {
+    if (!o.f && !o.t) return text;
+    const want = o.f && !/^(all|common)$/i.test(o.f) ? o.f.split(',').map((x) => x.trim().toUpperCase()) : null;
+    const rows = text.split('\n').map((l) => { const k = l.slice(0, l.indexOf(':')); return { k, v: l.slice(l.indexOf(':') + 1).trim(), sec: '' }; });
+    const sel = want ? rows.filter((r) => want.some((w) => { const K0 = r.k.toUpperCase(); return K0 === w || K0.replace(/\[\d+\]$/, '') === w || K0.startsWith(w + '.'); })) : rows;
+    if (o.g) return sel.map((r) => r.v).join('\n');
+    if (o.t) return sel.map((r) => r.k + ':' + r.v).join('\n');
+    return sel.map((r) => pad(r.k + ':', 40) + r.v).join('\n');
+  }
   function nmDeviceShow(ctx, d) {
     const m = ctx.machine; const i = d.i; const out = [];
     const kv = (k, v) => out.push(pad(k + ':', 40) + v);
@@ -1671,7 +1685,7 @@
       if (x === '-t' || x === '--terse') o.t = true;
       else if (x === '-p' || x === '--pretty') o.p = true;
       else if (x === '-f' || x === '--fields') o.f = a[++n];
-      else if (x === '-g' || x === '--get-values') { o.f = a[++n]; o.t = true; }
+      else if (x === '-g' || x === '--get-values') { o.f = a[++n]; o.t = true; o.g = true; }
       else if (x === '-m' || x === '--mode') o.m = a[++n];
       else if (x === '-c' || x === '--colors') o.c = a[++n];
       else if (x === '-w' || x === '--wait' || x === '-e' || x === '--escape') n++;
@@ -1689,18 +1703,38 @@
     if (!obj) { ctx.eprintln("Error: argument '" + rest[0] + "' not understood. Try passing --help instead."); return 2; }
     const cmdWord = rest[1]; const args = rest.slice(2);
     const devs = nmDevices(m);
+    const nst = m.state.nmcli = m.state.nmcli || { net: true, wifi: true, wwan: true };
     const bad = (w) => { ctx.eprintln("Error: argument '" + w + "' not understood. Try passing --help instead."); return 2; };
     if (obj === 'general') {
       if (!cmdWord || abbr(cmdWord, 'status')) {
         const connected = devs.some((d) => d.up && d.type !== 'loopback');
-        return nmPrint(ctx, o, ['STATE', 'CONNECTIVITY', 'WIFI-HW', 'WIFI', 'WWAN-HW', 'WWAN'], [[connected ? 'connected' : 'disconnected', connected ? 'full' : 'none', 'enabled', 'enabled', 'enabled', 'enabled']]);
+        return nmPrint(ctx, o, ['STATE', 'CONNECTIVITY', 'WIFI-HW', 'WIFI', 'WWAN-HW', 'WWAN'], [[nst.net ? (connected ? 'connected' : 'disconnected') : 'asleep', connected ? 'full' : 'none', 'enabled', nst.wifi ? 'enabled' : 'disabled', 'enabled', nst.wwan ? 'enabled' : 'disabled']]);
       }
       if (abbr(cmdWord, 'hostname')) { ctx.println(m.hostname); return 0; }
       return bad(cmdWord);
     }
-    if (obj === 'networking') { if (!cmdWord || abbr(cmdWord, 'connectivity')) ctx.println(cmdWord ? 'full' : 'enabled'); else return bad(cmdWord); return 0; }
+    if (obj === 'networking') {
+      if (!cmdWord) { ctx.println(nst.net ? 'enabled' : 'disabled'); return 0; }
+      if (abbr(cmdWord, 'connectivity')) { ctx.println(nst.net && devs.some((d) => d.up && d.type !== 'loopback') ? 'full' : 'none'); return 0; }
+      if (cmdWord === 'on' || cmdWord === 'off') {
+        for (const d of devs) if (d.type !== 'loopback') setLinkState(m, d.i, cmdWord === 'on');
+        nst.net = cmdWord === 'on';
+        return 0;
+      }
+      return bad(cmdWord);
+    }
     if (obj === 'radio') {
-      if (!cmdWord || abbr(cmdWord, 'all')) return nmPrint(ctx, o, ['WIFI-HW', 'WIFI', 'WWAN-HW', 'WWAN'], [['enabled', 'enabled', 'enabled', 'enabled']]);
+      const en = (b) => (b ? 'enabled' : 'disabled');
+      if (!cmdWord || abbr(cmdWord, 'all')) {
+        if (cmdWord && args[0]) { if (args[0] !== 'on' && args[0] !== 'off') return bad(args[0]); nst.wifi = nst.wwan = args[0] === 'on'; return 0; }
+        return nmPrint(ctx, o, ['WIFI-HW', 'WIFI', 'WWAN-HW', 'WWAN'], [['enabled', en(nst.wifi), 'enabled', en(nst.wwan)]]);
+      }
+      if (cmdWord === 'wifi' || cmdWord === 'wwan') {
+        if (!args[0]) { ctx.println(en(nst[cmdWord])); return 0; }
+        if (args[0] !== 'on' && args[0] !== 'off') return bad(args[0]);
+        nst[cmdWord] = args[0] === 'on';
+        return 0;
+      }
       return bad(cmdWord);
     }
     if (obj === 'device') {
@@ -1708,7 +1742,7 @@
       if (abbr(cmdWord, 'show')) {
         const list = args[0] ? devs.filter((d) => d.name === args[0]) : devs;
         if (!list.length) { ctx.eprintln("Error: Device '" + args[0] + "' not found."); return 10; }
-        ctx.println(list.map((d) => nmDeviceShow(ctx, d)).join('\n\n'));
+        ctx.println(list.map((d) => nmFilterKv(o, nmDeviceShow(ctx, d))).join('\n\n'));
         return 0;
       }
       if (abbr(cmdWord, 'connect') || abbr(cmdWord, 'disconnect')) {
@@ -1728,7 +1762,7 @@
         if (args[0]) {
           const d = devs.find((x) => x.profile === args[0] || x.uuid === args[0]);
           if (!d) { ctx.eprintln('Error: ' + args[0] + ' - no such connection profile.'); return 10; }
-          ctx.println(nmProfileShow(ctx, d));
+          ctx.println(nmFilterKv(o, nmProfileShow(ctx, d)));
           return 0;
         }
         return nmPrint(ctx, o, ['NAME', 'UUID', 'TYPE', 'DEVICE'], devs.map((d) => [d.profile, d.uuid, d.type, d.up ? d.name : '--']));
