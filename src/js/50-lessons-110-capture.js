@@ -203,7 +203,7 @@
         ),
         hint: 'Copy the line from the prompt: options first, then the filter `icmp`, then the redirect, then `&`.',
         solution: 'sudo tcpdump -n -c 4 -i eth0 icmp > ~/practice/capture/ping.txt 2>&1 &',
-        check: { all: [{ cmd: 'tcpdump', args: ['icmp', '-c'] }, { line: /&\s*$/ }, { file: { path: PRACTICE + '/ping.txt', exists: true } }] },
+        check: { all: [{ cmd: 'tcpdump', args: ['icmp', '-c'] }, { line: /&\s*$/ }] },
       },
       {
         id: 'ping',
@@ -235,13 +235,6 @@
         check: { cmd: 'cat', argsRe: /ping\.txt/, out: /ICMP echo request[\s\S]*ICMP echo reply/ },
       },
       {
-        id: 'seq-q',
-        prompt: 'Read the ICMP lines you just printed. What is the `length` of each echo request? Type the number.',
-        hint: 'It is at the end of each line: `ICMP echo request, id ..., seq 1, length N`.',
-        solution: '64',
-        answer: /^64$/,
-      },
-      {
         id: 'not',
         prompt: T(
           'Filters combine. `and`, `or` and `not` work as you would expect, and `host`, `port`, `tcp`, `udp`, `icmp` and `arp` are the building blocks. This capture keeps everything except address-resolution (ARP) traffic. You have no traffic of your own running, so it shows the background chatter of the lab:',
@@ -267,7 +260,7 @@
         ),
         hint: 'Same shape as the ICMP capture: options, then the filter, then `> file 2>&1 &`. Use `-nn`.',
         solution: 'sudo tcpdump -nn -c 5 -i eth0 host web01 and tcp port 80 > ~/practice/capture/web.txt 2>&1 &',
-        check: { all: [{ cmd: 'tcpdump', args: ['-nn', 'host', 'port', 'and'] }, { line: /&\s*$/ }, { file: { path: PRACTICE + '/web.txt', exists: true } }] },
+        check: { all: [{ cmd: 'tcpdump', args: ['-nn', 'host', 'port', 'and'] }, { line: /&\s*$/ }] },
       },
       {
         id: 'curl',
@@ -292,11 +285,16 @@
           'cat ~/practice/capture/web.txt',
           '```',
           '',
-          'The `Flags` field shows TCP control bits. Before any data moves, the two ends perform a **three-way handshake**: the client sends `[S]` (SYN, "I want to connect"), the server answers `[S.]` (SYN and ACK, "agreed"), and the client confirms with `[.]` (ACK). Then comes the first data packet, `[P.]`, which carries the request line `GET / HTTP/1.1`.',
-          '',
-          'Which flags does the second packet carry? Type them with the brackets, or without.'
+          'The `Flags` field shows TCP control bits. Before any data moves, the two ends perform a **three-way handshake**: the client sends `[S]` (SYN, "I want to connect"), the server answers `[S.]` (SYN and ACK, "agreed"), and the client confirms with `[.]` (ACK). Then comes the first data packet, `[P.]`, which carries the request line `GET / HTTP/1.1`.'
         ),
-        hint: 'Run `wait` and `cat` the file, then look at the Flags field of the second packet line. The answer has a dot in it.',
+        hint: 'Run `wait`, then `cat` the file `~/practice/capture/web.txt`.',
+        solution: ['wait', 'cat ~/practice/capture/web.txt'],
+        check: { cmd: 'cat', argsRe: /web\.txt/, out: /Flags \[S\][\s\S]*Flags \[S\.\][\s\S]*Flags \[P\./ },
+      },
+      {
+        id: 'hs-q',
+        prompt: 'In the capture you just read, which flags does the **second** packet carry? That is the server\'s answer to the connection request. Type them, with or without the brackets.',
+        hint: 'Look at the `Flags` field of the second packet line. The answer has a dot in it.',
         solution: 'S.',
         answer: /^\[?s\.\]?$/i,
       },
@@ -359,7 +357,7 @@
         ),
         hint: 'Like the last lesson, plus `-A` for the ASCII payload.',
         solution: 'sudo tcpdump -nn -A -c 8 -i eth0 tcp port 80 > ~/practice/capture/http.txt 2>&1 &',
-        check: { all: [{ cmd: 'tcpdump', args: ['-A', '-c'] }, { line: /&\s*$/ }, { file: { path: PRACTICE + '/http.txt', exists: true } }] },
+        check: { all: [{ cmd: 'tcpdump', args: ['-A', '-c'] }, { line: /&\s*$/ }] },
       },
       {
         id: 'curl-u',
@@ -416,7 +414,7 @@
         ),
         hint: 'Copy the last capture command and change `80` to `443` and `http.txt` to `https.txt`.',
         solution: 'sudo tcpdump -nn -A -c 8 -i eth0 tcp port 443 > ~/practice/capture/https.txt 2>&1 &',
-        check: { all: [{ cmd: 'tcpdump', args: ['-A', '-c', '443'] }, { line: /&\s*$/ }, { file: { path: PRACTICE + '/https.txt', exists: true } }] },
+        check: { all: [{ cmd: 'tcpdump', args: ['-A', '-c', '443'] }, { line: /&\s*$/ }] },
       },
       {
         id: 'curl-https',
@@ -508,7 +506,7 @@
         ),
         hint: 'Options `-nn -c 6 -i eth0 -w FILE`, then the filter `host web01`, then `&`.',
         solution: 'sudo tcpdump -nn -c 6 -i eth0 -w ~/engagement/captures/web01.pcap host web01 &',
-        check: { all: [{ cmd: 'tcpdump', args: ['-w', 'host', '-c'] }, { line: /&\s*$/ }, { file: { path: HOME + '/engagement/captures/web01.pcap', exists: true } }] },
+        check: { all: [{ cmd: 'tcpdump', args: ['-w', 'host', '-c'] }, { line: /&\s*$/ }] },
       },
       {
         id: 'traffic',
