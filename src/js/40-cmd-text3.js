@@ -3819,5 +3819,175 @@ EXAMPLES
   });
   const HEXDUMP_HELP = `\nUsage:\n hexdump [options] <file>...\n\nDisplay file contents in hexadecimal, decimal, octal, or ascii.\n\nOptions:\n -b, --one-byte-octal      one-byte octal display\n -c, --one-byte-char       one-byte character display\n -C, --canonical           canonical hex+ASCII display\n -d, --two-bytes-decimal   two-byte decimal display\n -e, --format <format>     display format string\n -f, --format-file <file>  file that contains format strings\n -L, --color[=<mode>]      interpret color formatting specifiers\n                             colors are enabled by default\n -n, --length <length>     interpret only length bytes of input\n -o, --two-bytes-octal     two-byte octal display\n -s, --skip <offset>       skip offset bytes from the beginning\n -v, --no-squeezing        output identical lines\n -x, --two-bytes-hex       two-byte hexadecimal display\n\n -h, --help                display this help\n -V, --version             display version\n\nFor more details see hexdump(1).\n`;
 
+  /* --------------------------------------------------------------- fmt */
+  const FMT = { LINE: 4900, SENTENCE_BONUS: 2500, NOBREAK: 360000, PUNCT_BONUS: 1600, PAREN_BONUS: 1600 };
+  const fmtShort = (n) => (n * 10) * (n * 10);
+  const fmtRagged = (n) => Math.floor(fmtShort(n) / 2);
+  /** Split a line into its indent (in columns) and words; `rest` is the text after any prefix. */
+  function fmtWords(rest, startCol) {
+    let col = startCol; let i = 0;
+    const advance = (c) => (c === '\t' ? col + 8 - (col % 8) : col + 1);
+    while (i < rest.length && (rest[i] === ' ' || rest[i] === '\t')) { col = advance(rest[i]); i++; }
+    const indent = col; const words = [];
+    while (i < rest.length) {
+      let j = i; while (j < rest.length && rest[j] !== ' ' && rest[j] !== '\t') j++;
+      const text = rest.slice(i, j); col += [...text].length;
+      let space = 0; i = j;
+      while (i < rest.length && (rest[i] === ' ' || rest[i] === '\t')) { const next = advance(rest[i]); space += next - col; col = next; i++; }
+      const core = text.replace(/[)\]'"]+$/, '');
+      const last = core[core.length - 1] || text[text.length - 1];
+      words.push({ text, length: [...text].length, space, period: '.?!'.includes(last), punct: /[!-/:-@[-`{-~]/.test(last), paren: text[0] === '(' || text[0] === '[', atEol: i >= rest.length });
+    }
+    return { indent, words };
+  }
+  const fmtBaseCost = (words, i) => {
+    let cost = FMT.LINE;
+    if (i > 0) {
+      const prev = words[i - 1];
+      if (prev.period) cost += prev.final ? -FMT.SENTENCE_BONUS : FMT.NOBREAK;
+      else if (prev.punct) cost -= FMT.PUNCT_BONUS;
+      else if (i > 1 && words[i - 2].final) cost += Math.floor(40000 / (prev.length + 2));
+    }
+    const w = words[i];
+    if (w.paren) cost -= FMT.PAREN_BONUS;
+    else if (w.final) cost += Math.floor(22500 / (w.length + 2));
+    return cost;
+  }
+  /** Optimal line breaking as in GNU fmt: returns the start index of each output line. */
+  function fmtBreaks(words, firstIndent, otherIndent, goal, max) {
+    const n = words.length;
+    const best = new Array(n + 1).fill(0); const next = new Array(n + 1).fill(n); const lineLen = new Array(n + 1).fill(0);
+    for (let start = n - 1; start >= 0; start--) {
+      let bestCost = Infinity;
+      let len = (start === 0 ? firstIndent : otherIndent) + words[start].length;
+      let w = start;
+      do {
+        w++;
+        let cost = 0;
+        if (w !== n) {
+          cost = fmtShort(goal - len);
+          if (next[w] !== n) cost += fmtRagged(len - lineLen[w]);
+        }
+        cost += best[w];
+        if (cost < bestCost) { bestCost = cost; next[start] = w; lineLen[start] = len; }
+        if (w === n) break;
+        len += words[w - 1].space + words[w].length;
+      } while (len < max);
+      best[start] = bestCost + fmtBaseCost(words, start);
+    }
+    const starts = []; for (let s = 0; s < n; s = next[s]) starts.push(s);
+    return starts;
+  }
+  /** Emit n columns of white space the way fmt does (tabs where they cover at least two columns). */
+  function fmtSpace(col, n, useTabs) {
+    const target = col + n; const tabTarget = Math.floor(target / 8) * 8;
+    let out = '';
+    if (useTabs && col + 1 < tabTarget) while (col < tabTarget) { out += '\t'; col = (Math.floor(col / 8) + 1) * 8; }
+    return out + ' '.repeat(Math.max(0, target - col));
+  }
+  function fmtEmit(para, o) {
+    const { words, firstIndent, otherIndent } = para;
+    fmtFinish(words, o.uniform);
+    const starts = fmtBreaks(words, firstIndent, otherIndent, o.goal, o.max);
+    let out = '';
+    starts.forEach((s, li) => {
+      const end = li + 1 < starts.length ? starts[li + 1] : words.length;
+      let col = 0; let line = '';
+      if (o.prefix) { line = o.prefix; col = o.prefix.length; }
+      const indent = li === 0 ? firstIndent : otherIndent;
+      line += fmtSpace(col, indent - col, o.tabs); col = Math.max(col, indent);
+      for (let k = s; k < end; k++) {
+        line += words[k].text; col += words[k].length;
+        if (k + 1 < end) { line += fmtSpace(col, words[k].space, o.tabs); col += words[k].space; }
+      }
+      out += line + '\n';
+    });
+    return out;
+  }
+  function fmtText(text, o) {
+    const lines = text.split('\n'); if (lines[lines.length - 1] === '') lines.pop();
+    let out = ''; let para = null; o.tabs = false;
+    const flush = () => { if (para) { out += fmtEmit(para, o); para = null; } };
+    const parse = (line) => {
+      if (o.prefix && !line.startsWith(o.prefix)) return null;
+      return fmtWords(o.prefix ? line.slice(o.prefix.length) : line, o.prefix ? o.prefix.length : 0);
+    };
+    for (const line of lines) {
+      // Like GNU fmt, output uses tabs from the moment a tab has been read.
+      if (/^[ ]*\t/.test(line)) o.tabs = true;
+      const p = parse(line);
+      if (!p) { flush(); out += line + '\n'; continue; }
+      if (!p.words.length) { flush(); out += (o.prefix ? line.replace(/\s+$/, '') : '') + '\n'; continue; }
+      const joins = para && !o.split && (para.count === 1 ? (o.crown || (o.tagged && p.indent !== para.firstIndent) || (!o.crown && !o.tagged && p.indent === para.firstIndent)) : p.indent === para.otherIndent);
+      if (!joins) {
+        flush();
+        para = { words: [], firstIndent: p.indent, otherIndent: p.indent, count: 0 };
+      } else if (para.count === 1 && (o.crown || o.tagged)) para.otherIndent = p.indent;
+      para.count++;
+      for (const w of p.words) para.words.push(w);
+      if (line.includes('\t')) o.tabs = true;
+    }
+    flush();
+    return out;
+  }
+  /** Decide each word's trailing space once its paragraph is complete (end of line, sentence ends, -u). */
+  function fmtFinish(words, uniform) {
+    words.forEach((w) => { w.final = w.period && (w.atEol || w.space > 1); });
+    words[words.length - 1].final = true; // the end of a paragraph counts as a sentence end
+    words.forEach((w, i) => {
+      if (uniform) w.space = w.final ? 2 : 1;
+      else if (w.atEol) w.space = w.period ? 2 : 1;
+      if (i === words.length - 1) w.space = 0;
+    });
+  }
+  gnu({
+    name: 'fmt',
+    summary: 'simple optimal text formatter',
+    synopsis: 'fmt [-WIDTH] [OPTION]... [FILE]...',
+    man: `DESCRIPTION
+       Reformat each paragraph in the FILE(s), writing to standard output.
+       Lines are joined and refilled to at most WIDTH columns (default 75).
+
+OPTIONS
+       -c, --crown-margin       preserve indentation of first two lines
+       -p, --prefix=STRING      reformat only lines beginning with STRING
+       -s, --split-only         split long lines, but do not refill
+       -t, --tagged-paragraph   indentation of first line different from second
+       -u, --uniform-spacing    one space between words, two after sentences
+       -w, --width=WIDTH        maximum line width (default of 75 columns)
+       -g, --goal=WIDTH         goal width (default of 93% of width)
+
+EXAMPLES
+       fmt -w 60 notes.txt
+       fmt -s -w 72 -p '> ' reply.txt`,
+    spec: { short: 'cstuw:g:p:0123456789', long: ['crown-margin', 'tagged-paragraph', 'split-only', 'uniform-spacing', 'width=', 'goal=', 'prefix=', 'help', 'version'], alias: { 'crown-margin': 'c', 'tagged-paragraph': 't', 'split-only': 's', 'uniform-spacing': 'u', width: 'w', goal: 'g', prefix: 'p' } },
+    async run(ctx, g) {
+      const bad = (what, v, why) => { ctx.err('fmt: invalid ' + what + ': ' + quote(ctx, String(v)) + (why ? ': ' + why : '') + '\n'); return 1; };
+      let widthArg = g.opts.w;
+      const first = ctx.args[0];
+      if (widthArg === undefined && first && /^-\d+$/.test(first)) widthArg = first.slice(1);
+      const parse = (v) => (/^\d+$/.test(String(v)) ? Number(v) : null);
+      let max = 75; let goal;
+      if (widthArg !== undefined) { max = parse(widthArg); if (max === null) return bad('width', widthArg); }
+      if (g.opts.g !== undefined) { goal = parse(g.opts.g); if (goal === null) return bad('width', g.opts.g); }
+      if (goal !== undefined && widthArg === undefined) max = goal + 10;
+      if (max > 2500) return bad('width', widthArg === undefined ? g.opts.g : widthArg, 'Numerical result out of range');
+      if (goal === undefined) goal = Math.floor((max * 187) / 200);
+      else if (goal > max) return bad('width', g.opts.g, 'Numerical result out of range');
+      const opts = { max, goal, crown: !!g.opts.c, tagged: !!g.opts.t, split: !!g.opts.s, uniform: !!g.opts.u, prefix: g.opts.p === undefined ? '' : String(g.opts.p) };
+      let failed = false;
+      const operands = g.rest.filter((f) => !(f === first && /^-\d+$/.test(f)));
+      for (const f of operands.length ? operands : ['-']) {
+        let text;
+        try { text = f === '-' ? await stdinText(ctx) : ctx.fs.read(f); } catch (e) {
+          if (!(e instanceof K.FsError)) throw e;
+          ctx.err("fmt: cannot open '" + f + "' for reading: " + e.message + '\n'); failed = true; continue;
+        }
+        ctx.out(fmtText(text, opts));
+      }
+      return failed ? 1 : 0;
+    },
+  });
+
   K.textKit = { gnu, readFiles, stdinText, quote, breathe, bytesOf, HELP, VERSION, usageTry };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

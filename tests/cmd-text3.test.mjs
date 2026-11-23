@@ -282,3 +282,26 @@ table('hexdump: default, canonical and byte formats', [
   [`hexdump -Z`, '', "hexdump: invalid option -- 'Z'\nTry 'hexdump --help' for more information.\n", 1],
   [`printf 'abc' | hexdump -C | head -1 | wc -l`, '1\n'],
 ]);
+
+/* ------------------------------------------------------------------ fmt */
+// Expected output checked against GNU fmt 9.4.
+table('fmt: refilling, sentences and indentation', [
+  [`printf 'a   b.  c d.\\ne f  g.   H\\n   \\nnext\\n' | fmt`, 'a   b.  c d.  e f  g.   H\n\nnext\n'],
+  [`printf 'one\\n  two\\n  three\\nfour\\n\\n   x y\\n   z\\n' | fmt`, 'one\n  two three\nfour\n\n   x y z\n'],
+  [`printf 'Hello.  World. Foo? bar!  baz\\nfoo.\\nx   y\\tz\\n' | fmt -w 20`, 'Hello.\nWorld. Foo? bar!\nbaz foo.  x   y   z\n'],
+  [`printf 'x\\n%s\\n' "$(seq -s' ' 1 60)" | fmt`, 'x 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26\n27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50\n51 52 53 54 55 56 57 58 59 60\n'],
+  [`seq -s' ' 1 40 | fmt -20`, '1 2 3 4 5 6 7 8\n9 10 11 12 13 14\n15 16 17 18 19 20\n21 22 23 24 25 26\n27 28 29 30 31 32\n33 34 35 36 37 38\n39 40\n'],
+  [`printf 'aaa bbb ccc\\nddd\\n' | fmt -s -w 8`, 'aaa\nbbb ccc\nddd\n'],
+  [`printf '> aa bb\\n> cc\\nxx yy\\n' | fmt -p '>'`, '> aa bb cc\nxx yy\n'],
+  [`printf '  \\t x\\ty\\n' | fmt`, '\t x\ty\n'],
+  [`printf 'one two\\n   three\\n   four\\nfive\\n' | fmt -c`, 'one two three four\nfive\n'],
+  [`printf '  one two\\nthree four\\n  five\\n' | fmt -t`, '  one two three four\n  five\n'],
+  [`printf 'a b\\n' | fmt -u -w 3`, 'a\nb\n'],
+]);
+
+table('fmt: errors', [
+  [`fmt nofile`, '', "fmt: cannot open 'nofile' for reading: No such file or directory\n", 1],
+  [`echo a | fmt -x`, '', "fmt: invalid option -- 'x'\nTry 'fmt --help' for more information.\n", 1],
+  [`echo a | fmt -w abc`, '', 'fmt: invalid width: ‘abc’\n', 1],
+  [`echo a | fmt -g 90 -w 50`, '', 'fmt: invalid width: ‘90’: Numerical result out of range\n', 1],
+]);
