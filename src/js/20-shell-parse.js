@@ -11,7 +11,7 @@
   const K = root.K;
 
   class ParseError extends Error {
-    constructor(msg, incomplete) { super(msg); this.name = 'ParseError'; this.incomplete = !!incomplete; }
+    constructor(msg, incomplete, extra) { super(msg); this.name = 'ParseError'; this.incomplete = !!incomplete; if (extra) Object.assign(this, extra); }
   }
 
   const RESERVED = new Set(['if', 'then', 'elif', 'else', 'fi', 'for', 'in', 'do', 'done', 'while', 'until', 'case', 'esac', '{', '}', 'function', '!']);
@@ -138,11 +138,78 @@
           if (j < 0) throw new ParseError('unmatched `', true);
           push('n', '$(' + src.slice(i + 1, j) + ')'); i = j + 1; continue;
         }
+        if (ch === '(' && !quoted && !parts.length && curQ === 'n' && /^[A-Za-z_][A-Za-z0-9_]*\+?=$/.test(cur)) {
+          // array literal: name=(a b "c d")
+          let depth = 0; let j = i;
+          for (; j < n; j++) {
+            const c = src[j];
+            if (c === '\\') { j++; continue; }
+            if (c === "'") { const k = src.indexOf("'", j + 1); if (k < 0) throw new ParseError('unmatched \'', true); j = k; continue; }
+            if (c === '"') { let k = j + 1; while (k < n && src[k] !== '"') { if (src[k] === '\\') k++; k++; } if (k >= n) throw new ParseError('unmatched "', true); j = k; continue; }
+            if (c === '(') depth++;
+            else if (c === ')') { depth--; if (depth === 0) break; }
+          }
+          if (j >= n) throw new ParseError('unmatched (', true);
+          const inner = src.slice(i + 1, j);
+          i = j + 1; flush();
+          return { type: 'word', parts, quoted: true, raw: src.slice(start, i), arr: lex(inner).filter((t) => t.type === 'word') };
+        }
         if (ch === ' ' || ch === '\t' || ch === '\n' || ch === ';' || ch === '&' || ch === '|' || ch === '<' || ch === '>' || ch === '(' || ch === ')') break;
         push('n', ch); i++;
       }
       flush();
       return { type: 'word', parts, quoted, raw: src.slice(start, i) };
+    }
+
+    const CMD_WORDS = new Set(['then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', '{']);
+    function cmdPos() {
+      const last = toks[toks.length - 1];
+      if (!last) return true;
+      if (last.type === 'nl') return true;
+      if (last.type === 'op') return last.v !== ')';
+      if (last.type === 'word' && !last.quoted && last.parts.length === 1 && last.parts[0].q === 'n') return CMD_WORDS.has(last.parts[0].s);
+      return false;
+    }
+    function afterFor() {
+      const last = toks[toks.length - 1];
+      return !!last && last.type === 'word' && last.raw === 'for';
+    }
+
+    /** `[[ ... ]]`: the operators && || ( ) < > are words here, and the pattern after =~ is read raw. */
+    function readDbracket() {
+      for (;;) {
+        while (i < n && (src[i] === ' ' || src[i] === '\t' || src[i] === '\n' || (src[i] === '\\' && src[i + 1] === '\n'))) i += src[i] === '\\' ? 2 : 1;
+        if (i >= n) throw new ParseError("unexpected EOF while looking for `]]'", true);
+        const c = src[i];
+        let t = null;
+        if (c === '&' && src[i + 1] === '&') { t = '&&'; i += 2; }
+        else if (c === '|' && src[i + 1] === '|') { t = '||'; i += 2; }
+        else if (c === '(' || c === ')' || c === '<' || c === '>') { t = c; i++; }
+        if (t) { toks.push({ type: 'word', parts: [{ q: 'n', s: t }], quoted: false, raw: t, dbop: true }); continue; }
+        const prev = toks[toks.length - 1];
+        if (prev && prev.type === 'word' && prev.raw === '=~' && src[i] !== ']') {
+          const start = i; const parts = []; let cur = ''; let depth = 0;
+          const flushP = (q) => { if (cur !== '') { parts.push({ q, s: cur }); cur = ''; } };
+          while (i < n) {
+            const d = src[i];
+            if ((d === ' ' || d === '\t' || d === '\n') && depth === 0) break;
+            if (d === '\\') { cur += d + (src[i + 1] || ''); i += 2; continue; }
+            if (d === "'") { const k = src.indexOf("'", i + 1); if (k < 0) throw new ParseError('unmatched \'', true); flushP('n'); parts.push({ q: 's', s: src.slice(i + 1, k) }); i = k + 1; continue; }
+            if (d === '"') { let k = i + 1; while (k < n && src[k] !== '"') { if (src[k] === '\\') k++; k++; } if (k >= n) throw new ParseError('unmatched "', true); flushP('n'); parts.push({ q: 'd', s: src.slice(i + 1, k) }); i = k + 1; continue; }
+            if (d === '$') { const e = dollarEnd(src, i); cur += src.slice(i, e); i = e; continue; }
+            if (d === '(') depth++;
+            else if (d === ')') { if (depth === 0) break; depth--; }
+            cur += d; i++;
+          }
+          flushP('n');
+          toks.push({ type: 'word', parts, quoted: true, raw: src.slice(start, i) });
+          continue;
+        }
+        const w2 = readWord();
+        if (!w2.parts.length && !w2.quoted) throw new ParseError('parse error near `' + (src[i] || '\\n') + '\'', false, { pos: i });
+        toks.push(w2);
+        if (w2.raw === ']]') return;
+      }
     }
 
     function readHeredocs() {
@@ -165,10 +232,22 @@
       }
     }
 
+    let tokCount = 0; let prevStart = 0;
     while (i < n) {
+      while (tokCount < toks.length) toks[tokCount++].pos = prevStart;
+      prevStart = i;
       const ch = src[i];
       if (ch === ' ' || ch === '\t') { i++; continue; }
       if (ch === '\\' && src[i + 1] === '\n') { i += 2; continue; }
+      if (ch === '(' && src[i + 1] === '(' && (cmdPos() || afterFor())) {
+        // (( arithmetic )) — only when the matching close is an adjacent "))"
+        let depth = 0; let j = i; let end = -1;
+        for (; j < n; j++) {
+          if (src[j] === '(') depth++;
+          else if (src[j] === ')') { depth--; if (depth === 0) { if (src[j - 1] === ')') end = j; break; } }
+        }
+        if (end > 0) { toks.push({ type: 'arith', expr: src.slice(i + 2, end - 1), raw: src.slice(i, end + 1) }); i = end + 1; continue; }
+      }
       if (ch === '\n') { toks.push({ type: 'nl' }); i++; readHeredocs(); continue; }
       if (ch === '#') { while (i < n && src[i] !== '\n') i++; continue; }
       // redirection with an explicit fd, e.g. 2> or 2>&1
@@ -179,12 +258,12 @@
       }
       const c = src[j];
       if (c === '>' || c === '<' || (c === '&' && src[j + 1] === '>')) {
-        let op;
+        let op; let force = false;
         if (c === '&') { op = src[j + 2] === '>' ? '&>>' : '&>'; j += op.length; }
         else if (c === '>') {
           if (src[j + 1] === '>') { op = '>>'; j += 2; }
           else if (src[j + 1] === '&') { op = '>&'; j += 2; }
-          else if (src[j + 1] === '|') { op = '>'; j += 2; }
+          else if (src[j + 1] === '|') { op = '>'; j += 2; force = true; }
           else { op = '>'; j += 1; }
         } else {
           if (src[j + 1] === '<' && src[j + 2] === '<') { op = '<<<'; j += 3; }
@@ -193,7 +272,7 @@
           else { op = '<'; j += 1; }
         }
         i = j;
-        const tok = { type: 'redir', op, fd: fd == null ? (op[0] === '<' ? 0 : 1) : fd };
+        const tok = { type: 'redir', op, fd: fd == null ? (op[0] === '<' ? 0 : 1) : fd, force };
         if (op === '>&' || op === '<&') {
           const m = /^([0-9]+|-)/.exec(src.slice(i));
           if (m) { tok.dup = m[1]; i += m[1].length; }
@@ -220,10 +299,14 @@
         continue;
       }
       if (ch === '(' || ch === ')') { toks.push({ type: 'op', v: ch }); i++; continue; }
+      const atCmd = cmdPos();
       const w = readWord();
-      if (!w.parts.length && !w.quoted) { throw new ParseError('parse error near `' + src[i] + '\''); }
+      if (!w.parts.length && !w.quoted) { throw new ParseError('parse error near `' + src[i] + '\'', false, { pos: i }); }
       toks.push(w);
+      if (atCmd && w.raw === '[[' && !w.quoted) readDbracket();
     }
+    while (tokCount < toks.length) toks[tokCount++].pos = prevStart;
+    { let ln = 1; let k = 0; for (const t of toks) { while (k < t.pos && k < n) { if (src[k] === '\n') ln++; k++; } t.line = ln; } }
     if (pendingHeredocs.length) throw new ParseError('here-document delimited by end-of-file', true);
     return toks;
   }
@@ -251,7 +334,7 @@
     }
     fail(t) {
       if (!t) throw new ParseError('parse error: unexpected end of input', true);
-      throw new ParseError('parse error near `' + this.describe(t) + '\'');
+      throw new ParseError('parse error near `' + this.describe(t) + '\'', false, { pos: t.pos, tok: t.type === 'nl' ? 'newline' : this.describe(t) });
     }
     expectWord(text) {
       if (!this.isWord(text)) this.fail(this.peek());
@@ -276,7 +359,7 @@
         return w != null && terms.indexOf(w) >= 0;
       };
       for (;;) {
-        while (!this.atEnd() && (this.peek().type === 'nl' || this.isOp(';'))) this.p++;
+        while (!this.atEnd() && this.peek().type === 'nl') this.p++;
         if (atTerm()) break;
         const node = this.parseAndOr();
         let bg = false;
@@ -323,7 +406,7 @@
 
     parseRedir() {
       const r = this.next();
-      const out = { op: r.op, fd: r.fd };
+      const out = { op: r.op, fd: r.fd, force: r.force };
       if (r.dup != null) { out.dup = r.dup; return out; }
       if (r.heredoc) { out.heredoc = r.heredoc; return out; }
       const w = this.peek();
@@ -343,6 +426,7 @@
         this.p++;
         return this.parseRedirs({ type: 'group', subshell: true, body });
       }
+      if (t.type === 'arith') { this.p++; return this.parseRedirs({ type: 'arithcmd', expr: t.expr, raw: t.raw }); }
       const w = wordText(t);
       if (w === 'if') return this.parseRedirs(this.parseIf());
       if (w === 'for') return this.parseRedirs(this.parseFor());
@@ -394,6 +478,15 @@
 
     parseFor() {
       this.expectWord('for');
+      if (this.peek() && this.peek().type === 'arith') {
+        const parts = this.next().expr.split(';');
+        if (parts.length !== 3) throw new ParseError('parse error near `((\'', false, { pos: this.peek(-1).pos, tok: '((' });
+        while (!this.atEnd() && (this.peek().type === 'nl' || this.isOp(';'))) this.p++;
+        this.expectWord('do');
+        const body = this.parseList(['done']);
+        this.expectWord('done');
+        return { type: 'cfor', init: parts[0], cond: parts[1], step: parts[2], body };
+      }
       const nameTok = this.next();
       const name = wordText(nameTok);
       if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) this.fail(nameTok);
@@ -451,7 +544,7 @@
     }
 
     parseSimple() {
-      const node = { type: 'simple', assigns: [], words: [], redirs: [] };
+      const node = { type: 'simple', assigns: [], words: [], redirs: [], line: this.peek() ? this.peek().line : 0 };
       const usedAliases = new Set();
       for (;;) {
         const t = this.peek();
@@ -462,12 +555,12 @@
           // assignment?  NAME=value
           const p0 = t.parts[0];
           if (p0 && p0.q === 'n') {
-            const m = /^([A-Za-z_][A-Za-z0-9_]*)(\+?)=/.exec(p0.s);
+            const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[([^\]]*)\])?(\+?)=/.exec(p0.s);
             if (m) {
               const restFirst = p0.s.slice(m[0].length);
               const parts = (restFirst ? [{ q: 'n', s: restFirst }] : []).concat(t.parts.slice(1));
               this.p++;
-              node.assigns.push({ name: m[1], append: m[2] === '+', word: { type: 'word', parts, quoted: true, raw: t.raw } });
+              node.assigns.push({ name: m[1], index: m[2], append: m[3] === '+', arr: t.arr || null, word: { type: 'word', parts, quoted: true, raw: t.raw } });
               continue;
             }
           }
@@ -572,5 +665,15 @@
 
   K.shlex = { lex, Parser, ParseError, dollarEnd, arith, wordText, RESERVED, ansiC };
   /** Parse shell source to an AST. Throws ParseError (with .incomplete when more input is needed). */
-  K.shlex.parse = function (src, aliases) { return new Parser(lex(src), aliases).parseProgram(); };
+  K.shlex.parse = function (src, aliases) {
+    try { return new Parser(lex(src), aliases).parseProgram(); }
+    catch (e) {
+      if (e instanceof ParseError) {
+        const lines = src.split('\n');
+        if (e.incomplete) e.line = lines.length + (src.endsWith('\n') ? 0 : 1);
+        else if (e.pos != null) { e.line = src.slice(0, e.pos).split('\n').length; e.srcLine = lines[e.line - 1]; }
+      }
+      throw e;
+    }
+  };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

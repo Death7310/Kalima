@@ -13,7 +13,26 @@
 
   /* ================================================================ helpers */
 
-  const q = (s) => "'" + s + "'";
+  /** GNU quotearg "shell-escape-always" style, as used in coreutils diagnostics: 'x y', "it's", 'a'$'\t''b'. */
+  function q(s) {
+    s = String(s);
+    if (/[\x00-\x1f\x7f]/.test(s)) {
+      const esc = { 7: '\\a', 8: '\\b', 9: '\\t', 10: '\\n', 11: '\\v', 12: '\\f', 13: '\\r', 27: '\\033' };
+      let out = ''; let run = ''; let ctl = false;
+      const flush = () => { if (run) out += ctl ? "$'" + run + "'" : "'" + run.replace(/'/g, "'\\''") + "'"; run = ''; };
+      for (const ch of s) {
+        const c = ch.charCodeAt(0); const isCtl = c < 32 || c === 127;
+        if (isCtl !== ctl) { flush(); ctl = isCtl; }
+        run += isCtl ? (esc[c] || '\\' + c.toString(8).padStart(3, '0')) : ch;
+      }
+      flush();
+      return out;
+    }
+    if (s.indexOf("'") >= 0 && !/[$`\\"]/.test(s)) return '"' + s + '"';
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+  }
+  /** Like q() but leaves names alone that need no quoting (coreutils quotef). */
+  const qf = (s) => (s !== '' && !/[\s!"#$&'()*;<=>?[\\^`{|}~\x00-\x1f\x7f]/.test(s) && !/^[~%]/.test(s) ? s : q(s));
   const isFsError = (e) => e instanceof K.FsError;
   const byteCompare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   const COREUTILS_VERSION = '9.7';
@@ -52,7 +71,7 @@
   }
 
   /** Print "<tool>: <message>" for a filesystem failure on `what`. */
-  function fsFail(ctx, text, e) { ctx.err(ctx.name + ': ' + text + ': ' + e.message + '\n'); }
+  function fsFail(ctx, text, e) { ctx.err(ctx.name + ': ' + qf(text) + ': ' + e.message + '\n'); }
 
   /** Everything on standard input: the pipe, or lines typed at the terminal until Ctrl-D. */
   async function stdinText(ctx) {
@@ -195,10 +214,10 @@
   }
 
   const LS_SPEC = {
-    short: 'laAhRtrSdF1inCpsUxfgoGvXcuLZmH',
+    short: 'laAhRtrSdF1inCpsUxfgoGvXcuLZmHqbkw:I:',
     long: ['color=?', 'all', 'almost-all', 'human-readable', 'recursive', 'reverse', 'directory', 'classify', 'numeric-uid-gid',
-      'inode', 'group-directories-first', 'si', 'time-style=', 'sort=', 'indicator-style=', 'dereference', 'literal', 'hide-control-chars', 'quote-name', 'full-time'],
-    alias: { all: 'a', 'almost-all': 'A', 'human-readable': 'h', recursive: 'R', reverse: 'r', directory: 'd', classify: 'F', 'numeric-uid-gid': 'n', inode: 'i', dereference: 'L', 'quote-name': 'Q' },
+      'inode', 'group-directories-first', 'si', 'time-style=', 'sort=', 'indicator-style=', 'dereference', 'literal', 'hide-control-chars', 'quote-name', 'full-time', 'hide=', 'ignore=', 'width=', 'escape', 'kibibytes'],
+    alias: { ignore: 'I', width: 'w', escape: 'b', kibibytes: 'k', all: 'a', 'almost-all': 'A', 'human-readable': 'h', recursive: 'R', reverse: 'r', directory: 'd', classify: 'F', 'numeric-uid-gid': 'n', inode: 'i', dereference: 'L', 'quote-name': 'Q' },
   };
 
   function lsOptions(ctx, g) {
@@ -209,6 +228,7 @@
     const timeKey = o.t || ((o.c || o.u) && !isLong);
     const sortBy = o.sort && o.sort !== 'version' ? o.sort : o.S ? 'size' : timeKey ? 'time' : o.U || o.f ? 'none' : o.X ? 'extension' : 'name';
     return {
+      ignorePats: [].concat(g.all.I || [], g.all.ignore || [], o.hide && !o.all && !o.a ? [o.hide] : []).filter((x) => typeof x === 'string').map(globRe),
       context: !!o.Z, across: !!o.x, commas: !!o.m, columns: !!(o.C || o.x), noOwner: !!o.g, noGroup: !!(o.o || o.G), followCmd: !!o.H,
       long: isLong, numeric: !!o.n, all: !!(o.a || o.f), almost: !!o.A, human: !!o.h,
       recursive: !!o.R, reverse: !!o.r, dirOnly: !!o.d, classify: !!o.F, indicator: !!(o.F || o.p), inode: !!o.i, blocks: !!o.s,
@@ -216,6 +236,12 @@
       tty: ctx.isTTY, width: ctx.cols || 80, collate: collator(ctx.env),
       timeStyle: o['full-time'] ? 'full-iso' : o['time-style'] || null,
     };
+  }
+
+  function globRe(pat) {
+    let re = '';
+    for (const ch of pat) re += ch === '*' ? '.*' : ch === '?' ? '.' : ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('^' + re + '$');
   }
 
   function blocksOf(st) { return st.isDir ? 4 : st.isFile ? Math.ceil(st.size / 4096) * 4 : 0; }
@@ -330,10 +356,12 @@
     for (const arg of operands) {
       let e;
       try {
+        if (arg === '') throw new K.FsError('ENOENT', arg);
         e = makeEntry(ctx, o, arg, arg);
         const slash = arg.length > 1 && arg.endsWith('/');
+        if (slash && !e.st.isDir && !(e.st.isLink && tryStat(ctx, arg) && tryStat(ctx, arg).isDir)) throw new K.FsError('ENOTDIR', arg);
         const followDir = e.st.isLink && !o.dirOnly && (slash || o.followCmd || (!o.long && !o.classify));
-        if (followDir) { const t = ctx.fs.stat(arg); if (t.isDir) e = { name: arg, full: arg, st: t, orphan: false, dirLike: true }; }
+        if (followDir) { const t = tryStat(ctx, arg); if (t && t.isDir) e = { name: arg, full: arg, st: t, orphan: false, dirLike: true }; }
       } catch (err) {
         if (!isFsError(err)) throw err;
         ctx.err('ls: cannot access ' + q(arg) + ': ' + err.message + '\n'); status = 2; continue;
@@ -344,35 +372,34 @@
     sortEntries(files, o); sortEntries(dirs, o);
     if (files.length) { ctx.out(lsRender(ctx, o, files, false)); first = false; }
 
-    const listDir = async (e, display) => {
+    const listDir = async (e, display, top) => {
       ctx.checkAbort();
       let names;
       try { names = ctx.fs.readdir(e.full); } catch (err) {
         if (!isFsError(err)) throw err;
-        if (!first) ctx.out('\n');
-        if (multi) ctx.out(display + ':\n');
-        first = false;
-        ctx.err('ls: cannot open directory ' + q(display) + ': ' + err.message + '\n'); status = Math.max(status, 2); return;
+        ctx.err('ls: cannot open directory ' + q(display) + ': ' + err.message + '\n'); status = Math.max(status, top ? 2 : 1); return;
       }
       if (!(o.all || o.almost)) names = names.filter((n) => n[0] !== '.');
       else if (o.all) names = ['.', '..'].concat(names);
+      if (o.ignorePats.length) names = names.filter((n) => !o.ignorePats.some((re) => re.test(n)));
       const list = [];
       for (const n of names) {
         try { list.push(makeEntry(ctx, o, n, joinPath(e.full, n))); } catch (err) {
           if (!isFsError(err)) throw err;
-          ctx.err('ls: cannot access ' + q(joinPath(display, n)) + ': ' + err.message + '\n'); status = Math.max(status, 2);
+          ctx.err('ls: cannot access ' + q(joinPath(display, n)) + ': ' + err.message + '\n'); status = Math.max(status, top ? 2 : 1);
         }
       }
       sortEntries(list, o);
       if (!first) ctx.out('\n');
       if (multi) ctx.out(display + ':\n');
       first = false;
+      if (o.blocks && !o.long) { const t = list.reduce((a, c) => a + blocksOf(c.st), 0); ctx.out('total ' + (o.human ? U.humanSize(t * 1024) : t) + '\n'); }
       ctx.out(lsRender(ctx, o, list, true));
       if (o.recursive) {
-        for (const c of list) if (c.st.isDir && c.name !== '.' && c.name !== '..') await listDir(c, joinPath(display, c.name));
+        for (const c of list) if (c.st.isDir && c.name !== '.' && c.name !== '..') await listDir(c, joinPath(display, c.name), false);
       }
     };
-    for (const d of dirs) await listDir(d, d.name);
+    for (const d of dirs) await listDir(d, d.name, true);
     return status;
   }
 
@@ -451,7 +478,7 @@
           continue;
         }
         try {
-          if (ctx.fs.isDir(f)) { ctx.err('cat: ' + f + ': Is a directory\n'); status = 1; continue; }
+          if (ctx.fs.isDir(f)) { ctx.err('cat: ' + qf(f) + ': Is a directory\n'); status = 1; continue; }
           emit(ctx.fs.read(f));
         } catch (e) { if (!isFsError(e)) throw e; fsFail(ctx, f, e); status = 1; }
       }
@@ -897,7 +924,7 @@
       for (const f of g.rest) {
         const base = VFS.basename(f.replace(/\/+$/, '') || f);
         if (recursive && (base === '.' || base === '..')) { ctx.eprintln('rm: refusing to remove ' + q('.') + ' or ' + q('..') + ' directory: skipping ' + q(f)); status = 1; continue; }
-        if (!o['no-preserve-root'] && ctx.fs.abs(f) === '/') {
+        if (!o['no-preserve-root'] && f !== '' && ctx.fs.abs(f) === '/') {
           ctx.eprintln('rm: it is dangerous to operate recursively on ' + q('/'));
           ctx.eprintln('rm: use --no-preserve-root to override this failsafe');
           status = 1; continue;
@@ -917,6 +944,7 @@
     if (b.node) throw new K.FsError('EEXIST', dst);
     if (!ctx.vfs.access(b.parent, ctx.fs.cred, 'w') || !ctx.vfs.access(b.parent, ctx.fs.cred, 'x')) throw new K.FsError('EACCES', dst);
     b.parent.ch.set(b.name, a.node);
+    a.node.nl = (a.node.nl || 1) + 1;
     if (ctx.vfs.onChange) ctx.vfs.onChange(b.path);
   }
 
@@ -949,7 +977,7 @@
           if (o.v) ctx.println(q(name) + (o.s ? ' -> ' : ' => ') + q(src));
         } catch (e) {
           if (!isFsError(e)) throw e;
-          if (e.hardDir) ctx.eprintln('ln: ' + src + ': hard link not allowed for directory');
+          if (e.hardDir) ctx.eprintln('ln: ' + qf(src) + ': hard link not allowed for directory');
           else ctx.eprintln('ln: failed to create ' + (o.s ? 'symbolic' : 'hard') + ' link ' + q(name) + ': ' + e.message);
           status = 1;
         }
@@ -1421,7 +1449,7 @@
           ctx.out(p + (g.opts.z ? '\0' : '\n'));
         } catch (e) {
           if (!isFsError(e)) throw e;
-          if (!g.opts.q) ctx.eprintln('realpath: ' + f + ': ' + e.message);
+          if (!g.opts.q) ctx.eprintln('realpath: ' + qf(f) + ': ' + e.message);
           status = 1;
         }
       }
@@ -1446,7 +1474,7 @@
           else ctx.out(ctx.fs.readlink(f) + end);
         } catch (e) {
           if (!isFsError(e)) throw e;
-          if (g.opts.v) ctx.eprintln('readlink: ' + f + ': ' + e.message);
+          if (g.opts.v) ctx.eprintln('readlink: ' + qf(f) + ': ' + e.message);
           status = 1;
         }
       }
@@ -1928,7 +1956,7 @@
           let real;
           try { real = ctx.fs.realpath(f); } catch (e) {
             if (!isFsError(e)) throw e;
-            ctx.eprintln('df: ' + f + ': ' + e.message); status = 1; continue;
+            ctx.eprintln('df: ' + qf(f) + ': ' + e.message); status = 1; continue;
           }
           const m = MOUNTS.filter((x) => x.mount === '/' || real === x.mount || real.startsWith(x.mount + '/')).sort((a, b) => b.mount.length - a.mount.length)[0];
           if (list.indexOf(m) < 0) list.push(m);

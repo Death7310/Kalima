@@ -347,3 +347,14 @@ test('job specs, lowest free job number, background trace, per-shell tty', async
   assert.equal(t.child().tty, 'pts/3');
   assert.equal(shell.tty, 'pts/0');
 });
+
+test('FsView: empty path is ENOENT, hard links count in nlink', async () => {
+  const sim = await boot();
+  const fs = sim.shell.fs || null;
+  const r = await sim.run('cat ""; ls ""; echo x > /tmp/h1; ln /tmp/h1 /tmp/h2; ls -l /tmp/h1 /tmp/h2; rm /tmp/h2; ls -l /tmp/h1');
+  assert.equal(r.err, "cat: '': No such file or directory\nls: cannot access '': No such file or directory\n");
+  const lines = r.out.trim().split('\n');
+  assert.match(lines[0], /^-rw-r--r-- 2 /);
+  assert.match(lines[1], /^-rw-r--r-- 2 /);
+  assert.match(lines[2], /^-rw-r--r-- 1 /);
+});

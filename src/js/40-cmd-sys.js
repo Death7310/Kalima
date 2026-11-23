@@ -2964,7 +2964,17 @@
     lines.push(heading('NAME'), '       ' + def.name + ' - ' + def.summary, '');
     if (def.synopsis) lines.push(heading('SYNOPSIS'), ...def.synopsis.split('\n').flatMap((l) => wrapManLine((l.startsWith('       ') ? '' : '       ') + l)), '');
     const text = /^[A-Z][A-Z ]+(\n|$)/.test(body) ? body : 'DESCRIPTION\n       ' + body;
+    // Page text written hard-wrapped (about 70 columns) would otherwise show ragged breaks once the
+    // renderer wraps at 78: join a long prose line with its same-indented continuation.
+    const joined = [];
     for (const l of text.split('\n')) {
+      const prev = joined[joined.length - 1];
+      const ind = prev == null ? '' : /^ */.exec(prev)[0];
+      if (prev != null && ind.length >= 7 && l.startsWith(ind) && l.length > ind.length && l[ind.length] !== ' ' && /^[a-z(\[]/.test(l.slice(ind.length)) &&
+          prev.length >= 60 && prev.length < MAN_WIDTH && !/[:.]$/.test(prev) === true && !/^ *-/.test(prev)) joined[joined.length - 1] = prev + ' ' + l.slice(ind.length);
+      else joined.push(l);
+    }
+    for (const l of joined) {
       if (/^[A-Z][A-Z ]+$/.test(l)) lines.push(heading(l));
       else lines.push.apply(lines, wrapManLine(l));
     }

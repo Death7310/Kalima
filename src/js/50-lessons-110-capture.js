@@ -143,7 +143,7 @@
       { q: 'Why is -n worth using during an assessment?', choices: ['It makes the capture encrypted', 'It avoids reverse lookups that slow the capture and add traffic of their own', 'It hides your own packets', 'It captures only one packet'], answer: 1, why: 'Without -n tcpdump asks the resolver for a name for every address. That costs time and puts extra DNS queries on the wire.' },
       { q: 'You run `sudo tcpdump -c 5` and nothing prints for a long time. What is the most likely reason?', choices: ['Five matching packets have not arrived yet', 'The count was ignored', 'tcpdump crashed', 'sudo blocked the output'], answer: 0, why: 'With -c the capture runs until that many packets arrive. On a quiet link it waits. Ctrl-C stops it and still prints the summary.' },
     ],
-    refs: ['tcpdump(8)', 'pcap-filter(7)', 'Kali Linux Revealed, ch. 5'],
+    refs: ['tcpdump(8)', 'pcap-filter(7)', 'Kali Linux Revealed'],
   };
 
   /* ---------------------------------------------------------------- filters */

@@ -174,6 +174,11 @@
       this.interactive = !!o.interactive;
       this.flavor = o.flavor || (this.machine.profile === 'kali' ? 'zsh' : 'bash');
       this.vars = new Map();
+      this.arrays = new Map();
+      this.readonly = new Set();
+      this.traps = new Map();
+      this.optind = 1;
+      this.curLine = 1;
       this.exported = new Set();
       this.aliases = new Map();
       this.functions = new Map();
@@ -184,7 +189,9 @@
       this.umask = this.parent ? this.parent.umask : 0o022;
       this.status = 0;
       this.lastBgPid = 0;
-      this.opts = { xtrace: false };
+      this.opts = { xtrace: false, errexit: false, nounset: false, pipefail: false, noclobber: false, nullglob: false, dotglob: false };
+      this.pipeStatus = [0];
+      this.noErrexit = 0;
       this.loopDepth = 0;
       this.funcDepth = 0;
       this.localStack = [];
@@ -235,28 +242,138 @@
     }
 
     /* ------------------------------------------------------------- variables */
-    setVar(name, value, exp) { this.vars.set(name, String(value)); if (exp) this.exported.add(name); }
-    unsetVar(name) { this.vars.delete(name); this.exported.delete(name); }
+    setVar(name, value, exp) { this.vars.set(name, String(value)); this.arrays.delete(name); if (exp) this.exported.add(name); }
+    unsetVar(name) { this.vars.delete(name); this.arrays.delete(name); this.exported.delete(name); }
+    /* arrays: indexed arrays are 0-based in bash and 1-based in zsh; associative ones are keyed by string */
+    arrBase() { return this.flavor === 'zsh' ? 1 : 0; }
+    arrValues(name) {
+      const a = this.arrays.get(name);
+      if (a) return a.assoc ? Array.from(a.v.values()) : a.v.filter((x) => x !== undefined);
+      const v = this.vars.get(name);
+      return v == null ? [] : [v];
+    }
+    arrKeys(name) {
+      const a = this.arrays.get(name);
+      if (a) {
+        if (a.assoc) return Array.from(a.v.keys());
+        const ks = []; a.v.forEach((x, i) => { if (x !== undefined) ks.push(String(i + this.arrBase())); }); return ks;
+      }
+      return this.vars.has(name) ? [String(this.arrBase())] : [];
+    }
+    async arrIndexKey(name, idx, io) {
+      const a = this.arrays.get(name);
+      const text = (await this.expandString(idx, io)).map((x) => x.s).join('');
+      if (a && a.assoc) return text.replace(/^(["'])(.*)\1$/, '$2');
+      let k;
+      try { k = arith(text, (n) => this.getVar(n), (n, val) => this.setVar(n, val)); }
+      catch (e) { throw new ShellError(this.msgPrefix() + e.message); }
+      return k;
+    }
+    async arrGet(name, idx, io) {
+      const a = this.arrays.get(name);
+      const k = await this.arrIndexKey(name, idx, io);
+      if (a && a.assoc) return a.v.has(k) ? a.v.get(k) : null;
+      let i = k - this.arrBase();
+      const len = a ? a.v.length : (this.vars.has(name) ? 1 : 0);
+      if (k < 0) i = len + k;
+      if (a) { const v = a.v[i]; return v === undefined ? null : v; }
+      return i === 0 && this.vars.has(name) ? this.vars.get(name) : null;
+    }
+    async arrSet(name, idx, val, append, io) {
+      let a = this.arrays.get(name);
+      if (!a) {
+        a = { assoc: false, v: [] };
+        if (this.vars.has(name)) { a.v[0] = this.vars.get(name); this.vars.delete(name); }
+        this.arrays.set(name, a);
+      }
+      const k = await this.arrIndexKey(name, idx, io);
+      if (a.assoc) { a.v.set(k, (append && a.v.has(k) ? a.v.get(k) : '') + val); return; }
+      let i = k - this.arrBase(); if (k < 0) i = a.v.length + k;
+      if (i < 0) throw new ShellError(this.msgPrefix() + name + '[' + idx + ']: bad array subscript');
+      a.v[i] = (append && a.v[i] !== undefined ? a.v[i] : '') + val;
+    }
+    /** run one parsed assignment (NAME=value, NAME+=value, NAME=(...), NAME[i]=value) */
+    async runAssign(a, io, exp) {
+      const name = a.name;
+      if (this.readonly.has(name)) throw new ShellError(this.msgPrefix() + name + ': ' + (this.flavor === 'zsh' ? 'read-only variable' : 'readonly variable'));
+      if (a.arr) {
+        const assoc = this.arrays.has(name) && this.arrays.get(name).assoc;
+        const items = [];
+        for (const w of a.arr) {
+          const m = assoc || /^\[/.test(w.raw) ? /^\[([^\]]*)\]=(.*)$/s.exec(w.raw) : null;
+          if (m) { items.push({ k: m[1].replace(/^(["'])(.*)\1$/, '$2'), v: m[2].replace(/^(["'])(.*)\1$/, '$2') }); continue; }
+          for (const x of await this.expandWord(w, io)) items.push({ v: x });
+        }
+        let cur = a.append ? this.arrays.get(name) : null;
+        if (a.append && !cur && this.vars.has(name)) cur = { assoc: false, v: [this.vars.get(name)] };
+        if (assoc) {
+          const e = cur || { assoc: true, v: new Map() };
+          if (!a.append) e.v.clear();
+          let pend = null;
+          for (const it of items) { if (it.k != null) e.v.set(it.k, it.v); else if (pend == null) pend = it.v; else { e.v.set(pend, it.v); pend = null; } }
+          this.arrays.set(name, e); this.vars.delete(name);
+        } else {
+          const e = cur || { assoc: false, v: [] };
+          if (!a.append) e.v = [];
+          let idx = e.v.length;
+          for (const it of items) { if (it.k != null) { idx = parseInt(it.k, 10) - this.arrBase(); } e.v[idx++] = it.v; }
+          this.arrays.set(name, e); this.vars.delete(name);
+        }
+        if (exp) this.exported.add(name);
+        return;
+      }
+      let v = await this.expandSingle(a.word, io);
+      if (a.index != null) { await this.arrSet(name, a.index, v, a.append, io); return; }
+      if (a.append) {
+        if (this.arrays.has(name) && this.flavor !== 'zsh') { await this.arrSet(name, String(this.arrBase()), v, true, io); return; }
+        v = (this.getVar(name) || '') + v;
+      }
+      if (this.arrays.has(name) && this.flavor !== 'zsh' && !this.arrays.get(name).assoc) { await this.arrSet(name, String(this.arrBase()), v, false, io); return; }
+      this.setVar(name, v, exp != null ? exp : this.exported.has(name));
+    }
     getVar(name) {
       switch (name) {
         case '?': return String(this.status);
         case '$': return String(this.pid);
         case '!': return this.lastBgPid ? String(this.lastBgPid) : '';
         case '#': return String(this.positional.length);
-        case '@': case '*': return this.positional.join(' ');
+        case '@': return this.positional.join(' ');
+        case '*': return this.positional.join(this.ifsFirst());
         case '0': return this.scriptName;
-        case '-': return this.interactive ? 'himBHs' : 'hB';
+        case '-': return (this.interactive ? 'hims' : 'h') + (this.opts.errexit ? 'e' : '') + (this.opts.nounset ? 'u' : '') + (this.opts.noclobber ? 'C' : '') + (this.opts.xtrace ? 'x' : '') + 'B' + (this.interactive ? 'H' : 'c');
+        case 'LINENO': return String(this.curLine);
+        case 'FUNCNAME': return this.funcNames && this.funcNames.length ? this.funcNames[this.funcNames.length - 1] : null;
+        case 'OPTIND': return String(this.optind);
         case 'RANDOM': return String(Math.floor(K.util.prng('rnd' + K.clock.now() + ':' + (this._rnd = (this._rnd || 0) + 1))() * 32768));
         case 'SECONDS': return String(Math.floor((K.clock.now() - this.startTime) / 1000));
         case 'UID': case 'EUID': return String(this.user.uid);
         case 'PPID': return String(this.proc.ppid);
-        case 'LINENO': return '1';
         case 'COLUMNS': return String(this.term.cols || 80);
         case 'LINES': return String(this.term.rows || 24);
       }
       if (/^[0-9]+$/.test(name)) { const v = this.positional[parseInt(name, 10) - 1]; return v == null ? '' : v; }
       const v = this.vars.get(name);
-      return v == null ? null : v;
+      if (v == null) {
+        if (this.arrays.has(name)) { const vals = this.arrValues(name); return this.flavor === 'zsh' ? vals.join(' ') : (vals.length ? this.arrays.get(name).assoc ? null : (this.arrays.get(name).v[0] === undefined ? '' : this.arrays.get(name).v[0]) : ''); }
+        return null;
+      }
+      return v;
+    }
+    ifsFirst() { const v = this.vars.get('IFS'); return v == null ? ' ' : v.charAt(0); }
+    /** split a string into fields the way the shell splits unquoted expansions (honours $IFS) */
+    ifsSplit(str) {
+      const v = this.vars.get('IFS');
+      if (v == null || v === ' \t\n') return str.split(/[ \t\n]+/).filter((b) => b !== '');
+      if (v === '') return [str];
+      const white = v.split('').filter((c) => c === ' ' || c === '\t' || c === '\n').join('');
+      const out = []; let cur = ''; let pending = false;
+      for (const ch of str) {
+        if (v.indexOf(ch) < 0) { cur += ch; pending = true; continue; }
+        if (white.indexOf(ch) >= 0) { if (pending) { out.push(cur); cur = ''; pending = false; } continue; }
+        out.push(cur); cur = ''; pending = false;
+      }
+      if (pending) out.push(cur);
+      return out;
     }
     /** exported environment as a plain object */
     env(extra) {
@@ -265,7 +382,21 @@
       if (extra) Object.assign(e, extra);
       return e;
     }
-    msgPrefix() { return this.flavor + ': '; }
+    msgPrefix() {
+      if (this.interactive || this.flavor === 'zsh') return this.flavor + ': ';
+      if (this.flavor === 'sh') return (this.scriptName || 'sh') + ': ' + this.curLine + ': ';
+      if (this.cmdString) return this.flavor + ': line ' + this.curLine + ': ';
+      return (this.scriptName || this.flavor) + ': line ' + this.curLine + ': ';
+    }
+    /** wording of a syntax error for this shell */
+    syntaxMessage(e) {
+      if (this.flavor === 'zsh' || this.interactive || e.line == null) return this.flavor + ': ' + e.message;
+      const who = this.flavor === 'sh' ? (this.scriptName || 'sh') : this.cmdString ? this.flavor + ': -c' : (this.scriptName || this.flavor);
+      if (this.flavor === 'sh') return who + ': ' + e.line + ': Syntax error: ' + (e.incomplete ? 'end of file unexpected' : '"' + (e.tok || '') + '" unexpected');
+      const pre = who + ': line ' + e.line + ': ';
+      if (e.incomplete) return pre + (/unmatched|unexpected EOF|here-document/.test(e.message) ? e.message.replace(/^unmatched (.)$/, "unexpected EOF while looking for matching `$1'") : 'syntax error: unexpected end of file');
+      return pre + 'syntax error near unexpected token `' + (e.tok || '') + "'\n" + pre + '`' + (e.srcLine || '') + "'";
+    }
 
     /* ------------------------------------------------------------- expansion */
     async expandString(text, io, o) {
@@ -295,8 +426,12 @@
           out.push(await this.expandParam(tok.slice(2, -1), io));
         } else {
           const name = tok.slice(1);
-          if (name === '@') out.push({ s: this.positional.join(' '), at: true });
-          else { const v = this.getVar(name); out.push({ s: v == null ? '' : v }); }
+          if (name === '@') out.push({ s: this.positional.join(' '), list: this.positional.slice() });
+          else {
+            const v = this.getVar(name);
+            if (v == null && this.opts.nounset && /^[A-Za-z_]/.test(name)) throw new ShellError(this.msgPrefix() + name + ': ' + (this.flavor === 'zsh' ? 'parameter not set' : 'unbound variable'));
+            out.push({ s: v == null ? '' : v });
+          }
         }
       }
       flushLit();
@@ -305,53 +440,89 @@
 
     async expandParam(body, io) {
       const sub = async (t) => (await this.expandString(t, io)).map((x) => x.s).join('');
+      let m;
+      // ${#a[@]} ${#a[i]} ${#name} ${#}
+      if ((m = /^#([A-Za-z_][A-Za-z0-9_]*)\[([^\]]*)\]$/.exec(body))) {
+        if (m[2] === '@' || m[2] === '*') return { s: String(this.arrValues(m[1]).length) };
+        const e = await this.arrGet(m[1], m[2], io); return { s: String((e || '').length) };
+      }
       if (body[0] === '#' && body.length > 1 && /^#[A-Za-z_0-9@*?]+$/.test(body)) {
         const n = body.slice(1);
         if (n === '@' || n === '*') return { s: String(this.positional.length) };
+        if (this.arrays.has(n) && this.flavor === 'zsh') return { s: String(this.arrValues(n).length) };
         const v = this.getVar(n); return { s: String((v || '').length) };
       }
-      const m = /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?$!#@*\-])(.*)$/s.exec(body);
+      // ${!a[@]} keys, ${!name} indirection
+      if ((m = /^!([A-Za-z_][A-Za-z0-9_]*)\[[@*]\]$/.exec(body))) { const ks = this.arrKeys(m[1]); return { s: ks.join(' '), list: ks }; }
+      if ((m = /^!([A-Za-z_][A-Za-z0-9_]*)$/.exec(body))) { const t = this.getVar(m[1]); const v = t == null ? null : this.getVar(t); return { s: v == null ? '' : v }; }
+      m = /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[?$!#@*\-])(?:\[([^\]]*)\])?([\s\S]*)$/.exec(body);
       if (!m) throw new ShellError(this.msgPrefix() + 'bad substitution');
-      const name = m[1]; const rest = m[2];
-      let v = this.getVar(name);
-      if (name === '@' && !rest) return { s: this.positional.join(' '), at: true };
-      if (!rest) return { s: v == null ? '' : v };
+      const name = m[1]; const subscript = m[2]; let rest = m[3];
+      let v; let list = null;
+      if (subscript != null) {
+        if (subscript === '@' || subscript === '*') {
+          list = this.arrValues(name);
+          v = list.length ? list.join(subscript === '*' ? this.ifsFirst() : ' ') : null;
+        } else v = await this.arrGet(name, subscript, io);
+      } else if (name === '@') { list = this.positional.slice(); v = list.join(' '); if (!list.length && rest) v = null; }
+      else if (name === '*') { v = this.positional.length ? this.positional.join(this.ifsFirst()) : null; }
+      else if (this.arrays.has(name) && this.flavor === 'zsh' && !this.arrays.get(name).assoc && rest && /^:-?\d/.test(rest)) { list = this.arrValues(name); v = list.join(' '); }
+      else v = this.getVar(name);
+      if (v == null && this.opts.nounset && !/^[-+=?]|^:[-+=?]/.test(rest) && /^[A-Za-z_]/.test(name)) throw new ShellError(this.msgPrefix() + name + ': ' + (this.flavor === 'zsh' ? 'parameter not set' : 'unbound variable'));
+      const res = (s2) => (list && subscript !== '*' ? { s: s2, list: s2 === v ? list : null } : { s: s2 });
+      if (!rest) return list && subscript !== '*' ? { s: v == null ? '' : v, list } : { s: v == null ? '' : v };
       let mm;
       if ((mm = /^(:?)([-=+?])([\s\S]*)$/.exec(rest))) {
         const colon = mm[1] === ':'; const op = mm[2]; const arg = mm[3];
         const unset = v == null || (colon && v === '');
-        if (op === '-') return { s: unset ? await sub(arg) : v };
+        if (op === '-') return unset ? { s: await sub(arg) } : res(v);
         if (op === '=') { if (unset) { v = await sub(arg); this.setVar(name, v); } return { s: v }; }
-        if (op === '+') return { s: unset ? '' : await sub(arg) };
-        if (op === '?') { if (unset) throw new ShellError(this.msgPrefix() + name + ': ' + ((await sub(arg)) || 'parameter not set')); return { s: v }; }
+        if (op === '+') return unset ? { s: '' } : { s: await sub(arg) };
+        if (op === '?') { if (unset) throw new ShellError(this.msgPrefix() + name + ': ' + ((await sub(arg)) || 'parameter null or not set')); return { s: v }; }
       }
       v = v == null ? '' : v;
+      // array slice ${a[@]:off:len}
+      if (list && (mm = /^:\s*(-?\d+)(?::(-?\d+))?$/.exec(rest))) {
+        let off = parseInt(mm[1], 10); const arr = list;
+        if (name === '@' && subscript == null && off > 0) off -= 1;
+        if (off < 0) off = Math.max(0, arr.length + off);
+        const sl = mm[2] == null ? arr.slice(off) : arr.slice(off, off + parseInt(mm[2], 10));
+        return { s: sl.join(' '), list: sl };
+      }
+      const apply = (f) => (list ? { s: list.map(f).join(' '), list: list.map(f) } : { s: f(v) });
       if ((mm = /^(##?|%%?)([\s\S]*)$/.exec(rest))) {
         const pat = await sub(mm[2]); const op = mm[1];
         const src = K.util.globToRe(pat).source.slice(1, -1);
-        if (op[0] === '#') {
-          const re = new RegExp('^' + (op === '##' ? src : src.replace(/\.\*/g, '.*?')));
-          return { s: v.replace(re, '') };
-        }
-        // suffix removal: try every split point
-        const full = new RegExp('^' + src + '$');
-        if (op === '%%') { for (let i = 0; i <= v.length; i++) if (full.test(v.slice(i))) return { s: v.slice(0, i) }; }
-        else { for (let i = v.length; i >= 0; i--) if (full.test(v.slice(i))) return { s: v.slice(0, i) }; }
-        return { s: v };
+        const one = (x) => {
+          if (op[0] === '#') {
+            for (let i = op === '##' ? x.length : 0; op === '##' ? i >= 0 : i <= x.length; i += op === '##' ? -1 : 1) if (new RegExp('^' + src + '$').test(x.slice(0, i))) return x.slice(i);
+            return x;
+          }
+          const full = new RegExp('^' + src + '$');
+          if (op === '%%') { for (let i = 0; i <= x.length; i++) if (full.test(x.slice(i))) return x.slice(0, i); }
+          else { for (let i = x.length; i >= 0; i--) if (full.test(x.slice(i))) return x.slice(0, i); }
+          return x;
+        };
+        return apply(one);
       }
-      if ((mm = /^(\/\/?)((?:\\.|[^\/])*)(?:\/([\s\S]*))?$/.exec(rest))) {
-        const pat = await sub(mm[2]); const rep = mm[3] == null ? '' : await sub(mm[3]);
+      if ((mm = /^(\/\/?|\/#|\/%)((?:\\.|[^\/])*)(?:\/([\s\S]*))?$/.exec(rest))) {
+        const pat = await sub(mm[2]); const rp = mm[3] == null ? '' : await sub(mm[3]);
         const src = K.util.globToRe(pat).source.slice(1, -1);
-        return { s: v.replace(new RegExp(src, mm[1] === '//' ? 'g' : ''), () => rep) };
+        const flags = mm[1] === '//' ? 'g' : '';
+        const re = new RegExp(mm[1] === '/#' ? '^(?:' + src + ')' : mm[1] === '/%' ? '(?:' + src + ')$' : src, flags);
+        return apply((x) => x.replace(re, () => rp));
       }
-      if ((mm = /^:(-?\d+)(?::(-?\d+))?$/.exec(rest))) {
+      if ((mm = /^:\s*(-?\d+)(?::\s*(-?\d+))?$/.exec(rest))) {
         let off = parseInt(mm[1], 10); if (off < 0) off = Math.max(0, v.length + off);
-        return { s: mm[2] == null ? v.slice(off) : v.slice(off, off + parseInt(mm[2], 10)) };
+        let len = mm[2] == null ? undefined : parseInt(mm[2], 10);
+        if (len !== undefined && len < 0) len = Math.max(0, v.length + len - off);
+        return { s: len === undefined ? v.slice(off) : v.slice(off, off + len) };
       }
-      if (rest === '^^') return { s: v.toUpperCase() };
-      if (rest === ',,') return { s: v.toLowerCase() };
-      if (rest === '^') return { s: v.charAt(0).toUpperCase() + v.slice(1) };
-      if (rest === ',') return { s: v.charAt(0).toLowerCase() + v.slice(1) };
+      if (rest === '^^') return apply((x) => x.toUpperCase());
+      if (rest === ',,') return apply((x) => x.toLowerCase());
+      if (rest === '^') return apply((x) => x.charAt(0).toUpperCase() + x.slice(1));
+      if (rest === ',') return apply((x) => x.charAt(0).toLowerCase() + x.slice(1));
+      if (rest === '@Q') return { s: v === '' ? "''" : "'" + v.replace(/'/g, "'\\''") + "'" };
       throw new ShellError(this.msgPrefix() + 'bad substitution');
     }
 
@@ -408,7 +579,7 @@
       const words = o.noBrace ? [word] : this.braceExpand(word);
       for (const w of words) {
         // fields: arrays of segments {s, glob}
-        let fields = [[]]; let any = w.quoted;
+        let fields = [[]]; let any = w.quoted; let listEmpty = false;
         const cur = () => fields[fields.length - 1];
         for (let pi = 0; pi < w.parts.length; pi++) {
           const part = w.parts[pi];
@@ -426,21 +597,23 @@
           const pieces = await this.expandString(text, io);
           for (const pc of pieces) {
             if (pc.lit) { cur().push({ s: pc.s, glob: part.q === 'n' }); any = true; continue; }
-            if (pc.at && part.q === 'd') {
-              // "$@" -> one field per positional parameter
-              const ps = this.positional;
+            if (pc.list && part.q === 'd' && !o.noSplit) {
+              // "$@" and "${a[@]}" -> one field per element; nothing at all when empty
+              const ps = pc.list;
               if (ps.length) {
                 cur().push({ s: ps[0], glob: false });
                 for (let k = 1; k < ps.length; k++) fields.push([{ s: ps[k], glob: false }]);
                 any = true;
-              }
+              } else listEmpty = true;
               continue;
             }
-            const doSplit = part.q === 'n' && !o.noSplit && (pc.split || pc.at || this.flavor !== 'zsh');
+            const doSplit = part.q === 'n' && !o.noSplit && (pc.split || pc.list || this.flavor !== 'zsh');
             if (doSplit) {
-              const bits = pc.s.split(/[ \t\n]+/);
-              const lead = /^[ \t\n]/.test(pc.s); const trail = /[ \t\n]$/.test(pc.s);
-              const nonEmpty = bits.filter((b) => b !== '');
+              const ifs = this.vars.get('IFS');
+              const wsOnly = ifs == null || ifs === ' \t\n';
+              const bits = wsOnly ? pc.s.split(/[ \t\n]+/) : this.ifsSplit(pc.s);
+              const lead = wsOnly && /^[ \t\n]/.test(pc.s); const trail = wsOnly && /[ \t\n]$/.test(pc.s);
+              const nonEmpty = wsOnly ? bits.filter((b) => b !== '') : bits;
               if (!nonEmpty.length) { if (pc.s !== '' && cur().length) fields.push([]); continue; }
               if (lead && cur().length) fields.push([]);
               nonEmpty.forEach((b, k) => { if (k > 0) fields.push([]); cur().push({ s: b, glob: false }); });
@@ -454,6 +627,7 @@
           if (part.q === 'd') any = true;
         }
         for (const f of fields) {
+          if (listEmpty && fields.length === 1 && !f.length) continue;
           const text = f.map((x) => x.s).join('');
           if (!f.length && !(any && w.quoted && fields.length === 1)) { if (!(w.quoted && fields.length === 1)) continue; }
           if (text === '' && !w.quoted) continue;
@@ -529,10 +703,12 @@
       let ast;
       try { ast = K.shlex.parse(src, this.interactive || this.sourceDepth ? this.aliases : this.aliases); }
       catch (e) {
-        if (e instanceof ParseError) { io.err(this.msgPrefix() + e.message + '\n'); this.status = 1; return 1; }
+        if (e instanceof ParseError) { io.err(this.syntaxMessage(e) + '\n'); const c = this.flavor === 'zsh' || this.interactive ? 1 : 2; this.status = c; return c; }
         throw e;
       }
-      return this.execNode(ast, io);
+      const savedLine = this.curLine;
+      try { return await this.execNode(ast, io); }
+      finally { this.curLine = savedLine; }
     }
 
     /** Run source in a context that captures stdout (command substitution). */
@@ -579,21 +755,45 @@
             if (it.bg) st = this.startJob(it.node, io);
             else st = await this.execNode(it.node, io);
             this.status = st;
+            if (st !== 0 && this.opts.errexit && !this.noErrexit && !it.bg) throw new K.ExitSignal(st);
           }
           return st;
         }
         case 'andor': {
-          let st = await this.execNode(node.first, io);
-          this.status = st;
-          for (const r of node.rest) {
-            if ((r.op === '&&') === (st === 0)) { st = await this.execNode(r.node, io); this.status = st; }
-          }
+          this.noErrexit++;
+          let st;
+          try {
+            st = await this.execNode(node.first, io);
+            this.status = st;
+            for (let ri = 0; ri < node.rest.length; ri++) {
+              const r = node.rest[ri];
+              if ((r.op === '&&') === (st === 0)) {
+                if (ri === node.rest.length - 1) this.noErrexit--;
+                try { st = await this.execNode(r.node, io); } finally { if (ri === node.rest.length - 1) this.noErrexit++; }
+                this.status = st;
+              }
+            }
+          } finally { this.noErrexit--; }
+          if (st !== 0 && this.opts.errexit && !this.noErrexit && node.rest.length && (node.rest[node.rest.length - 1].op === '&&' ? true : false) && false) throw new K.ExitSignal(st);
           return st;
+        }
+        case 'arithcmd': {
+          this.curLine = node.line || this.curLine;
+          const r = await this.applyRedirs(node.redirs, io);
+          if (r.error) { io.err(r.error + '\n'); return 1; }
+          try {
+            const expr = (await this.expandString(node.expr, io)).map((x) => x.s).join('');
+            const v = arith(expr, (n) => this.getVar(n), (n, val) => this.setVar(n, val));
+            return v === 0 ? 1 : 0;
+          } catch (e) {
+            if (e instanceof ShellError) { io.err(e.message + '\n'); return 1; }
+            io.err(this.msgPrefix() + e.message + '\n'); return 1;
+          }
         }
         case 'pipeline': return this.execPipeline(node, io);
         case 'simple': return this.execSimple(node, io);
         case 'funcdef': this.functions.set(node.name, node.body); return 0;
-        case 'if': case 'for': case 'while': case 'case': case 'group': return this.execCompound(node, io);
+        case 'if': case 'for': case 'cfor': case 'while': case 'case': case 'group': return this.execCompound(node, io);
       }
       throw new Error('unknown node type ' + node.type);
     }
@@ -601,22 +801,29 @@
     async execPipeline(node, io) {
       let stdin = io.stdin; let st = 0;
       const n = node.cmds.length;
-      for (let i = 0; i < n; i++) {
-        const last = i === n - 1;
-        const cmd = node.cmds[i];
-        if (last) { st = await this.execNode(cmd, Object.assign({}, io, { stdin })); break; }
-        let buf = ''; let overflow = false;
-        const sink = (s) => { if (buf.length < MAX_CAPTURE) buf += s; else overflow = true; };
-        const sub = Object.assign({}, io, { stdin, out: sink, outTTY: false });
-        if (cmd.pipeErr) { sub.err = sink; sub.errTTY = false; }
-        await this.execNode(cmd, sub);
-        void overflow;
-        stdin = buf;
-      }
+      const codes = [];
+      if (node.neg) this.noErrexit++;
+      try {
+        for (let i = 0; i < n; i++) {
+          const last = i === n - 1;
+          const cmd = node.cmds[i];
+          if (last) { st = await this.execNode(cmd, Object.assign({}, io, { stdin })); codes.push(st); break; }
+          let buf = ''; let overflow = false;
+          const sink = (s) => { if (buf.length < MAX_CAPTURE) buf += s; else overflow = true; };
+          const sub = Object.assign({}, io, { stdin, out: sink, outTTY: false });
+          if (cmd.pipeErr) { sub.err = sink; sub.errTTY = false; }
+          codes.push(await this.execNode(cmd, sub));
+          void overflow;
+          stdin = buf;
+        }
+      } finally { if (node.neg) this.noErrexit--; }
+      if (this.opts.pipefail) { for (let i = codes.length - 1; i >= 0; i--) if (codes[i] !== 0) { st = codes[i]; break; } }
+      this.setPipeStatus(codes);
       if (node.neg) st = st === 0 ? 1 : 0;
       this.status = st;
       return st;
     }
+    setPipeStatus(codes) { this.arrays.set(this.flavor === 'zsh' ? 'pipestatus' : 'PIPESTATUS', { assoc: false, v: codes }); }
 
     /** Apply redirections; returns {io, error} */
     async applyRedirs(redirs, io) {
@@ -629,7 +836,7 @@
           if (r.op === '>&') {
             if (r.dup === '-') { if (r.fd === 2) nio.err = () => {}; else nio.out = () => {}; continue; }
             const src = r.dup === '1' ? { f: nio.out, t: nio.outTTY } : r.dup === '2' ? { f: nio.err, t: nio.errTTY } : null;
-            if (!src) return { error: this.msgPrefix() + r.dup + ': bad file descriptor' };
+            if (!src) return { error: this.msgPrefix() + (this.flavor === 'zsh' ? 'bad file descriptor: ' + r.dup : r.dup + ': Bad file descriptor') };
             if (r.fd === 2) { nio.err = src.f; nio.errTTY = src.t; } else { nio.out = src.f; nio.outTTY = src.t; }
           }
           continue;
@@ -643,7 +850,7 @@
         if (r.op === '<<<') { nio.stdin = target + '\n'; continue; }
         if (r.op === '<') {
           try { nio.stdin = fsv.read(target); }
-          catch (e) { return { error: this.msgPrefix() + this.fsMsg(e) + ': ' + target }; }
+          catch (e) { return { error: this.redirError(e, target) }; }
           continue;
         }
         // output redirections
@@ -652,11 +859,12 @@
           let st = null;
           try { st = fsv.stat(target); } catch (e) { if (e.code !== 'ENOENT') throw e; }
           if (st && st.isDir) throw new K.FsError('EISDIR', target);
+          if (st && !append && this.opts.noclobber && !r.force && st.isFile) return { error: this.msgPrefix() + (this.flavor === 'zsh' ? 'file exists: ' + target : target + ': cannot overwrite existing file') };
           if (!append || !st) fsv.write(target, append && st ? fsv.read(target) : '');
           else if (!fsv.can(target, 'w')) throw new K.FsError('EACCES', target);
         } catch (e) {
           if (!(e instanceof K.FsError)) throw e;
-          return { error: this.msgPrefix() + this.fsMsg(e) + ': ' + target };
+          return { error: this.redirError(e, target) };
         }
         const sink = fileSink(target);
         if (r.op === '&>' || r.op === '&>>') { nio.out = sink; nio.err = sink; nio.outTTY = nio.errTTY = false; }
@@ -666,6 +874,9 @@
       return { io: nio };
     }
 
+    redirError(e, target) {
+      return this.msgPrefix() + (this.flavor === 'zsh' ? this.fsMsg(e) + ': ' + target : target + ': ' + e.message);
+    }
     fsMsg(e) {
       const m = (e && e.message) || 'error';
       return this.flavor === 'zsh' ? m.charAt(0).toLowerCase() + m.slice(1) : m;
@@ -683,9 +894,39 @@
           catch (e) { if (e instanceof K.ExitSignal) return e.code; throw e; }
           finally { child.dispose(); }
         }
+        case 'cfor': {
+          const ev = async (t) => {
+            const expr = (await this.expandString(t, io)).map((x) => x.s).join('');
+            try { return arith(expr, (n) => this.getVar(n), (n, val) => this.setVar(n, val)); }
+            catch (e) { throw new ShellError(this.msgPrefix() + e.message); }
+          };
+          let st = 0; let guard = 0;
+          this.loopDepth++;
+          try {
+            await ev(node.init);
+            while (!node.cond.trim() || (await ev(node.cond)) !== 0) {
+              if (io.sig && io.sig.aborted) throw new K.Interrupt();
+              try { st = await this.execNode(node.body, io); }
+              catch (e) {
+                if (e instanceof BreakSignal) { if (e.n > 1) { e.n--; throw e; } break; }
+                if (e instanceof ContinueSignal) { if (e.n > 1) { e.n--; throw e; } }
+                else throw e;
+              }
+              if (node.step.trim()) await ev(node.step);
+              if (++guard % 200 === 0) await new Promise((res) => setTimeout(res, 0));
+              if (guard > 1000000) { io.err(this.msgPrefix() + 'loop aborted after 1000000 iterations (simulator limit)\n'); return 1; }
+            }
+          } catch (e) {
+            if (e instanceof ShellError) { io.err(e.message + '\n'); return 1; }
+            throw e;
+          } finally { this.loopDepth--; }
+          return st;
+        }
         case 'if': {
           for (const c of node.clauses) {
-            const st = await this.execNode(c.cond, io);
+            this.noErrexit++;
+            let st;
+            try { st = await this.execNode(c.cond, io); } finally { this.noErrexit--; }
             if (st === 0) return this.execNode(c.body, io);
           }
           if (node.otherwise) return this.execNode(node.otherwise, io);
@@ -716,7 +957,9 @@
           try {
             for (;;) {
               if (io.sig && io.sig.aborted) throw new K.Interrupt();
-              const c = await this.execNode(node.cond, io);
+              this.noErrexit++;
+              let c;
+              try { c = await this.execNode(node.cond, io); } finally { this.noErrexit--; }
               if ((c === 0) === node.until) break;
               try { st = await this.execNode(node.body, io); }
               catch (e) {
@@ -749,6 +992,11 @@
       const c = new Shell({ machine: this.machine, term: this.term, parent: this, user: this.user.name, flavor: this.flavor, cwd: this.cwd, env: {}, tty: this.tty });
       for (const [k, v] of this.vars) c.vars.set(k, v);
       c.exported = new Set(this.exported);
+      for (const [k, a] of this.arrays) c.arrays.set(k, { assoc: a.assoc, v: a.assoc ? new Map(a.v) : a.v.slice() });
+      c.readonly = new Set(this.readonly);
+      c.opts = Object.assign({}, this.opts);
+      c.traps = new Map(this.traps);
+      c.cmdString = this.cmdString;
       c.aliases = new Map(this.aliases);
       c.functions = new Map(this.functions);
       c.positional = this.positional.slice();

@@ -669,3 +669,31 @@ test('cp, mv, ln, rm messages match coreutils 9', async () => {
   assert.equal(await out('cd /tmp/cm; realpath bad; readlink -f bad'), '/tmp/cm/nowhere\n/tmp/cm/nowhere\n');
   assert.equal(await out('cd /tmp/cm; du dl/'), '4\tdl/\n');
 });
+
+/* ------------------------------------------------- review round: ls fixes */
+
+test('ls: dangling symlink operand, trailing slash on a file, ignore patterns, -s total, -q', async () => {
+  const { sh, out } = await setup();
+  await sh('mkdir /tmp/r1; cd /tmp/r1; touch a.txt b.log c; ln -s nowhere dang');
+  assert.equal(await out('ls dang'), 'dang\n');
+  let r = await sh('ls a.txt/');
+  assert.equal(r.err, "ls: cannot access 'a.txt/': Not a directory\n");
+  assert.equal(r.code, 2);
+  assert.equal(await out("ls -I '*.txt'"), 'b.log\nc\ndang\n');
+  assert.equal(await out("ls --hide='*.log'"), 'a.txt\nc\ndang\n');
+  assert.equal(await out('ls -s'), 'total 0\n0 a.txt\n0 b.log\n0 c\n0 dang\n');
+  assert.equal(await out('ls -q'), 'a.txt\nb.log\nc\ndang\n');
+  assert.equal(await out('ls -w 40 -k'), 'a.txt\nb.log\nc\ndang\n');
+});
+
+test('ls: unreadable subdirectory under -R exits 1 and prints no header for it', async () => {
+  const { sh } = await setup();
+  await sh('mkdir -p /tmp/r2/ok /tmp/r2/no; touch /tmp/r2/ok/f; chmod 000 /tmp/r2/no; cd /tmp/r2');
+  let r = await sh('ls -R');
+  assert.equal(r.out, '.:\nno\nok\n\n./ok:\nf\n');
+  assert.equal(r.err, "ls: cannot open directory './no': Permission denied\n");
+  assert.equal(r.code, 1);
+  r = await sh('ls -R no');
+  assert.equal(r.out, '');
+  assert.equal(r.code, 2);
+});

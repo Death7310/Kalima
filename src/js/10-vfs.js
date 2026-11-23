@@ -150,7 +150,7 @@
     }
 
     _info(node) {
-      let size = 0; let nlink = 1;
+      let size = 0; let nlink = node.nl || 1;
       if (node.t === 'f') size = node.vsize != null ? node.vsize : K.util.byteLen(this._content(node));
       else if (node.t === 'd') {
         size = 4096; nlink = 2;
@@ -261,6 +261,7 @@
       if (w.node.t === 'd') throw new FsError('EISDIR', path);
       this._checkRemove(w, cred, path);
       w.parent.ch.delete(w.name);
+      if (w.node.nl > 1) w.node.nl--;
       w.parent.mtime = K.clock.now();
       if (this.onChange) this.onChange(w.path);
     }
@@ -473,14 +474,14 @@
       this._umask = typeof getUmask === 'function' ? getUmask : () => (getUmask == null ? 0o022 : getUmask);
     }
     get cwd() { return this._cwd(); }
-    abs(p) { return VFS.abs(p, this._cwd()); }
+    abs(p) { if (p === '') throw new FsError('ENOENT', p); return VFS.abs(p, this._cwd()); }
     _o(extra) { return Object.assign({ cred: this.cred, umask: this._umask() }, extra); }
     read(p, o) { return this.vfs.read(this.abs(p), this._o(o)); }
     write(p, data, o) { return this.vfs.write(this.abs(p), data, this._o(o)); }
     append(p, data, o) { return this.vfs.write(this.abs(p), data, this._o(Object.assign({ append: true }, o))); }
     stat(p) { return this.vfs.stat(this.abs(p), this._o()); }
     lstat(p) { return this.vfs.lstat(this.abs(p), this._o()); }
-    exists(p) { return this.vfs.exists(this.abs(p), this._o({ follow: false })) ; }
+    exists(p) { try { return this.vfs.exists(this.abs(p), this._o({ follow: false })); } catch (e) { return false; } }
     isDir(p) { try { return this.stat(p).isDir; } catch (e) { return false; } }
     isFile(p) { try { return this.stat(p).isFile; } catch (e) { return false; } }
     readdir(p) { return this.vfs.readdir(this.abs(p), this._o()); }
