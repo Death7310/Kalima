@@ -28,6 +28,26 @@
 
   const net = (K.net = {
     headerName,
+    /**
+     * The certificate a host presents on a TLS port: {subject, issuer, notBefore, notAfter, version, cipher}.
+     * A host may carry its own in web.tls. Lab hosts present a self-signed certificate (issuer = subject);
+     * simulated internet sites get one from the simulated CA that is valid around the simulated current date.
+     */
+    certFor(host, name) {
+      if (host.web && host.web.tls) return host.web.tls;
+      const cn = 'CN=' + (host.fqdn || name);
+      const fmt = (ms) => { const d = new Date(ms); const p = (n) => String(n).padStart(2, '0'); return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()] + ' ' + String(d.getUTCDate()).padStart(2, ' ') + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()) + ' ' + d.getUTCFullYear() + ' GMT'; };
+      const DAY = 86400000;
+      let issuer; let from; let to;
+      if (host.ip && net.inScope(host.ip)) {
+        issuer = cn; from = Date.UTC(2026, 8, 1); to = from + 3650 * DAY - 1000;   // self-signed when the lab was built, ten years
+      } else {
+        issuer = 'C=US, O=Simulated Trust Services, CN=SimTrust RSA CA 1';
+        const day = Math.floor(K.clock.now() / DAY) * DAY;
+        from = day - 30 * DAY; to = day + 60 * DAY - 1000;                            // a 90-day certificate issued 30 days ago
+      }
+      return { subject: cn, issuer, notBefore: fmt(from), notAfter: fmt(to), version: 'TLSv1.3', cipher: 'TLS_AES_256_GCM_SHA384' };
+    },
     NetError,
     world: null,
     hosts: [],
@@ -607,7 +627,7 @@
       rh.date = new Date(K.clock.now()).toUTCString();
       rh['content-length'] = String(U.byteLen(body));
       if (method === 'HEAD') body = '';
-      if (isTls) out.tls = (host.web && host.web.tls) || { subject: 'CN=' + (host.fqdn || hostname), issuer: 'C=US, O=Simulated Trust Services, CN=SimTrust RSA CA 1', notBefore: 'Sep  1 00:00:00 2026 GMT', notAfter: 'Nov 30 23:59:59 2026 GMT', version: 'TLSv1.3', cipher: 'TLS_AES_256_GCM_SHA384' };
+      if (isTls) out.tls = this.certFor(host, hostname);
       const final = Object.assign(out, { status: resp.status || 200, statusText: this.STATUS[resp.status || 200] || 'Unknown', headers: rh, body });
       this._httpWire(t, request, pathq, final, isTls);
       return final;

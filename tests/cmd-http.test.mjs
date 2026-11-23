@@ -544,3 +544,29 @@ test('header names print with one canonical spelling in nc and curl', async () =
   assert.doesNotMatch(raw, /^Etag:/m);
   assert.match((await sim.run('curl -sI http://web01.halcyon.lab/robots.txt')).out, /^ETag: "/m);
 });
+
+test('TLS: lab certificates are self-signed, internet ones come from the CA and are current', async () => {
+  const sim = await boot();
+  const { K } = sim;
+  let r = await sim.run('curl -vk https://web01.halcyon.lab/status');
+  const field = (t, k) => new RegExp('^\\*  ' + k + ': (.*)$', 'm').exec(t)[1];
+  assert.equal(field(r.err, 'issuer'), field(r.err, 'subject'));
+  assert.equal(field(r.err, 'subject'), 'CN=web01.halcyon.lab');
+  assert.match(r.err, /self-signed certificate \(18\)/);
+  r = await sim.run('curl -vI https://example.com/');
+  assert.match(field(r.err, 'issuer'), /SimTrust RSA CA 1/);
+  assert.notEqual(field(r.err, 'issuer'), field(r.err, 'subject'));
+  const now = K.clock.now();
+  const cert = K.net.certFor(K.net.hostAt('93.184.216.34'), 'example.com');
+  const from = Date.parse(cert.notBefore.replace(/^(\w+) +(\d+) (\S+) (\d+) GMT$/, '$1 $2 $4 $3 GMT'));
+  const to = Date.parse(cert.notAfter.replace(/^(\w+) +(\d+) (\S+) (\d+) GMT$/, '$1 $2 $4 $3 GMT'));
+  assert.ok(from < now && now < to, 'valid at the simulated date');
+  K.clock.useVirtual(Date.UTC(2031, 2, 5, 12, 0, 0));
+  const later = K.net.certFor(K.net.hostAt('93.184.216.34'), 'example.com');
+  assert.match(later.notBefore, /2031 GMT$/, 'moves with the clock');
+  // without -k: the handshake is shown before the alert
+  r = await sim.run('curl -v https://web01.halcyon.lab/status');
+  assert.equal(r.code, 60);
+  assert.match(r.err, /^\* Host web01\.halcyon\.lab:443 was resolved\.\n\* IPv6: \(none\)\n\* IPv4: 10\.10\.10\.10\n\*   Trying 10\.10\.10\.10:443\.\.\.\n.*\* TLSv1\.3 \(IN\), TLS handshake, Certificate \(11\):\n\* TLSv1\.3 \(OUT\), TLS alert, unknown CA \(560\):\n\* SSL certificate problem: self-signed certificate\n/s);
+  assert.match(r.err, /curl: \(60\) SSL certificate problem/);
+});

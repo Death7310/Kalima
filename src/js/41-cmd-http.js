@@ -69,11 +69,10 @@
   function selfSigned(ip) {
     const h = K.net.hostAt(ip); const t = h && h.web && h.web.tls;
     if (t && t.selfSigned != null) return t.selfSigned;
-    return K.net.inScope(ip);
+    const c = h ? K.net.certFor(h, ip) : null;
+    return c ? c.subject === c.issuer : K.net.inScope(ip);
   }
-  function certOf(host, name) {
-    return (host.web && host.web.tls) || { subject: 'CN=' + (host.fqdn || name), issuer: 'C=US, O=Simulated Trust Services, CN=SimTrust RSA CA 1', notBefore: 'Sep  1 00:00:00 2026 GMT', notAfter: 'Nov 30 23:59:59 2026 GMT', version: 'TLSv1.3', cipher: 'TLS_AES_256_GCM_SHA384' };
-  }
+  function certOf(host, name) { return K.net.certFor(host, name); }
 
   /**
    * One HTTP exchange against K.net. `req` = {u (parsed url), method, headers, body}.
@@ -228,6 +227,11 @@
     }
     if (f.kind === 'cert') {
       await ctx.sleep(Math.round(ex.rtt * 3));
+      if (verbose) {
+        if (!U.isIPv4(u.host)) { say('* Host ' + u.host + ':' + u.port + ' was resolved.'); say('* IPv6: (none)'); say('* IPv4: ' + ex.ip); }
+        say('*   Trying ' + ex.ip + ':' + u.port + '...');
+        for (const l of ['* ALPN: curl offers h2,http/1.1', '* TLSv1.3 (OUT), TLS handshake, Client hello (1):', '*  CAfile: /etc/ssl/certs/ca-certificates.crt', '*  CApath: /etc/ssl/certs', '* TLSv1.3 (IN), TLS handshake, Server hello (2):', '* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):', '* TLSv1.3 (IN), TLS handshake, Certificate (11):']) say(l);
+      }
       say('* TLSv1.3 (OUT), TLS alert, unknown CA (560):'); say('* SSL certificate problem: self-signed certificate'); say('* closing connection #0');
       if (!o.silent || o.showError) ctx.eprintln('curl: (60) SSL certificate problem: self-signed certificate\nMore details here: https://curl.se/docs/sslcerts.html\n\ncurl failed to verify the legitimacy of the server and therefore could not\nestablish a secure connection to it. To learn more about this situation and\nhow to fix it, please visit the web page mentioned above.');
       return 60;
