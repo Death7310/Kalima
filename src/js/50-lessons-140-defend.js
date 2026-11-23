@@ -208,7 +208,202 @@
     refs: ['curl(1)', 'awk(1)', 'nginx documentation, log_format combined', 'NIST SP 800-92, Guide to Computer Security Log Management'],
   };
 
-  const lessons = [weblogLesson];
+  /* -------------------------------------------------------------- authlog */
+  const MINE = SCANS + '/web01-auth-mine.log';
+  const authlogLesson = {
+    id: 'defend-authlog',
+    title: 'Your SSH logins in the auth log',
+    minutes: 11,
+    objectives: [
+      'Find your own SSH connections in `/var/log/auth.log` on `web01`',
+      'Tell an accepted login from a refused one and name the fields that matter',
+      'Explain why a log is readable only by some accounts',
+    ],
+    intro: T(
+      'Every SSH login, successful or not, leaves a record on the server. Administrators read the authentication log to answer one question: who logged in, from where, and did they get in? A refused attempt is as interesting to them as an accepted one.',
+      '',
+      'You will connect to `web01` twice, once correctly and once with a deliberate mistake, and then read what the server wrote about you. The password mistake is made on the test account the client supplied for this purpose. A real engagement never involves guessing passwords on accounts you were not given.'
+    ),
+    steps: [
+      {
+        id: 'accepted',
+        prompt: T(
+          'First a normal login that runs one harmless command:',
+          '',
+          '```',
+          'ssh student@web01.halcyon.lab hostname',
+          '```',
+          '',
+          'If ssh asks whether to continue connecting, answer `yes`. The password is `student`. The output is the name of the server, `web01`.'
+        ),
+        hint: 'Type `ssh student@web01.halcyon.lab hostname` and answer the prompts.',
+        solution: 'ssh student@web01.halcyon.lab hostname',
+        input: SSHIN,
+        check: { cmd: 'hostname', host: 'web01', out: /^web01\s*$/m, exit: 0 },
+      },
+      {
+        id: 'refused',
+        prompt: T(
+          'Now the same login with a wrong password. `-o NumberOfPasswordPrompts=1` limits ssh to a single try, so the server records one refusal and not three:',
+          '',
+          '```',
+          'ssh -o NumberOfPasswordPrompts=1 student@web01.halcyon.lab hostname',
+          '```',
+          '',
+          'When it asks for the password, type anything other than `student`. ssh ends with `Permission denied`. From the server\'s side, this is a failed authentication from your address.'
+        ),
+        hint: 'Use the option shown and type a wrong password at the prompt.',
+        solution: 'ssh -o NumberOfPasswordPrompts=1 student@web01.halcyon.lab hostname',
+        input: ['wrong'],
+        check: { cmd: 'ssh', out: /Permission denied \(publickey,password\)/ },
+      },
+      {
+        id: 'fetch',
+        prompt: T(
+          'Fetch the records that mention your address and save them as evidence. The pattern `10\\.10\\.10\\.5 ` has a trailing space on purpose, so that it cannot match `10.10.10.50`:',
+          '',
+          '```',
+          'ssh student@web01.halcyon.lab "grep \'10\\.10\\.10\\.5 \' /var/log/auth.log" > ~/engagement/scans/web01-auth-mine.log',
+          '```',
+          '',
+          'Enter the password `student` when asked. Reading `/var/log/auth.log` works because the account is in the `adm` group.'
+        ),
+        hint: 'Same shape as the web log step: `ssh student@web01.halcyon.lab "grep PATTERN /var/log/auth.log" > FILE`.',
+        solution: 'ssh student@web01.halcyon.lab "grep \'10\\.10\\.10\\.5 \' /var/log/auth.log" > ~/engagement/scans/web01-auth-mine.log',
+        input: PASS,
+        check: { cmd: 'grep', host: 'web01', line: /web01-auth-mine\.log/, file: { path: MINE, exists: true, contains: /Accepted password for student from 10\.10\.10\.5/ } },
+      },
+      {
+        id: 'read',
+        prompt: T(
+          'Read the records:',
+          '',
+          '```',
+          'cat ~/engagement/scans/web01-auth-mine.log',
+          '```',
+          '',
+          'Each line begins with the date and time, the server name and the process, such as `sshd-session[2207]`. The number in brackets identifies one connection, so all lines with the same number belong together. A good login reads like this:',
+          '',
+          '```',
+          'Connection from 10.10.10.5 port 39383 on 10.10.10.10 port 22 ...',
+          'Accepted password for student from 10.10.10.5 port 39383 ssh2',
+          'Received disconnect from 10.10.10.5 port 39383:11: disconnected by user',
+          '```',
+          '',
+          'A refused login has `Failed password` where `Accepted password` would be, and a closing line that says the connection ended while the user was still authenticating.'
+        ),
+        hint: 'Use `cat` on the saved file.',
+        solution: 'cat ~/engagement/scans/web01-auth-mine.log',
+        check: { cmd: 'cat', out: /Accepted password for student from 10\.10\.10\.5/ },
+      },
+      {
+        id: 'failed-q',
+        prompt: 'Which word at the start of the message marks the record of your wrong password? Answer with that one word.',
+        hint: 'It is the word in the message that appears where `Accepted` appears in a good login.',
+        solution: 'Failed',
+        answer: /^failed( password)?$/i,
+      },
+      {
+        id: 'summary',
+        prompt: T(
+          'The fields you care about are in fixed positions on the `Accepted` and `Failed` lines: field 1 to 3 are the date and time, field 6 is the result, field 9 the account and field 11 the source address. Print just those and you have one clear line per attempt:',
+          '',
+          '```',
+          'awk \'/Accepted|Failed/ {print $1, $2, $3, $6, $9, $11}\' ~/engagement/scans/web01-auth-mine.log',
+          '```',
+          '',
+          'The expression between the slashes selects the lines to act on, and the braces say what to print for them.'
+        ),
+        hint: 'Use `awk` with a pattern in slashes, then `{print ...}` listing fields 1, 2, 3, 6, 9 and 11.',
+        solution: 'awk \'/Accepted|Failed/ {print $1, $2, $3, $6, $9, $11}\' ~/engagement/scans/web01-auth-mine.log',
+        check: { cmd: 'awk', out: /Accepted student 10\.10\.10\.5/, fn: (ev) => /Failed student 10\.10\.10\.5/.test(outOf(ev)) },
+      },
+      {
+        id: 'perms',
+        prompt: T(
+          'Why were you able to read this file? Ask `web01` who owns it and which groups your account belongs to:',
+          '',
+          '```',
+          'ssh student@web01.halcyon.lab "ls -l /var/log/auth.log; id"',
+          '```',
+          '',
+          'The file belongs to `root` and group `adm`, and its mode `-rw-r-----` allows the owner to write and the group to read. Everyone else is shut out, because an authentication log holds user names and addresses, and an attacker who can edit it can hide.'
+        ),
+        hint: 'Two commands in one quoted string: `ls -l /var/log/auth.log; id`.',
+        solution: 'ssh student@web01.halcyon.lab "ls -l /var/log/auth.log; id"',
+        input: PASS,
+        check: { cmd: 'id', host: 'web01', out: /root adm .*auth\.log/, fn: (ev) => /groups=.*\badm\b/.test(outOf(ev)) },
+      },
+      {
+        id: 'group-q',
+        prompt: 'Which group lets `student` read the file? Type the group name.',
+        hint: 'It is the group shown in `ls -l` and in the `groups=` part of the `id` output.',
+        solution: 'adm',
+        answer: /^adm$/i,
+      },
+      {
+        id: 'others',
+        prompt: T(
+          'The log is not only about you. The server has been running for days, and every accepted login is in the file:',
+          '',
+          '```',
+          'ssh student@web01.halcyon.lab "grep Accepted /var/log/auth.log"',
+          '```',
+          '',
+          'Some of these lines come from your address. Look for a different source address, and for the earlier dates. A defender would know which of these addresses belong to colleagues and which do not; you do not, and it is not your job to investigate them.'
+        ),
+        hint: 'Search for the word `Accepted` in `/var/log/auth.log` on web01.',
+        solution: 'ssh student@web01.halcyon.lab "grep Accepted /var/log/auth.log"',
+        input: PASS,
+        check: { cmd: 'grep', host: 'web01', out: /Accepted password for student from 10\.10\.20\.14/ },
+      },
+      {
+        id: 'others-q',
+        prompt: 'Apart from your own address, which source address appears in the accepted logins? Type it.',
+        hint: 'It starts with `10.10.20.`. It also logged in on November 10 and 11.',
+        solution: '10.10.20.14',
+        answer: /^10\.10\.20\.14$/,
+      },
+    ],
+    quiz: [
+      {
+        q: 'In the auth log, two lines carry the same number in brackets, `sshd-session[2207]`. What does that mean?',
+        choices: [
+          'They are two different servers',
+          'They belong to the same connection',
+          'The second one is an error',
+          'They happened at the same second',
+        ],
+        answer: 1,
+        why: 'The number is the process id of the sshd process that handled that connection, so all records with it tell one connection\'s story from first packet to disconnect.',
+      },
+      {
+        q: 'What does a defender conclude from five `Failed password` lines from one address followed by an `Accepted password` line from the same address?',
+        choices: [
+          'Nothing; failed logins are normal',
+          'Someone may have guessed the password, and the account deserves a closer look',
+          'The address is the server itself',
+          'The server restarted',
+        ],
+        answer: 1,
+        why: 'A run of failures and then a success from the same source is a recognized pattern of password guessing. It is worth reviewing, though a person who mistyped a few times looks the same, so context decides.',
+      },
+      {
+        q: 'Why is `/var/log/auth.log` readable only by root and the `adm` group?',
+        choices: [
+          'Because it is a binary file',
+          'Because it names accounts and addresses, and someone who can change it could erase their tracks',
+          'Because the file is too large for ordinary users',
+          'It is not; any user can read it',
+        ],
+        answer: 1,
+        why: 'Logs are evidence. Restricting them protects what they reveal about users and keeps the record trustworthy.',
+      },
+    ],
+    refs: ['sshd(8)', 'ssh(1), the -o option and NumberOfPasswordPrompts', 'NIST SP 800-92, Guide to Computer Security Log Management'],
+  };
+
+  const lessons = [weblogLesson, authlogLesson];
 
   K.lessons.register({
     id: 'defend',
