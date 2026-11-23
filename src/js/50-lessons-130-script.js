@@ -417,7 +417,258 @@
     refs: ['bash(1), sections on Compound Commands and Parameters', 'test(1)', 'GNU Bash Reference Manual'],
   };
 
-  const lessons = [firstLesson, flowLesson];
+  /* ----------------------------------------------------------------- sweep */
+  const SWEEP = [
+    '#!/bin/bash',
+    '# sweep.sh LIST - send one ping to each address in LIST and record the result',
+    'list="$1"',
+    'if [ ! -f "$list" ]; then',
+    '  echo "usage: $0 list" >&2',
+    '  exit 2',
+    'fi',
+    'out="$HOME/engagement/scans/sweep-$(date +%F).txt"',
+    ': > "$out"',
+    'while read -r ip; do',
+    '  case "$ip" in',
+    '    10.10.10.*) ;;',
+    '    *) echo "skipping $ip: outside the scope" >&2; continue ;;',
+    '  esac',
+    '  if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then',
+    '    echo "$(date +%T) $ip up" >> "$out"',
+    '  else',
+    '    echo "$(date +%T) $ip no-reply" >> "$out"',
+    '  fi',
+    'done < "$list"',
+    'echo "wrote $out"',
+    '',
+  ];
+  /** printf command that writes the text above: backslash-n for line ends, %% for a literal percent sign. */
+  const SWEEP_PRINTF = 'printf \'' + SWEEP.join('\\n').replace(/%/g, '%%') + '\' > sweep.sh';
+  const sweepLesson = {
+    id: 'script-sweep',
+    title: 'A careful reachability sweep',
+    minutes: 12,
+    objectives: [
+      'Send one ping with a one-second timeout and read its exit status',
+      'Write a loop that checks each address from a list file and records the result under `~/engagement/scans`',
+      'Explain why the target list comes from the scope file and why a sweep stays small',
+    ],
+    intro: T(
+      'Checking which hosts answer is usually the first technical step of an assessment, and it is a good first real script: a loop, a test and a results file. It is also where care matters most. Every address you send traffic to must be inside the agreed scope, so the list is drawn from `scope.txt` and checked again by the script. Every packet is a line in somebody\'s log. A short, deliberate list does the job and leaves a short, deliberate trail.',
+      '',
+      'You will write the sweep for five lab hosts, run it and read the result.'
+    ),
+    steps: [
+      {
+        id: 'scope',
+        prompt: T(
+          'Everything starts from the scope file. Go to the engagement folder and read it:',
+          '',
+          '```',
+          'cd ~/engagement && cat scope.txt',
+          '```'
+        ),
+        hint: 'Change into `~/engagement`, then `cat scope.txt`; `&&` lets you do both on one line.',
+        solution: 'cd ~/engagement && cat scope.txt',
+        check: { cwd: /\/engagement$/, out: /10\.10\.10\.0\/24/ },
+      },
+      {
+        id: 'scope-q',
+        prompt: 'Which network range is listed under `IN SCOPE`? Type it as it appears in the file.',
+        hint: 'It is the line of numbers with a slash, just below `# IN SCOPE`.',
+        solution: '10.10.10.0/24',
+        answer: /^10\.10\.10\.0\/24$/,
+      },
+      {
+        id: 'targets',
+        prompt: T(
+          'A range is not a to-do list. You decide which hosts you need to check and write them down, so the list can be reviewed. Create `~/engagement/targets.txt` with these six lines, in this order:',
+          '',
+          '```',
+          '10.10.10.10',
+          '10.10.10.20',
+          '10.10.10.30',
+          '10.10.10.50',
+          '10.10.10.77',
+          '192.0.2.9',
+          '```',
+          '',
+          'The first five are in scope. The last one stands for an address someone pasted in from an old email. It is not in scope, and the script will have to refuse it.'
+        ),
+        hint: 'Use `printf` with `\\n` between the addresses, or an editor. The file belongs in `~/engagement`.',
+        solution: 'printf \'10.10.10.10\\n10.10.10.20\\n10.10.10.30\\n10.10.10.50\\n10.10.10.77\\n192.0.2.9\\n\' > ~/engagement/targets.txt',
+        check: { file: { path: '/home/kali/engagement/targets.txt', exists: true, contains: /^10\.10\.10\.10\n10\.10\.10\.20\n10\.10\.10\.30\n10\.10\.10\.50\n10\.10\.10\.77\n192\.0\.2\.9\n?$/ } },
+      },
+      {
+        id: 'ping-one',
+        prompt: T(
+          'Before looping, run the single check by hand. `-c 1` sends one packet and `-W 1` waits at most one second for the reply, so a silent host cannot hold you up for long:',
+          '',
+          '```',
+          'ping -c 1 -W 1 10.10.10.10',
+          '```',
+          '',
+          'Look at the summary line: `1 packets transmitted, 1 received, 0% packet loss` means the host answered.'
+        ),
+        hint: 'The options are `-c 1` and `-W 1`, followed by the address.',
+        solution: 'ping -c 1 -W 1 10.10.10.10',
+        check: { cmd: 'ping', args: ['-c', '-W'], out: /1 received, 0% packet loss/ },
+      },
+      {
+        id: 'ping-silent',
+        prompt: T(
+          'Now an address that does not answer, and the exit status that tells a script so:',
+          '',
+          '```',
+          'ping -c 1 -W 1 10.10.10.50; echo $?',
+          '```',
+          '',
+          '`ping` exits with `0` when a reply came back and `1` when none did. Notice that this tells you the host did not *answer*, not that it is down: `10.10.10.50` is the domain controller, and it is configured to drop ping. Silence is a fact about the reply, not proof about the host.'
+        ),
+        hint: 'Same ping as before with the other address, then `echo $?` after a semicolon.',
+        solution: 'ping -c 1 -W 1 10.10.10.50; echo $?',
+        check: { cmd: 'ping', out: /100% packet loss/, fn: (ev) => /^1$/m.test(outOf(ev)) },
+      },
+      {
+        id: 'write',
+        prompt: T(
+          'Here is the sweep as a script. Create `~/engagement/sweep.sh` with this content, with an editor, or with a single `printf` command (the solution shows one):',
+          '',
+          '```',
+          '#!/bin/bash',
+          '# sweep.sh LIST - send one ping to each address in LIST and record the result',
+          'list="$1"',
+          'if [ ! -f "$list" ]; then',
+          '  echo "usage: $0 list" >&2',
+          '  exit 2',
+          'fi',
+          'out="$HOME/engagement/scans/sweep-$(date +%F).txt"',
+          ': > "$out"',
+          'while read -r ip; do',
+          '  case "$ip" in',
+          '    10.10.10.*) ;;',
+          '    *) echo "skipping $ip: outside the scope" >&2; continue ;;',
+          '  esac',
+          '  if ping -c 1 -W 1 "$ip" > /dev/null 2>&1; then',
+          '    echo "$(date +%T) $ip up" >> "$out"',
+          '  else',
+          '    echo "$(date +%T) $ip no-reply" >> "$out"',
+          '  fi',
+          'done < "$list"',
+          'echo "wrote $out"',
+          '```',
+          '',
+          'How it works. The list file is the first argument. `: > "$out"` empties the results file so a second run starts clean. The `case` block is the scope guard: only addresses that begin `10.10.10.` continue, and anything else is reported and skipped with `continue`. The ping goes inside `if`, so its exit status decides the branch, and `> /dev/null 2>&1` hides its output because you only want the result. In `printf`, a literal percent sign has to be written `%%`.'
+        ),
+        hint: 'Typing it into `nano ~/engagement/sweep.sh` is the most natural way. Save with Ctrl-O, Enter, then leave with Ctrl-X. The solution shows the one-line `printf` form.',
+        solution: SWEEP_PRINTF.replace('> sweep.sh', '> ~/engagement/sweep.sh'),
+        check: { file: { path: '/home/kali/engagement/sweep.sh', exists: true, contains: /^#!\/bin\/bash\n[\s\S]*while read[\s\S]*case[\s\S]*ping -c 1 -W 1[\s\S]*done/ } },
+      },
+      {
+        id: 'run',
+        prompt: T(
+          'Make it executable and run it on your list:',
+          '',
+          '```',
+          'chmod +x sweep.sh && ./sweep.sh targets.txt',
+          '```',
+          '',
+          'Run it from `~/engagement`. The script reports the skipped address and tells you where it wrote the results.',
+          '',
+          'A note on time: each silent address costs the one-second timeout, so this run takes a few seconds. If you do not want to wait in real time, the simulator can shorten the waiting: `kalima speed fast` makes waits four times shorter and `kalima speed instant` removes them. `kalima speed realtime` puts it back. On a real network a sweep of hundreds of addresses is a decision to make with the client, not a loop to run casually.'
+        ),
+        hint: 'You should be in `~/engagement`. `chmod +x sweep.sh`, then `./sweep.sh targets.txt`.',
+        solution: 'chmod +x sweep.sh && ./sweep.sh targets.txt',
+        check: { out: /skipping 192\.0\.2\.9: outside the scope/, fn: (ev) => /wrote \/home\/kali\/engagement\/scans\/sweep-\d{4}-\d{2}-\d{2}\.txt/.test(outOf(ev)) },
+      },
+      {
+        id: 'results',
+        prompt: T(
+          'Read what the script recorded:',
+          '',
+          '```',
+          'cat ~/engagement/scans/sweep-*.txt',
+          '```',
+          '',
+          'Each line is a time, an address and `up` or `no-reply`. The out-of-scope address was never contacted, so it does not appear at all.'
+        ),
+        hint: 'The results files are in `~/engagement/scans`; `sweep-*.txt` matches them.',
+        solution: 'cat ~/engagement/scans/sweep-*.txt',
+        check: { cmd: 'cat', out: /10\.10\.10\.10 up/, fn: (ev) => /10\.10\.10\.77 no-reply/.test(outOf(ev)) },
+      },
+      {
+        id: 'results-q',
+        prompt: 'How many of the addresses in the results file are marked `up`? Answer with the number.',
+        hint: 'Count the lines that end in `up`. `grep -c " up$"` would count them for you.',
+        solution: '3',
+        answer: ['3', 'three'],
+      },
+      {
+        id: 'note',
+        prompt: T(
+          'A result without a record is hard to defend later. Add a line to your engagement notes saying what you ran, with a timestamp:',
+          '',
+          '```',
+          'echo "$(date \'+%F %T\') ping sweep of targets.txt (5 lab hosts), results in scans/" >> ~/engagement/notes.md',
+          '```',
+          '',
+          '`>>` appends. The note says when you tested, what you tested and where the output is, which is what a client asks for if a log entry on their side needs an explanation.'
+        ),
+        hint: 'Append with `>>` to `~/engagement/notes.md`. Include the word `sweep` and a `date` call.',
+        solution: 'echo "$(date \'+%F %T\') ping sweep of targets.txt (5 lab hosts), results in scans/" >> ~/engagement/notes.md',
+        check: { line: /notes\.md/, file: { path: '/home/kali/engagement/notes.md', exists: true, contains: /sweep/i } },
+      },
+    ],
+    quiz: [
+      {
+        q: 'Why is the target list written from `scope.txt` and not typed from memory or copied from a colleague\'s message?',
+        choices: [
+          'It makes the loop run faster',
+          'Authorization is defined by the scope document, so every address you touch must be traceable to it',
+          'ping refuses addresses that are not in a file',
+          'Scripts cannot take addresses from the command line',
+        ],
+        answer: 1,
+        why: 'Permission to test covers the systems the client named and nothing else. Building the list from the scope file, and checking it again in the script, keeps you from touching something you are not authorized to touch.',
+      },
+      {
+        q: 'The sweep reports `10.10.10.50 no-reply`. What can you conclude?',
+        choices: [
+          'The host is switched off',
+          'The host is not at that address',
+          'It sent no reply to one ping; it may be down, or it may filter ICMP',
+          'The scope is wrong',
+        ],
+        answer: 2,
+        why: 'No reply means no reply. Firewalls often drop ICMP while the host and its services run normally, as the domain controller does here. Another check, such as a connection to a known port, is needed to say more.',
+      },
+      {
+        q: 'What does `ping -c 1 -W 1 host` do differently from plain `ping host` on Linux?',
+        choices: [
+          'It sends one packet and gives up after one second without a reply, instead of sending until interrupted',
+          'It sends one packet per second for one minute',
+          'It pings from port 1',
+          'It skips name resolution',
+        ],
+        answer: 0,
+        why: '`-c` is the count of packets to send and `-W` the time in seconds to wait for a reply. Without `-c`, Linux ping keeps going until you press Ctrl-C.',
+      },
+      {
+        q: 'Why keep a sweep list short and deliberate even when the whole /24 is in scope?',
+        choices: [
+          'Larger lists make the script fail',
+          'Every packet appears in the client\'s logs and monitoring; testing only what the question needs keeps the noise, the load and the risk down',
+          'Bash loops cannot read more than ten lines',
+          'It is the law in every country',
+        ],
+        answer: 1,
+        why: 'Being in scope means you may test, not that you must test everything. Minimal, planned traffic is easier to explain, less likely to disturb services and in line with the rules of engagement.',
+      },
+    ],
+    refs: ['ping(8)', 'bash(1), the case and if commands', 'NIST SP 800-115, section on network discovery'],
+  };
+
+  const lessons = [firstLesson, flowLesson, sweepLesson];
 
   K.lessons.register({
     id: 'script',
