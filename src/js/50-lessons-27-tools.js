@@ -660,11 +660,187 @@
     refs: ['sed(1)', 'diff(1)', 'The sed FAQ and the GNU sed manual', 'Kali Linux Revealed, ch. 3'],
   };
 
+  /* ------------------------------------------------------------------- awk */
+  const AWK = ['awk', 'mawk', 'gawk', 'nawk'];
+  const awkLesson = {
+    id: 'tools-awk',
+    title: 'Working with columns in awk',
+    minutes: 12,
+    objectives: [
+      'Print chosen columns of delimited text with `awk`, setting the separator with `-F`',
+      'Select rows with a pattern and a comparison, and skip a header row with `NR`',
+      'Total a column and count matching rows with an `END` block',
+    ],
+    intro: T(
+      'Logs, scan results and exports are tables in disguise: every line has the same fields in the same order. `cut` can pull out a column, but it cannot compare values or add them up. `awk` can.',
+      '',
+      'In this lesson you read the shipments spreadsheet of the invented client and a web server access log, both under `/usr/share/kalima`. They are read-only, and `awk` only reads, so you can experiment freely.'
+    ),
+    steps: [
+      {
+        id: 'print',
+        prompt: T(
+          '`awk` splits each line into fields and calls them `$1`, `$2` and so on. `$0` is the whole line. A program is a short instruction in braces, and `print` writes the fields you name. The shipments file is comma-separated, so tell `awk` the separator with `-F,`:',
+          '',
+          '```',
+          'cd /usr/share/kalima',
+          'awk -F, \'{print $1, $4}\' data/shipments.csv | head -5',
+          '```',
+          '',
+          'The result has the shipment id and the destination for each row, starting with the header row `id destination`. The comma between `$1` and `$4` inside `print` puts a space between the two values. The single quotes keep the shell from touching `$1` and the braces.'
+        ),
+        hint: 'Use `-F,` and the program `{print $1, $4}`, quoted, then the file, then pipe to `head -5`.',
+        solution: 'cd /usr/share/kalima; awk -F, \'{print $1, $4}\' data/shipments.csv | head -5',
+        check: { cmd: AWK, args: ['-F,'], out: /^HF-2026-10421 Newcastle$/m, all: [{ out: /^id destination$/m }] },
+      },
+      {
+        id: 'nf',
+        prompt: T(
+          '`NF` is the number of fields on the current line, and `NR` is the number of the current line. Pattern `NR==1` means "only on line 1". Ask `awk` how many columns the header row has:',
+          '',
+          '```',
+          'awk -F, \'NR==1 {print NF}\' data/shipments.csv',
+          '```',
+          '',
+          'A pattern in front of the braces decides which lines the action runs on. How many columns does the file have? Type the number.'
+        ),
+        hint: 'Run the command and read the single number it prints. Check it against the header: `head -1 data/shipments.csv`.',
+        solution: '9',
+        answer: /^(9|nine)$/i,
+      },
+      {
+        id: 'whitespace',
+        prompt: T(
+          'Without `-F`, fields are separated by runs of spaces or tabs. That suits the access log, where every line looks like this:',
+          '',
+          '```',
+          '192.0.2.44 - - [12/Nov/2026:00:00:02 +0000] "GET /status HTTP/1.1" 200 17 "-" "UptimeProbe/1.4"',
+          '```',
+          '',
+          'Counting by spaces, `$1` is the client address and `$9` is the HTTP status code. Print those two for the first lines:',
+          '',
+          '```',
+          'awk \'{print $1, $9}\' logs/access.log | head -5',
+          '```'
+        ),
+        hint: 'No `-F` is needed. Print `$1` and `$9` of `logs/access.log`.',
+        solution: 'awk \'{print $1, $9}\' logs/access.log | head -5',
+        check: { cmd: AWK, out: /^192\.0\.2\.44 200$/m, not: { out: /GET|HTTP/ } },
+      },
+      {
+        id: 'select',
+        prompt: T(
+          'A pattern can be a comparison. When the pattern alone is given, with no braces, `awk` prints each line for which it is true. Column 8 of the shipments file is the status. Show the delayed shipments:',
+          '',
+          '```',
+          'awk -F, \'$8 == "delayed"\' data/shipments.csv',
+          '```',
+          '',
+          'Use `==` to compare and double quotes around text. You get three full rows.'
+        ),
+        hint: 'The pattern is `$8 == "delayed"`. Remember `-F,`.',
+        solution: 'awk -F, \'$8 == "delayed"\' data/shipments.csv',
+        check: { cmd: AWK, out: /Hull,Blackpool,1476,4,timed,delayed/, all: [{ out: /Northgate Ceramics/ }], not: { out: /delivered|^id,/m } },
+      },
+      {
+        id: 'read-date',
+        prompt: 'Read the three delayed rows. On what date (column 2) was the delayed shipment from Hull to Blackpool sent? Type it as it appears.',
+        hint: 'Find the row with Hull and Blackpool and read the second field.',
+        solution: '2026-10-27',
+        answer: /^2026-10-27$/,
+      },
+      {
+        id: 'numeric',
+        prompt: T(
+          'Fields that look like numbers compare as numbers with `>` and `<`. Conditions combine with `&&` (and) and `||` (or). The header row would also be tested, so add `NR>1` to skip it:',
+          '',
+          '```',
+          'awk -F, \'NR>1 && $5 > 5000 {print $1, $5}\' data/shipments.csv',
+          '```',
+          '',
+          'Column 5 is the weight in kilograms, so this lists the id and weight of every shipment over five tonnes. Four rows qualify.'
+        ),
+        hint: 'Combine `NR>1` and `$5 > 5000` with `&&`, and print `$1, $5`.',
+        solution: 'awk -F, \'NR>1 && $5 > 5000 {print $1, $5}\' data/shipments.csv',
+        check: { cmd: AWK, out: /^HF-2026-10466 5640$/m, all: [{ out: /^HF-2026-10463 5280$/m }], not: { out: /weight_kg|HF-2026-10426/ } },
+      },
+      {
+        id: 'sum',
+        prompt: T(
+          'Variables spring into existence when you use them, starting at 0. A block written `END { ... }` runs once, after the last line has been read. Together they let you total a column:',
+          '',
+          '```',
+          'awk -F, \'NR>1 {sum += $5} END {print sum}\' data/shipments.csv',
+          '```',
+          '',
+          '`sum += $5` adds the weight of each row to `sum`. When the file ends, `print sum` shows the total: 153649 kilograms. You can print a label as well: `END {print "total kg:", sum}`.'
+        ),
+        hint: 'Add each `$5` to a variable on every row except the header, then print the variable in an `END` block.',
+        solution: 'awk -F, \'NR>1 {sum += $5} END {print sum}\' data/shipments.csv',
+        check: { cmd: AWK, out: /153649/ },
+      },
+      {
+        id: 'pallets',
+        prompt: 'Now build one yourself. Print the total number of pallets, column 6, across all shipments. Run the command and read the number it prints.',
+        hint: 'The same shape as the weight total, with `$6`.',
+        solution: 'awk -F, \'NR>1 {sum += $6} END {print sum}\' data/shipments.csv',
+        check: { cmd: AWK, out: /^391$/m },
+      },
+      {
+        id: 'count',
+        prompt: T(
+          'Counting is the same idea with `++`. Use the access log: column 9 is the status code, and a `404` means the requested page does not exist. Print how many requests received a 404.',
+          '',
+          'Combine a pattern before the braces with an `END` block that prints your counter.'
+        ),
+        hint: 'Something like `$9 == 404 {n++} END {print n}` applied to `logs/access.log`.',
+        solution: 'awk \'$9 == 404 {n++} END {print n}\' logs/access.log',
+        check: { cmd: AWK, out: /^108$/m },
+      },
+      {
+        id: 'group',
+        prompt: T(
+          'Arrays use the same trick: `n[$1]++` counts per distinct value of the first field. In the `END` block, `for (ip in n)` loops over the keys. Count requests per client address, and pipe through `sort` because `awk` does not promise an order:',
+          '',
+          '```',
+          'awk \'{n[$1]++} END {for (ip in n) print ip, n[ip]}\' logs/access.log | sort',
+          '```',
+          '',
+          'Read the table. Eight addresses appear. A source that makes far more requests than the others, many of them 404s, is worth a closer look in real log analysis. Which address made the most requests? Type it after you have run the command.'
+        ),
+        hint: 'Count with `n[$1]++`, print the array in `END`, and read the largest number in the second column.',
+        solution: '203.0.113.99',
+        answer: /^203\.0\.113\.99$/,
+      },
+    ],
+    quiz: [
+      {
+        q: 'What does `awk -F: \'{print $1}\' /etc/passwd` print?',
+        choices: ['The first colon-separated field of each line, the user name', 'The whole first line of the file', 'The number of colons in each line', 'Nothing, because `:` is not a valid separator'],
+        answer: 0,
+        why: '`-F:` makes the colon the field separator, and `$1` is the first field. In `/etc/passwd` that is the account name.',
+      },
+      {
+        q: 'You total a column with `awk -F, \'{s += $5} END {print s}\'` on a file whose first line is a text header. What does the header do to the total?',
+        choices: ['Nothing: text counts as 0 in a number, so the total is unchanged', 'It makes `awk` stop with an error', 'It adds 1 to the total', 'It doubles the first value'],
+        answer: 0,
+        why: '`awk` treats a non-numeric string as zero in arithmetic. It is still better to skip the header with `NR>1`, because a header that starts with digits would be miscounted.',
+      },
+      {
+        q: 'Which program prints the lines whose second field is greater than 100 in a space-separated file?',
+        choices: ['`awk \'$2 > 100\' file`', '`awk \'{$2 > 100}\' file`', '`awk -F> \'$2\' file`', '`awk \'END {$2 > 100}\' file`'],
+        answer: 0,
+        why: 'A bare pattern with no action prints each matching line. Putting the comparison inside braces makes it an action that evaluates it but prints nothing.',
+      },
+    ],
+    refs: ['awk(1)', 'mawk(1)', 'The AWK Programming Language, Aho, Kernighan and Weinberger', 'Kali Linux Revealed, ch. 3'],
+  };
+
   K.lessons.register({
     id: 'tools',
     title: 'Finding files, archives and stream editing',
     order: 27,
     summary: 'Search for files, pack and unpack archives, and transform text with sed and awk.',
-    lessons: [findLesson, archiveLesson, sedLesson],
+    lessons: [findLesson, archiveLesson, sedLesson, awkLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
