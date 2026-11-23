@@ -590,7 +590,202 @@
     refs: ['awk(1)', 'uniq(1)', 'sort(1)', 'RFC 5737', 'NIST SP 800-92, Guide to Computer Security Log Management'],
   };
 
-  const lessons = [weblogLesson, authlogLesson, analysisLesson];
+  /* --------------------------------------------------------------- habits */
+  const WINDOW_FILE = '/home/kali/engagement/test-window.txt';
+  const habitsLesson = {
+    id: 'defend-habits',
+    title: 'Testing when everything is logged',
+    minutes: 11,
+    objectives: [
+      'Explain why authorized testing is visible to the client and what that requires of you',
+      'Record the facts a defender needs to recognize your traffic: window, source address and tester label',
+      'Keep timestamped notes from the command line and keep your footprint as small as the question allows',
+    ],
+    intro: T(
+      'The last two lessons showed that your requests and logins are written down on the other side. That is not a problem to avoid; it is the reason the work is organized the way it is. A client\'s defenders need to tell your tests from a real attack, and you need to be able to show exactly what you did and when.',
+      '',
+      'In this lesson you turn that into three habits: agree and record the window and your identifiers, label and log what you do, and send only as much traffic as the question needs.'
+    ),
+    steps: [
+      {
+        id: 'roe',
+        prompt: T(
+          'The rules of engagement are the agreement you work under. Read them again with the defender\'s side in mind:',
+          '',
+          '```',
+          'cat ~/engagement/rules-of-engagement.txt',
+          '```',
+          '',
+          'Note the contact address for the client\'s IT team, the rule about the scope, and the rule about records.'
+        ),
+        hint: 'Use `cat` on the file in `~/engagement`.',
+        solution: 'cat ~/engagement/rules-of-engagement.txt',
+        check: { cmd: 'cat', out: /RULES OF ENGAGEMENT/ },
+      },
+      {
+        id: 'roe-q',
+        prompt: 'Which numbered rule tells you to keep commands and timestamps so that every finding can be reproduced? Answer with its number.',
+        hint: 'It is the rule titled "Record what you do".',
+        solution: '5',
+        answer: ['5', 'five', 'rule 5'],
+      },
+      {
+        id: 'address',
+        prompt: T(
+          'A defender who sees unusual traffic first asks "is that you?". The answer starts with your source address. Show it:',
+          '',
+          '```',
+          'ip -br addr show eth0',
+          '```',
+          '',
+          '`-br` gives the brief one-line form. The address with its prefix length, `10.10.10.5/24`, is what the client\'s logs will show for everything you send.'
+        ),
+        hint: '`ip -br addr show eth0` prints one line for the interface.',
+        solution: 'ip -br addr show eth0',
+        check: { cmd: 'ip', out: /eth0\s+UP\s+10\.10\.10\.5\/24/ },
+      },
+      {
+        id: 'window',
+        prompt: T(
+          'Before testing starts you send the client a short note: when you will test, from which address, with which account and under which label. Write the same facts into a file in your engagement folder, `~/engagement/test-window.txt`:',
+          '',
+          '```',
+          'Engagement: HF-LAB-2026-11',
+          'Source address: 10.10.10.5',
+          'Test account: student (web01)',
+          'Tester user agent: HF-LAB-2026-11-tester',
+          'Window: dates and hours agreed with it-ops@halcyon.lab',
+          '```',
+          '',
+          'On a real job the last line holds exact dates and hours, and testing outside them is a breach of the agreement even if everything else is in scope.'
+        ),
+        hint: 'Write the five lines with an editor, or with one `printf` where each line ends in `\\n`.',
+        solution: 'printf \'Engagement: HF-LAB-2026-11\\nSource address: 10.10.10.5\\nTest account: student (web01)\\nTester user agent: HF-LAB-2026-11-tester\\nWindow: dates and hours agreed with it-ops@halcyon.lab\\n\' > ~/engagement/test-window.txt',
+        check: { line: /test-window\.txt/, file: { path: WINDOW_FILE, exists: true, contains: /Source address: 10\.10\.10\.5[\s\S]*Tester user agent: HF-LAB-2026-11-tester[\s\S]*Window:/ } },
+      },
+      {
+        id: 'note-fn',
+        prompt: T(
+          'Notes with timestamps are easier to keep when it costs nothing. Define a small function that appends a line, with the date and time, to your engagement notes, and use it once:',
+          '',
+          '```',
+          'note() { echo "$(date \'+%F %T\') $*" >> ~/engagement/notes.md; }; note "starting web01 header check"',
+          '```',
+          '',
+          '`$*` stands for everything given to the function. The function lives only in this shell session; to keep it, put the line in `~/.zshrc`. Notes are for you and for the client, so write what you do and why in plain words.'
+        ),
+        hint: 'Define `note()` with `echo` and `>>`, then call it with a quoted sentence.',
+        solution: 'note() { echo "$(date \'+%F %T\') $*" >> ~/engagement/notes.md; }; note "starting web01 header check"',
+        check: { line: /\bnote\b/, file: { path: '/home/kali/engagement/notes.md', exists: true, contains: /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} starting web01 header check/ } },
+      },
+      {
+        id: 'head',
+        prompt: T(
+          'The question is a small one: which web server software runs on `web01`? A single request answers it. `-I` asks only for the headers (an HTTP `HEAD` request), the tester label identifies you, and `grep` keeps the line you care about:',
+          '',
+          '```',
+          'curl -sI -A "HF-LAB-2026-11-tester" http://web01.halcyon.lab/ | grep -i ^server',
+          '```',
+          '',
+          'One request, one answer: `Server: nginx/1.26.3`. A tool that requests thousands of pages would also answer it, but it would write thousands of log lines and could put load on a production server. Use the smallest action that answers the question.'
+        ),
+        hint: 'Combine `-s`, `-I` and `-A "HF-LAB-2026-11-tester"` with the address, then pipe to `grep -i ^server`.',
+        solution: 'curl -sI -A "HF-LAB-2026-11-tester" http://web01.halcyon.lab/ | grep -i ^server',
+        check: { cmd: 'curl', args: ['-A'], line: /-\w*I/, out: /^Server: nginx\//m },
+      },
+      {
+        id: 'verify',
+        prompt: T(
+          'Now look from the defender\'s chair and see what that one request looked like in the server\'s log:',
+          '',
+          '```',
+          'ssh student@web01.halcyon.lab "grep HF-LAB-2026-11-tester /var/log/nginx/access.log"',
+          '```',
+          '',
+          'Answer the host key question with `yes` if it comes up and use the password `student`. A defender can match the label in this line to the note you sent, and the time to your window.'
+        ),
+        hint: 'Search the access log on `web01` for the label.',
+        solution: 'ssh student@web01.halcyon.lab "grep HF-LAB-2026-11-tester /var/log/nginx/access.log"',
+        input: SSHIN,
+        check: { cmd: 'grep', host: 'web01', out: /^10\.10\.10\.5 .* "HF-LAB-2026-11-tester"$/m },
+      },
+      {
+        id: 'method-q',
+        prompt: 'Which request method does the log line show for that request? Answer with the word.',
+        hint: 'It is the first word inside the quotes of the request, before the path.',
+        solution: 'HEAD',
+        answer: /^head$/i,
+      },
+      {
+        id: 'note-done',
+        prompt: T(
+          'Close the loop in your notes, using the function from before:',
+          '',
+          '```',
+          'note "web01 header check done: 1 HEAD request, label HF-LAB-2026-11-tester"',
+          '```',
+          '',
+          'If the shell no longer knows `note` (you reloaded the page, for instance), run the function definition from the earlier step again first.'
+        ),
+        hint: 'Call `note` with a sentence in quotes that contains the words `header check done`.',
+        solution: 'note "web01 header check done: 1 HEAD request, label HF-LAB-2026-11-tester"',
+        check: { line: /\bnote\b/, file: { path: '/home/kali/engagement/notes.md', exists: true, contains: /web01 header check done: 1 HEAD request/ } },
+      },
+      {
+        id: 'timeline',
+        prompt: T(
+          'Show the end of your notes:',
+          '',
+          '```',
+          'tail -n 4 ~/engagement/notes.md',
+          '```',
+          '',
+          'You can read a short timeline: when the check started and when it ended. If the client\'s team later asks about activity from your address, these lines, together with the window file and the saved log excerpts, are your answer.'
+        ),
+        hint: '`tail -n 4` prints the last four lines of a file.',
+        solution: 'tail -n 4 ~/engagement/notes.md',
+        check: { cmd: 'tail', out: /web01 header check done/ },
+      },
+    ],
+    quiz: [
+      {
+        q: 'Why do you tell the client\'s IT team when and from where you will test?',
+        choices: [
+          'So that they can switch their logging off',
+          'So that their defenders can tell your activity from a real attack and avoid raising a false alarm',
+          'Because ssh requires it',
+          'It is only a courtesy and changes nothing',
+        ],
+        answer: 1,
+        why: 'Defenders respond to what the logs show. Knowing your window, address and label lets them recognize your traffic, and lets you show later that anything outside the window was not yours.',
+      },
+      {
+        q: 'The question is "does this server answer on the web port, and what software is it?". Which approach fits the rule of making only as much noise as the question needs?',
+        choices: [
+          'One request for the headers, such as `curl -sI`',
+          'Running a tool that requests thousands of pages',
+          'Repeating the request every second for an hour',
+          'Testing every address in the range to see which ones answer',
+        ],
+        answer: 0,
+        why: 'One header request answers the question with one log line. The other options generate far more traffic, more load and more to explain, without answering anything the first does not.',
+      },
+      {
+        q: 'Halfway through the window you notice signs that someone else has already broken into a system in scope. What does the rules of engagement say to do?',
+        choices: [
+          'Carry on and mention it in the final report',
+          'Stop and contact the client',
+          'Fix it yourself',
+          'Delete the evidence so the report stays clean',
+        ],
+        answer: 1,
+        why: 'A real incident changes the situation. The rules say to stop and report it to the client, who decides what happens next. Changing or removing anything would destroy evidence.',
+      },
+    ],
+    refs: ['NIST SP 800-115, sections on planning and rules of engagement', 'curl(1), the -I and -A options'],
+  };
+
+  const lessons = [weblogLesson, authlogLesson, analysisLesson, habitsLesson];
 
   K.lessons.register({
     id: 'defend',
