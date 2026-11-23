@@ -1032,9 +1032,9 @@
     summary: 'stream editor for filtering and transforming text',
     synopsis: 'sed [OPTION]... {script-only-if-no-other-script} [input-file]...',
     man: manPage({
-      desc: 'Sed is a stream editor. It reads each input line into the pattern space, runs the script\'s commands on it,\nand prints the result. The script is the first operand unless -e or -f is used.\n\n' +
-        'Commands: s/RE/TEXT/FLAGS substitutes (flags g, p, i, N, w FILE; & and \\1..\\9 in TEXT), d deletes the line,\np prints it, q quits, a/i/c append, insert or change text, y/abc/xyz/ translates characters, = prints the\nline number, n/N read the next line, h/H/g/G/x use the hold space, b/t/T branch, and { } groups commands.\n\n' +
-        'Addresses select lines: N, $, /RE/, N,M, N,+M, N,~M, FIRST~STEP and 0,/RE/; ! negates. Regular expressions\nare basic by default and extended with -E.',
+      desc: 'Sed is a stream editor. It reads each input line into the pattern space, runs the commands of the script on it, and prints the result. The script is the first operand unless -e or -f is used.\n\n' +
+        'Commands: s/RE/TEXT/FLAGS substitutes (flags g, p, i, N, w FILE; & and \\1..\\9 in TEXT), d deletes the line, p prints it, q quits, a/i/c append, insert or change text, y/abc/xyz/ translates characters, = prints the line number, n/N read the next line, h/H/g/G/x use the hold space, b/t/T branch, and { } groups commands.\n\n' +
+        'Addresses select lines: N, $, /RE/, N,M, N,+M, N,~M, FIRST~STEP and 0,/RE/; ! negates. Regular expressions are basic by default and extended with -E.',
       opts: [
         ['-n, --quiet, --silent', 'Suppress automatic printing of the pattern space.'],
         ['-e SCRIPT, --expression=SCRIPT', 'Add the commands in SCRIPT. May be repeated.'],
@@ -2744,9 +2744,8 @@
     summary: 'pattern scanning and text processing language',
     synopsis: "awk [-F value] [-v var=value] [--] 'program text' [file ...]\nawk [-F value] [-v var=value] [-f program-file] [--] [file ...]",
     man: manPage({
-      desc: 'awk reads each input file (or standard input) one record at a time, usually a line, and splits it into fields\n$1, $2, ... $NF. For every record it runs the rules of the program: a pattern followed by an action in braces.\n' +
-        'Without a pattern an action runs for every record; without an action a matching record is printed.\n\n' +
-        'Patterns: BEGIN and END, /regex/, any expression, and ranges "pattern1, pattern2". Statements include print,\nprintf, if/else, while, do, for, for (k in array), delete, next and exit. Built-in variables: NR NF FNR FS OFS\nORS RS FILENAME. Functions: length substr index split sub gsub match sprintf tolower toupper int sqrt sin cos\natan2 log exp rand srand system close, and your own with "function name(args) { ... }".\n\n' +
+      desc: 'awk reads each input file (or standard input) one record at a time, usually a line, and splits it into fields $1, $2, ... $NF. For every record it runs the rules of the program: a pattern followed by an action in braces. Without a pattern an action runs for every record; without an action a matching record is printed.\n\n' +
+        'Patterns: BEGIN and END, /regex/, any expression, and ranges "pattern1, pattern2". Statements include print, printf, if/else, while, do, for, for (k in array), delete, next and exit. Built-in variables: NR NF FNR FS OFS ORS RS FILENAME. Functions: length substr index split sub gsub match sprintf tolower toupper int sqrt sin cos atan2 log exp rand srand system close, and your own with "function name(args) { ... }".\n\n' +
         'This is mawk, the awk that Kali uses by default.',
       opts: [
         ['-F value', 'Set the field separator FS: a single character, or a regular expression.'],

@@ -3123,3 +3123,425 @@ EXAMPLES
     complete() { return ['version', 'dgst', 'enc', 'base64', 'rand', 'md5', 'sha1', 'sha256', 'sha512', 'help']; },
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
+
+/* ============================================== assorted GNU filters: text */
+;(function (root) {
+  'use strict';
+  const K = root.K;
+  const U = K.util;
+
+  const HELP = {
+    fold: "Usage: fold [OPTION]... [FILE]...\nWrap input lines in each FILE, writing to standard output.\n\nWith no FILE, or when FILE is -, read standard input.\n\nMandatory arguments to long options are mandatory for short options too.\n  -b, --bytes         count bytes rather than columns\n  -s, --spaces        break at spaces\n  -w, --width=WIDTH   use WIDTH columns instead of 80\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/fold>\nor available locally via: info '(coreutils) fold invocation'\n",
+    fmt: "Usage: fmt [-WIDTH] [OPTION]... [FILE]...\nReformat each paragraph in the FILE(s), writing to standard output.\nThe option -WIDTH is an abbreviated form of --width=DIGITS.\n\nWith no FILE, or when FILE is -, read standard input.\n\nMandatory arguments to long options are mandatory for short options too.\n  -c, --crown-margin        preserve indentation of first two lines\n  -p, --prefix=STRING       reformat only lines beginning with STRING,\n                              reattaching the prefix to reformatted lines\n  -s, --split-only          split long lines, but do not refill\n  -t, --tagged-paragraph    indentation of first line different from second\n  -u, --uniform-spacing     one space between words, two after sentences\n  -w, --width=WIDTH         maximum line width (default of 75 columns)\n  -g, --goal=WIDTH          goal width (default of 93% of width)\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/fmt>\nor available locally via: info '(coreutils) fmt invocation'\n",
+    join: "Usage: join [OPTION]... FILE1 FILE2\nFor each pair of input lines with identical join fields, write a line to\nstandard output.  The default join field is the first, delimited by blanks.\n\nWhen FILE1 or FILE2 (not both) is -, read standard input.\n\n  -a FILENUM             also print unpairable lines from file FILENUM, where\n                           FILENUM is 1 or 2, corresponding to FILE1 or FILE2\n  -e STRING              replace missing (empty) input fields with STRING;\n                           I.e., missing fields specified with '-12jo' options\n  -i, --ignore-case      ignore differences in case when comparing fields\n  -j FIELD               equivalent to '-1 FIELD -2 FIELD'\n  -o FORMAT              obey FORMAT while constructing output line\n  -t CHAR                use CHAR as input and output field separator\n  -v FILENUM             like -a FILENUM, but suppress joined output lines\n  -1 FIELD               join on this FIELD of file 1\n  -2 FIELD               join on this FIELD of file 2\n      --check-order      check that the input is correctly sorted, even\n                           if all input lines are pairable\n      --nocheck-order    do not check that the input is correctly sorted\n      --header           treat the first line in each file as field headers,\n                           print them without trying to pair them\n  -z, --zero-terminated  line delimiter is NUL, not newline\n      --help        display this help and exit\n      --version     output version information and exit\n\nUnless -t CHAR is given, leading blanks separate fields and are ignored,\nelse fields are separated by CHAR.  Any FIELD is a field number counted\nfrom 1.  FORMAT is one or more comma or blank separated specifications,\neach being 'FILENUM.FIELD' or '0'.  Default FORMAT outputs the join field,\nthe remaining fields from FILE1, the remaining fields from FILE2, all\nseparated by CHAR.  If FORMAT is the keyword 'auto', then the first\nline of each file determines the number of fields output for each line.\n\nImportant: FILE1 and FILE2 must be sorted on the join fields.\nE.g., use \"sort -k 1b,1\" if 'join' has no options,\nor use \"join -t ''\" if 'sort' has no options.\nNote, comparisons honor the rules specified by 'LC_COLLATE'.\nIf the input is not sorted and some lines cannot be joined, a\nwarning message will be given.\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/join>\nor available locally via: info '(coreutils) join invocation'\n",
+    expand: "Usage: expand [OPTION]... [FILE]...\nConvert tabs in each FILE to spaces, writing to standard output.\n\nWith no FILE, or when FILE is -, read standard input.\n\nMandatory arguments to long options are mandatory for short options too.\n  -i, --initial    do not convert tabs after non blanks\n  -t, --tabs=N     have tabs N characters apart, not 8\n  -t, --tabs=LIST  use comma separated list of tab positions.\n                     The last specified position can be prefixed with '/'\n                     to specify a tab size to use after the last\n                     explicitly specified tab stop.  Also a prefix of '+'\n                     can be used to align remaining tab stops relative to\n                     the last specified tab stop instead of the first column\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/expand>\nor available locally via: info '(coreutils) expand invocation'\n",
+    unexpand: "Usage: unexpand [OPTION]... [FILE]...\nConvert blanks in each FILE to tabs, writing to standard output.\n\nWith no FILE, or when FILE is -, read standard input.\n\nMandatory arguments to long options are mandatory for short options too.\n  -a, --all        convert all blanks, instead of just initial blanks\n      --first-only  convert only leading sequences of blanks (overrides -a)\n  -t, --tabs=N     have tabs N characters apart instead of 8 (enables -a)\n  -t, --tabs=LIST  use comma separated list of tab positions.\n                     The last specified position can be prefixed with '/'\n                     to specify a tab size to use after the last\n                     explicitly specified tab stop.  Also a prefix of '+'\n                     can be used to align remaining tab stops relative to\n                     the last specified tab stop instead of the first column\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/unexpand>\nor available locally via: info '(coreutils) unexpand invocation'\n",
+    factor: "Usage: factor [OPTION] [NUMBER]...\nPrint the prime factors of each specified integer NUMBER.  If none\nare specified on the command line, read them from standard input.\n\n  -h, --exponents   print repeated factors in form p^e unless e is 1\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/factor>\nor available locally via: info '(coreutils) factor invocation'\n",
+    shuf: "Usage: shuf [OPTION]... [FILE]\n  or:  shuf -e [OPTION]... [ARG]...\n  or:  shuf -i LO-HI [OPTION]...\nWrite a random permutation of the input lines to standard output.\n\nWith no FILE, or when FILE is -, read standard input.\n\nMandatory arguments to long options are mandatory for short options too.\n  -e, --echo                treat each ARG as an input line\n  -i, --input-range=LO-HI   treat each number LO through HI as an input line\n  -n, --head-count=COUNT    output at most COUNT lines\n  -o, --output=FILE         write result to FILE instead of standard output\n      --random-source=FILE  get random bytes from FILE\n  -r, --repeat              output lines can be repeated\n  -z, --zero-terminated     line delimiter is NUL, not newline\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/shuf>\nor available locally via: info '(coreutils) shuf invocation'\n",
+    sum: "Usage: sum [OPTION]... [FILE]...\nPrint or check BSD (16-bit) checksums.\n\nWith no FILE, or when FILE is -, read standard input.\n\n  -r              use BSD sum algorithm (the default), use 1K blocks\n  -s, --sysv      use System V sum algorithm, use 512 bytes blocks\n      --help        display this help and exit\n      --version     output version information and exit\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/sum>\nor available locally via: info '(coreutils) sum invocation'\n",
+    od: "Usage: od [OPTION]... [FILE]...\n  or:  od [-abcdfilosx]... [FILE] [[+]OFFSET[.][b]]\n  or:  od --traditional [OPTION]... [FILE] [[+]OFFSET[.][b] [+][LABEL][.][b]]\n\nWrite an unambiguous representation, octal bytes by default,\nof FILE to standard output.  With more than one FILE argument,\nconcatenate them in the listed order to form the input.\n\nWith no FILE, or when FILE is -, read standard input.\n\nIf first and second call formats both apply, the second format is assumed\nif the last operand begins with + or (if there are 2 operands) a digit.\nAn OFFSET operand means -j OFFSET.  LABEL is the pseudo-address\nat first byte printed, incremented when dump is progressing.\nFor OFFSET and LABEL, a 0x or 0X prefix indicates hexadecimal;\nsuffixes may be . for octal and b for multiply by 512.\n\nMandatory arguments to long options are mandatory for short options too.\n  -A, --address-radix=RADIX   output format for file offsets; RADIX is one\n                                of [doxn], for Decimal, Octal, Hex or None\n      --endian={big|little}   swap input bytes according the specified order\n  -j, --skip-bytes=BYTES      skip BYTES input bytes first\n  -N, --read-bytes=BYTES      limit dump to BYTES input bytes\n  -S BYTES, --strings[=BYTES]  show only NUL terminated strings\n                                of at least BYTES (3) printable characters\n  -t, --format=TYPE           select output format or formats\n  -v, --output-duplicates     do not use * to mark line suppression\n  -w[BYTES], --width[=BYTES]  output BYTES bytes per output line;\n                                32 is implied when BYTES is not specified\n      --traditional           accept arguments in third form above\n      --help        display this help and exit\n      --version     output version information and exit\n\n\nTraditional format specifications may be intermixed; they accumulate:\n  -a   same as -t a,  select named characters, ignoring high-order bit\n  -b   same as -t o1, select octal bytes\n  -c   same as -t c,  select printable characters or backslash escapes\n  -d   same as -t u2, select unsigned decimal 2-byte units\n  -f   same as -t fF, select floats\n  -i   same as -t dI, select decimal ints\n  -l   same as -t dL, select decimal longs\n  -o   same as -t o2, select octal 2-byte units\n  -s   same as -t d2, select decimal 2-byte units\n  -x   same as -t x2, select hexadecimal 2-byte units\n\n\nTYPE is made up of one or more of these specifications:\n  a          named character, ignoring high-order bit\n  c          printable character or backslash escape\n  d[SIZE]    signed decimal, SIZE bytes per integer\n  f[SIZE]    floating point, SIZE bytes per float\n  o[SIZE]    octal, SIZE bytes per integer\n  u[SIZE]    unsigned decimal, SIZE bytes per integer\n  x[SIZE]    hexadecimal, SIZE bytes per integer\n\nSIZE is a number.  For TYPE in [doux], SIZE may also be C for\nsizeof(char), S for sizeof(short), I for sizeof(int) or L for\nsizeof(long).  If TYPE is f, SIZE may also be F for sizeof(float), D\nfor sizeof(double) or L for sizeof(long double).\n\nAdding a z suffix to any type displays printable characters at the end of\neach output line.\n\n\nBYTES is hex with 0x or 0X prefix, and may have a multiplier suffix:\n  b    512\n  KB   1000\n  K    1024\n  MB   1000*1000\n  M    1024*1024\nand so on for G, T, P, E, Z, Y, R, Q.\nBinary prefixes can be used, too: KiB=K, MiB=M, and so on.\n\nGNU coreutils online help: <https://www.gnu.org/software/coreutils/>\nReport any translation bugs to <https://translationproject.org/team/>\nFull documentation <https://www.gnu.org/software/coreutils/od>\nor available locally via: info '(coreutils) od invocation'\n",
+  };
+  const VERSION = {
+    fold: "fold (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by David MacKenzie.\n",
+    fmt: "fmt (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Ross Paterson.\n",
+    join: "join (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Mike Haertel.\n",
+    expand: "expand (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by David MacKenzie.\n",
+    unexpand: "unexpand (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by David MacKenzie.\n",
+    factor: "factor (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Paul Rubin, Torbj\u00f6rn Granlund, and Niels M\u00f6ller.\n",
+    shuf: "shuf (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Paul Eggert.\n",
+    sum: "sum (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Kayvan Aghaiepour and David MacKenzie.\n",
+    od: "od (GNU coreutils) 9.4\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Jim Meyering.\n",
+  };
+
+  /* ------------------------------------------------------------ helpers */
+  const isC = (env) => { const l = env.LC_ALL || env.LC_CTYPE || env.LANG || 'C'; return l === 'C' || l === 'POSIX'; };
+  /** GNU error-message quoting: ‘x’ in UTF-8 locales, 'x' in C. */
+  const quote = (ctx, s) => (isC(ctx.env) ? "'" + s + "'" : '‘' + s + '’');
+  const bytesOf = (s) => U.toBytes(s);
+
+  async function stdinText(ctx) {
+    if (ctx._stdinDone) return '';
+    ctx._stdinDone = true;
+    if (ctx.stdin != null) return ctx.stdin;
+    let s = '';
+    for (;;) { const l = await ctx.readLine(''); if (l == null) return s; s += l + '\n'; }
+  }
+  /** Read the operands ("-" is stdin; none means stdin). Reports failures as "name: file: reason". */
+  async function readFiles(ctx, files) {
+    const inputs = []; let failed = false;
+    for (const f of files.length ? files : ['-']) {
+      try { inputs.push({ name: f, text: f === '-' ? await stdinText(ctx) : ctx.fs.read(f) }); } catch (e) {
+        if (!(e instanceof K.FsError)) throw e;
+        failed = true; ctx.err(ctx.name + ': ' + f + ': ' + e.message + '\n');
+      }
+    }
+    return { inputs, failed };
+  }
+  const breathe = (ctx) => new Promise((resolve, reject) => setTimeout(() => (ctx.aborted() ? reject(new K.Interrupt()) : resolve()), 0));
+
+  /** Register a GNU-style command; `spec` is the getopt spec, run(ctx, g) gets the parsed options. */
+  function gnu(def) {
+    const helpText = HELP[def.name];
+    K.cmd.register({
+      name: def.name,
+      pkg: def.pkg || 'coreutils',
+      summary: def.summary,
+      synopsis: def.synopsis,
+      man: def.man,
+      async run(ctx) {
+        if (ctx.args.length === 1 && ctx.args[0] === '--help' && helpText) { ctx.out(helpText); return 0; }
+        if (ctx.args.length === 1 && ctx.args[0] === '--version' && VERSION[def.name]) { ctx.out(VERSION[def.name]); return 0; }
+        const g = K.getopt(ctx.args, def.spec);
+        if (g.err) { ctx.err(def.name + ': ' + g.err + "\nTry '" + def.name + " --help' for more information.\n"); return 1; }
+        if (g.opts.help && helpText) { ctx.out(helpText); return 0; }
+        if (g.opts.version && VERSION[def.name]) { ctx.out(VERSION[def.name]); return 0; }
+        return def.run(ctx, g);
+      },
+      complete: def.complete,
+    });
+  }
+  const usageTry = (ctx) => { ctx.err("Try '" + ctx.name + " --help' for more information.\n"); return 1; };
+
+  /* --------------------------------------------------------------- sum */
+  gnu({
+    name: 'sum',
+    summary: 'checksum and count the blocks in a file',
+    synopsis: 'sum [OPTION]... [FILE]...',
+    man: `DESCRIPTION
+       Print a checksum and block count for each FILE. The default is the
+       BSD 16-bit checksum with 1024-byte blocks.
+
+OPTIONS
+       -r              use the BSD algorithm and 1K blocks (the default)
+       -s, --sysv      use the System V algorithm and 512-byte blocks
+
+EXAMPLES
+       sum /etc/hostname
+       sum -s /etc/hostname`,
+    spec: { short: 'rs', long: ['sysv', 'help', 'version'], alias: { sysv: 's' } },
+    async run(ctx, g) {
+      const sysv = !!g.opts.s;
+      const { inputs, failed } = await readFiles(ctx, g.rest);
+      for (const { name, text } of inputs) {
+        const bytes = bytesOf(text);
+        let line;
+        if (sysv) {
+          let s = 0; for (const b of bytes) s += b;
+          s = (s & 0xffff) + (s >>> 16); s = (s & 0xffff) + (s >>> 16);
+          line = s + ' ' + Math.ceil(bytes.length / 512);
+        } else {
+          let c = 0; for (const b of bytes) { c = ((c >> 1) | ((c & 1) << 15)) & 0xffff; c = (c + b) & 0xffff; }
+          line = String(c).padStart(5, '0') + ' ' + String(Math.ceil(bytes.length / 1024)).padStart(5);
+        }
+        ctx.println(line + (g.rest.length ? ' ' + name : ''));
+      }
+      return failed ? 1 : 0;
+    },
+  });
+
+  /* ------------------------------------------------------------ factor */
+  const SMALL_PRIMES = [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n];
+  const modPow = (b, e, m) => { let r = 1n; b %= m; while (e > 0n) { if (e & 1n) r = (r * b) % m; b = (b * b) % m; e >>= 1n; } return r; };
+  function isPrime(n) {
+    if (n < 2n) return false;
+    for (const p of SMALL_PRIMES) { if (n === p) return true; if (n % p === 0n) return false; }
+    let d = n - 1n; let s = 0; while ((d & 1n) === 0n) { d >>= 1n; s++; }
+    for (const a of SMALL_PRIMES) {
+      let x = modPow(a, d, n);
+      if (x === 1n || x === n - 1n) continue;
+      let comp = true;
+      for (let i = 1; i < s && comp; i++) { x = (x * x) % n; if (x === n - 1n) comp = false; }
+      if (comp) return false;
+    }
+    return true;
+  }
+  const gcd = (a, b) => { while (b) { [a, b] = [b, a % b]; } return a; };
+  function rho(n) {
+    for (let c = 1n; ; c++) {
+      let x = 2n; let y = 2n; let d = 1n;
+      while (d === 1n) { x = (x * x + c) % n; y = (y * y + c) % n; y = (y * y + c) % n; d = gcd(x > y ? x - y : y - x, n); }
+      if (d !== n) return d;
+    }
+  }
+  async function factorize(ctx, n) {
+    const out = [];
+    for (let p = 2n; p < 1000n && p * p <= n; p += p === 2n ? 1n : 2n) while (n % p === 0n) { out.push(p); n /= p; }
+    const stack = n > 1n ? [n] : [];
+    let steps = 0;
+    while (stack.length) {
+      const m = stack.pop();
+      if (m < 1000000n * 1000000n ? m > 1n && isPrimeSmall(m) : isPrime(m)) { out.push(m); continue; }
+      if (++steps % 4 === 0) await breathe(ctx);
+      const d = rho(m); stack.push(d, m / d);
+    }
+    return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  }
+  const isPrimeSmall = isPrime;
+
+  gnu({
+    name: 'factor',
+    summary: 'factor numbers',
+    synopsis: 'factor [OPTION] [NUMBER]...',
+    man: `DESCRIPTION
+       Print the prime factors of each specified integer NUMBER. If none are
+       specified on the command line, read them from standard input.
+
+OPTIONS
+       -h, --exponents   print repeated factors in form p^e unless e is 1
+
+EXAMPLES
+       factor 360
+       echo 1000000007 | factor`,
+    spec: { short: 'h', long: ['exponents', 'help', 'version'], alias: { exponents: 'h' } },
+    async run(ctx, g) {
+      const tokens = g.rest.length ? g.rest : (await stdinText(ctx)).split(/\s+/).filter(Boolean);
+      let status = 0;
+      for (const t of tokens) {
+        if (!/^\+?\d+$/.test(t)) { ctx.err('factor: ' + quote(ctx, t) + ' is not a valid positive integer\n'); status = 1; continue; }
+        const fs = await factorize(ctx, BigInt(t));
+        let text;
+        if (g.opts.h) {
+          const groups = []; for (const f of fs) { const last = groups[groups.length - 1]; if (last && last[0] === f) last[1]++; else groups.push([f, 1]); }
+          text = groups.map(([p, e]) => (e > 1 ? p + '^' + e : String(p))).join(' ');
+        } else text = fs.join(' ');
+        ctx.println(BigInt(t) + ':' + (text ? ' ' + text : ''));
+      }
+      return status;
+    },
+  });
+
+  /* ------------------------------------------------- expand / unexpand */
+  /** Parse a -t argument into { stops, step } ; step > 0 repeats every `step` columns after the last stop. */
+  function parseTabs(ctx, name, spec) {
+    const stops = []; let step = 0; let plus = 0;
+    for (const item of spec.split(/[,\s]+/).filter(Boolean)) {
+      let s = item; let kind = '';
+      if (s[0] === '/' || s[0] === '+') { kind = s[0]; s = s.slice(1); }
+      if (!/^\d+$/.test(s)) { ctx.err(name + ': tab size contains invalid character(s): ' + quote(ctx, s) + '\n'); return null; }
+      const n = Number(s);
+      if (kind === '/') step = n; else if (kind === '+') plus = n;
+      else if (!kind && n === 0) { ctx.err(name + ': tab size cannot be 0\n'); return null; }
+      if (kind === '/' || kind === '+') { if (n === 0) { ctx.err(name + ': tab size cannot be 0\n'); return null; } if (kind === '+') stops.push((stops.length ? stops[stops.length - 1] : 0) + n); continue; }
+      if (stops.length && n <= stops[stops.length - 1]) { ctx.err(name + ': tab sizes must be ascending\n'); return null; }
+      stops.push(n);
+    }
+    void plus;
+    if (stops.length === 1 && !step) return { stops: [], step: stops[0] };
+    return { stops, step };
+  }
+  /** Next tab stop after column `col`, or null when there is none (unexpand) */
+  function nextStop(tabs, col) {
+    for (const s of tabs.stops) if (s > col) return s;
+    if (tabs.step) {
+      const base = tabs.stops.length ? tabs.stops[tabs.stops.length - 1] : 0;
+      return base + (Math.floor((col - base) / tabs.step) + 1) * tabs.step;
+    }
+    return null;
+  }
+
+  async function tabsCommand(ctx, g, kind) {
+    let spec = g.opts.t;
+    for (const a of ctx.args) if (/^-\d+$/.test(a) && spec === undefined) spec = a.slice(1);
+    const tabs = spec === undefined ? { stops: [], step: 8 } : parseTabs(ctx, ctx.name, String(spec));
+    if (!tabs) return 1;
+    const files = g.rest.filter((f) => !/^-\d+$/.test(f));
+    const { inputs, failed } = await readFiles(ctx, files);
+    const all = kind === 'unexpand' && (!!g.opts.a || spec !== undefined) && !g.opts['first-only'];
+    for (const { text } of inputs) ctx.out(kind === 'expand' ? expandText(text, tabs, !!g.opts.i) : unexpandText(text, tabs, all));
+    return failed ? 1 : 0;
+  }
+  function expandText(text, tabs, initialOnly) {
+    let out = ''; let col = 0; let initial = true;
+    for (const c of text) {
+      if (c === '\n') { out += c; col = 0; initial = true; continue; }
+      if (c === '\t' && (!initialOnly || initial)) {
+        const n = nextStop(tabs, col);
+        const to = n === null ? col + 1 : n;
+        out += ' '.repeat(to - col); col = to; continue;
+      }
+      if (c === '\b') { out += c; col = Math.max(0, col - 1); initial = false; continue; }
+      if (c !== ' ') initial = false;
+      out += c; col++;
+    }
+    return out;
+  }
+  function unexpandText(text, tabs, all) {
+    let out = ''; let col = 0; let run = null; let leading = true;
+    const flush = () => { if (run) { out += run.text; run = null; } };
+    for (const c of text) {
+      if ((c === ' ' || c === '\t') && (all || leading)) {
+        if (!run) run = { text: '', blanks: 0, tab: false };
+        let to;
+        if (c === '\t') { const n = nextStop(tabs, col); to = n === null ? col + 1 : n; run.tab = true; } else to = col + 1;
+        run.blanks += to - col;
+        run.text += c === '\t' ? '\t' : ' ';
+        col = to;
+        const stop = nextStop(tabs, col - 1);
+        if (stop === col && (run.tab || run.blanks > 1)) { out += '\t'; run = { text: '', blanks: 0, tab: false }; }
+        else if (stop === col) { out += run.text; run = null; }
+        continue;
+      }
+      flush();
+      if (c === '\n') { out += c; col = 0; leading = true; continue; }
+      if (c === '\b') col = Math.max(0, col - 1); else col++;
+      if (c !== ' ' && c !== '\t') leading = false;
+      out += c;
+    }
+    flush();
+    return out;
+  }
+  gnu({
+    name: 'expand',
+    summary: 'convert tabs to spaces',
+    synopsis: 'expand [OPTION]... [FILE]...',
+    man: `DESCRIPTION
+       Convert tabs in each FILE to spaces, writing to standard output.
+
+OPTIONS
+       -i, --initial     do not convert tabs after non blanks
+       -t, --tabs=N      have tabs N characters apart, not 8
+       -t, --tabs=LIST   use comma separated list of tab positions
+
+EXAMPLES
+       expand -t 4 Makefile
+       printf 'a\\tb\\n' | expand`,
+    spec: { short: 'it:0123456789', long: ['initial', 'tabs=', 'help', 'version'], alias: { initial: 'i', tabs: 't' } },
+    run: (ctx, g) => tabsCommand(ctx, g, 'expand'),
+  });
+  gnu({
+    name: 'unexpand',
+    summary: 'convert spaces to tabs',
+    synopsis: 'unexpand [OPTION]... [FILE]...',
+    man: `DESCRIPTION
+       Convert blanks in each FILE to tabs, writing to standard output.
+
+OPTIONS
+       -a, --all         convert all blanks, instead of just initial blanks
+       --first-only      convert only leading sequences of blanks (overrides -a)
+       -t, --tabs=N      have tabs N characters apart instead of 8 (enables -a)
+
+EXAMPLES
+       unexpand -a -t 4 script.py`,
+    spec: { short: 'at:0123456789', long: ['all', 'first-only', 'tabs=', 'help', 'version'], alias: { all: 'a', tabs: 't' } },
+    run: (ctx, g) => tabsCommand(ctx, g, 'unexpand'),
+  });
+
+  /* -------------------------------------------------------------- fold */
+  function foldText(text, width, countBytes, atSpaces) {
+    let out = ''; let line = []; let col = 0;
+    const adjust = (c0, ch) => {
+      if (countBytes) return c0 + bytesOf(ch).length;
+      if (ch === '\b') return Math.max(0, c0 - 1);
+      if (ch === '\r') return 0;
+      if (ch === '\t') return c0 + 8 - (c0 % 8);
+      return c0 + 1;
+    };
+    const widthOf = (chars) => chars.reduce((c, ch) => adjust(c, ch), 0);
+    for (const ch of text) {
+      if (ch === '\n') { out += line.join('') + '\n'; line = []; col = 0; continue; }
+      for (;;) {
+        const next = adjust(col, ch);
+        if (next <= width || !line.length) { line.push(ch); col = next; break; }
+        let cut = line.length;
+        if (atSpaces) {
+          let i = line.length;
+          while (i > 0) { i--; if (line[i] === ' ' || line[i] === '\t') { cut = i + 1; break; } if (i === 0) cut = line.length; }
+        }
+        out += line.slice(0, cut).join('') + '\n';
+        line = line.slice(cut); col = widthOf(line);
+      }
+    }
+    return out + line.join('');
+  }
+  gnu({
+    name: 'fold',
+    summary: 'wrap each input line to fit in specified width',
+    synopsis: 'fold [OPTION]... [FILE]...',
+    man: `DESCRIPTION
+       Wrap input lines in each FILE, writing to standard output.
+
+OPTIONS
+       -b, --bytes         count bytes rather than columns
+       -s, --spaces        break at spaces
+       -w, --width=WIDTH   use WIDTH columns instead of 80
+
+EXAMPLES
+       fold -w 40 -s README
+       echo 'a long line' | fold -w 5`,
+    spec: { short: 'bsw:0123456789', long: ['bytes', 'spaces', 'width=', 'help', 'version'], alias: { bytes: 'b', spaces: 's', width: 'w' } },
+    async run(ctx, g) {
+      let w = g.opts.w;
+      if (w === undefined) { const num = ctx.args.find((a) => /^-\d+$/.test(a)); if (num) w = num.slice(1); }
+      let width = 80;
+      if (w !== undefined) {
+        if (!/^\d+$/.test(String(w)) || Number(w) === 0) { ctx.err('fold: invalid number of columns: ' + quote(ctx, String(w)) + '\n'); return 1; }
+        width = Number(w);
+      }
+      const { inputs, failed } = await readFiles(ctx, g.rest.filter((f) => !/^-\d+$/.test(f)));
+      for (const { text } of inputs) ctx.out(foldText(text, width, !!g.opts.b, !!g.opts.s));
+      return failed ? 1 : 0;
+    },
+  });
+
+  /* -------------------------------------------------------------- shuf */
+  gnu({
+    name: 'shuf',
+    summary: 'generate random permutations',
+    synopsis: 'shuf [OPTION]... [FILE]',
+    man: `DESCRIPTION
+       Write a random permutation of the input lines to standard output.
+
+OPTIONS
+       -e, --echo              treat each ARG as an input line
+       -i, --input-range=LO-HI treat each number LO through HI as an input line
+       -n, --head-count=COUNT  output at most COUNT lines
+       -o, --output=FILE       write result to FILE instead of standard output
+       -r, --repeat            output lines can be repeated
+       -z, --zero-terminated   line delimiter is NUL, not newline
+
+EXAMPLES
+       shuf -n 3 /usr/share/wordlists/rockyou.txt
+       shuf -i 1-10 -n 3
+       shuf -e red green blue`,
+    spec: { short: 'ei:n:o:rz', long: ['echo', 'input-range=', 'head-count=', 'output=', 'random-source=', 'repeat', 'zero-terminated', 'help', 'version'], alias: { echo: 'e', 'input-range': 'i', 'head-count': 'n', output: 'o', repeat: 'r', 'zero-terminated': 'z' } },
+    async run(ctx, g) {
+      const o = g.opts;
+      if (g.all.i && g.all.i.length > 1) { ctx.err('shuf: multiple -i options specified\n'); return 1; }
+      if (g.all.o && g.all.o.length > 1) { ctx.err('shuf: multiple -o options specified\n'); return 1; }
+      if (o.e && o.i !== undefined) { ctx.err('shuf: cannot combine -e and -i options\n'); return 1; }
+      let lines; const sep = o.z ? '\0' : '\n';
+      if (o.i !== undefined) {
+        const m = /^(\d+)-(\d+)$/.exec(String(o.i));
+        if (!m || Number(m[1]) > Number(m[2]) + 1) { ctx.err('shuf: invalid input range: ' + quote(ctx, String(o.i)) + '\n'); return 1; }
+        if (g.rest.length) { ctx.err('shuf: extra operand ' + quote(ctx, g.rest[0]) + '\n'); return usageTry(ctx); }
+        lines = []; for (let i = Number(m[1]); i <= Number(m[2]); i++) lines.push(String(i));
+      } else if (o.e) lines = g.rest;
+      else {
+        if (g.rest.length > 1) { ctx.err('shuf: extra operand ' + quote(ctx, g.rest[1]) + '\n'); return usageTry(ctx); }
+        const { inputs, failed } = await readFiles(ctx, g.rest);
+        if (failed) return 1;
+        lines = inputs[0].text.split(sep); if (lines[lines.length - 1] === '') lines.pop();
+      }
+      let count = Infinity;
+      if (o.n !== undefined) {
+        if (!/^\d+$/.test(String(o.n))) { ctx.err('shuf: invalid line count: ' + quote(ctx, String(o.n)) + '\n'); return 1; }
+        count = Number(o.n);
+      }
+      const rnd = (n) => Math.floor(K.net.rand() * n);
+      let result = '';
+      if (o.r) {
+        if (!lines.length && count !== 0) { ctx.err('shuf: no lines to repeat\n'); return 1; }
+        for (let i = 0; i < count; i++) { result += lines[rnd(lines.length)] + sep; if (i % 1000 === 999) { await breathe(ctx); if (o.o === undefined) { ctx.out(result); result = ''; } } }
+      } else {
+        for (let i = lines.length - 1; i > 0; i--) { const j = rnd(i + 1); [lines[i], lines[j]] = [lines[j], lines[i]]; }
+        result = lines.slice(0, count).map((l) => l + sep).join('');
+      }
+      if (o.o !== undefined) {
+        try { ctx.fs.write(o.o, result); } catch (e) { if (!(e instanceof K.FsError)) throw e; ctx.err('shuf: ' + o.o + ': ' + e.message + '\n'); return 1; }
+      } else ctx.out(result);
+      return 0;
+    },
+  });
+
+  K.textKit = { gnu, readFiles, stdinText, quote, breathe, bytesOf, HELP, VERSION, usageTry };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
