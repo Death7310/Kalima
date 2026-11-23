@@ -176,7 +176,7 @@
       {
         id: 'exec',
         prompt: T(
-          '`-exec` runs another command on each file found. The file name goes where `{}` is, and `\;` marks the end of the command. The backslash stops the shell from treating `\;` as its own separator.',
+          '`-exec` runs another command on each file found. The file name goes where `{}` is, and `\\;` marks the end of the command. The backslash stops the shell from treating `\;` as its own separator.',
           '',
           '```',
           'find . -name "*.txt" -exec wc -l {} \\;',
@@ -255,11 +255,216 @@
     refs: ['find(1)', 'locate(1)', 'updatedb(8)', 'Kali Linux Revealed, ch. 3'],
   };
 
+  /* --------------------------------------------------------------- archives */
+  const AR = WORK + '/archive';
+  const TAR = ['tar'];
+  const archiveLesson = {
+    id: 'tools-archive',
+    title: 'Archives: tar, gzip and zip',
+    minutes: 12,
+    objectives: [
+      'Create, list and extract a compressed tar archive with `tar` and the letters c, t, x, z and f',
+      'Check what an archive contains before unpacking it',
+      'Compress a single file with `gzip` and read it back, and handle ZIP files with `zip` and `unzip`',
+    ],
+    intro: T(
+      'Evidence, scan results and reports travel as archives: one file that holds many files and keeps their folder layout. You will also receive archives from other people, and unpacking one blindly can scatter files across your current directory or overwrite your own.',
+      '',
+      'In this lesson you build an archive of the survey folder, look inside it before you extract anything, and meet the three tools you will use most: `tar`, `gzip` and `zip`.'
+    ),
+    steps: [
+      {
+        id: 'setup',
+        prompt: T(
+          'Make a working copy of the survey folder for this lesson and move into it:',
+          '',
+          '```',
+          'mkdir -p ~/practice/tools/archive',
+          'cp -rT /usr/share/kalima/tools/survey ~/practice/tools/archive',
+          'cd ~/practice/tools/archive',
+          '```',
+          '',
+          'You are now in a folder with `notes`, `scans` and `logs`. Everything you pack and unpack below stays inside it.'
+        ),
+        hint: 'Run the three commands in order, for example joined with `&&`.',
+        solution: 'mkdir -p ~/practice/tools/archive && cp -rT /usr/share/kalima/tools/survey ~/practice/tools/archive && cd ~/practice/tools/archive',
+        check: { cwd: AR, file: { path: AR + '/scans/web01.txt', exists: true } },
+      },
+      {
+        id: 'create',
+        prompt: T(
+          'Pack the `notes` and `scans` folders into one compressed archive:',
+          '',
+          '```',
+          'tar -czf survey.tgz notes scans',
+          '```',
+          '',
+          'The option letters each do one job:',
+          '',
+          '- `c` creates a new archive',
+          '- `z` compresses it with gzip',
+          '- `f` says the next word is the archive file name',
+          '',
+          '`f` must come last in the group, because the file name follows it. After the archive name come the things to pack. `tar` prints nothing on success; check the result with `ls -l survey.tgz`.'
+        ),
+        hint: 'The archive name comes right after the letters, then the folders to include.',
+        solution: 'tar -czf survey.tgz notes scans',
+        check: { cmd: TAR, argsRe: /-?[a-z]*c[a-z]*/, file: { path: AR + '/survey.tgz', exists: true, type: 'file' }, exit: 0 },
+      },
+      {
+        id: 'list',
+        prompt: T(
+          'Before you extract an archive, and especially one from someone else, list what is inside. Replace `c` with `t` for table of contents:',
+          '',
+          '```',
+          'tar -tzf survey.tgz',
+          '```',
+          '',
+          'Each line is a path as stored in the archive. Look for two things: whether everything sits under one top-level folder, and whether any path starts with `/` or contains `..`. Paths like that would extract outside the place you intended. Add `v` (`-tvzf`) to see permissions, owner, size and date too.'
+        ),
+        hint: 'Same letters as before with `t` in place of `c`.',
+        solution: 'tar -tzf survey.tgz',
+        check: { cmd: TAR, args: ['-t'], out: /notes\/day1\.txt/, all: [{ out: /scans\/db01\.txt/ }], not: { file: { path: AR + '/restore', exists: true } } },
+      },
+      {
+        id: 'which-xml',
+        prompt: 'Read the listing again. One file in the archive ends in `.xml`. Type its path exactly as the listing shows it.',
+        hint: 'Run `tar -tzf survey.tgz` and look at the paths under `scans/`.',
+        solution: 'scans/web01.xml',
+        answer: /^(\.\/)?scans\/web01\.xml$/i,
+      },
+      {
+        id: 'extract',
+        prompt: T(
+          'Extract into a new, empty folder instead of the current directory. That keeps the contents separate from your own files, and it is a good habit with any archive you did not make. `-C` tells `tar` to change into a directory first:',
+          '',
+          '```',
+          'mkdir -p restore',
+          'tar -xzf survey.tgz -C restore',
+          '```',
+          '',
+          '`x` extracts. Run `ls -R restore` to see that `notes` and `scans` were recreated inside it.'
+        ),
+        hint: 'Create the folder, then use `x` in place of `t` and add `-C restore`.',
+        solution: 'mkdir -p restore && tar -xzf survey.tgz -C restore',
+        check: { cmd: TAR, args: ['-x'], file: { path: AR + '/restore/notes/day1.txt', exists: true }, all: [{ file: { path: AR + '/restore/scans/web01.xml', exists: true } }] },
+      },
+      {
+        id: 'one-member',
+        prompt: T(
+          'You can also extract a single member by naming it after the archive, with the path exactly as the listing printed it. Pull out only the database host scan into a second folder:',
+          '',
+          '```',
+          'mkdir -p one',
+          'tar -xzf survey.tgz -C one scans/db01.txt',
+          '```',
+          '',
+          'The `one` folder gets `scans/db01.txt` and nothing else. Name each member the way `tar -t` showed it, otherwise `tar` reports that it was not found in the archive.'
+        ),
+        hint: 'Add the member path after `-C one`.',
+        solution: 'mkdir -p one && tar -xzf survey.tgz -C one scans/db01.txt',
+        check: { cmd: TAR, file: { path: AR + '/one/scans/db01.txt', exists: true }, all: [{ file: { path: AR + '/one/notes', exists: false } }] },
+      },
+      {
+        id: 'gzip',
+        prompt: T(
+          '`gzip` compresses one file. By default it replaces the file with a `.gz` version; `-k` keeps the original as well:',
+          '',
+          '```',
+          'gzip -k logs/proxy.log',
+          'ls -l logs',
+          '```',
+          '',
+          'Compare the two sizes in the listing. Text compresses well, and this log shrinks to a small fraction of the original.'
+        ),
+        hint: 'Use `gzip -k` and the path of the log.',
+        solution: 'gzip -k logs/proxy.log',
+        check: { cmd: 'gzip', args: ['-k'], file: { path: AR + '/logs/proxy.log.gz', exists: true }, all: [{ file: { path: AR + '/logs/proxy.log', exists: true } }] },
+      },
+      {
+        id: 'read-gz',
+        prompt: T(
+          'You do not have to unpack a `.gz` file to read it. `gunzip -c` writes the uncompressed data to the screen and leaves the file alone, and `zcat` does the same. Pipe it to `head` to see the first lines:',
+          '',
+          '```',
+          'gunzip -c logs/proxy.log.gz | head -3',
+          '```',
+          '',
+          'Plain `gunzip logs/proxy.log.gz` would instead restore the file and delete the `.gz`. It refuses to overwrite an existing file without asking.'
+        ),
+        hint: 'Use `gunzip -c` or `zcat`, then pipe to `head -3`.',
+        solution: 'gunzip -c logs/proxy.log.gz | head -3',
+        check: { cmd: ['gunzip', 'zcat', 'gzip'], out: /2026-11-12 00:00:00 10\.10\.10\.20 GET/ },
+      },
+      {
+        id: 'zip',
+        prompt: T(
+          'Archives from Windows users and from many web services arrive as ZIP files. `zip` both archives and compresses, so there is no separate `z` step. `-r` includes folders and their contents:',
+          '',
+          '```',
+          'zip -r survey.zip notes scans',
+          '```',
+          '',
+          'It prints a line for each item it adds. The archive name comes first, then the things to add, which is the same order as `tar`.'
+        ),
+        hint: 'Use `zip -r`, the archive name, then the folders.',
+        solution: 'zip -r survey.zip notes scans',
+        check: { cmd: 'zip', file: { path: AR + '/survey.zip', exists: true, type: 'file' }, out: /adding: notes\/day1\.txt/ },
+      },
+      {
+        id: 'unzip',
+        prompt: T(
+          'List a ZIP file before opening it with `unzip -l`. The listing has the size, date and name of each member:',
+          '',
+          '```',
+          'unzip -l survey.zip',
+          '```',
+          '',
+          'To extract, `unzip survey.zip -d folder` unpacks into `folder` (created if needed), and `unzip -t survey.zip` tests the archive without extracting. The last line of the listing totals the size and the number of files.'
+        ),
+        hint: 'The option is `-l`, followed by the archive name.',
+        solution: 'unzip -l survey.zip',
+        check: { cmd: 'unzip', args: ['-l'], out: /notes\/day2\.txt/, all: [{ out: /\d+ files/ }] },
+      },
+    ],
+    quiz: [
+      {
+        q: 'Which command lists the contents of `evidence.tar.gz` without extracting anything?',
+        choices: ['`tar -tzf evidence.tar.gz`', '`tar -xzf evidence.tar.gz`', '`tar -czf evidence.tar.gz`', '`gzip -t evidence.tar.gz`'],
+        answer: 0,
+        why: '`t` lists, `x` extracts and `c` creates. `z` is needed because the archive is compressed with gzip, and `f` names the file.',
+      },
+      {
+        q: 'You run `tar -czf notes.tgz notes` and, in the same line, make a typo and write `tar -czf notes notes.tgz`. What is the likely result?',
+        choices: [
+          '`tar` tries to write the archive to a file named `notes`, where a folder of that name already exists, and fails',
+          'The same archive as before',
+          '`tar` extracts instead of creating',
+          'The folder is deleted after archiving',
+        ],
+        answer: 0,
+        why: 'The word after `f` is always the archive to write. Put the wrong word there and `tar` aims at the wrong target. Reading the command left to right as "create, compressed, file ..." catches this kind of slip.',
+      },
+      {
+        q: 'You receive `report.tar.gz` from a third party. What is the safest first step?',
+        choices: [
+          'List it with `tar -tzf`, then extract it into a new empty folder with `-C`',
+          'Extract it in your home directory and see what appears',
+          'Extract it as root so that permissions are preserved',
+          'Delete it, because archives cannot be checked',
+        ],
+        answer: 0,
+        why: 'Listing shows the paths before anything is written, and a fresh folder keeps stray files away from your own. Running as root would only increase the damage of a badly made archive.',
+      },
+    ],
+    refs: ['tar(1)', 'gzip(1)', 'zip(1)', 'unzip(1)', 'Kali Linux Revealed, ch. 3'],
+  };
+
   K.lessons.register({
     id: 'tools',
     title: 'Finding files, archives and stream editing',
     order: 27,
     summary: 'Search for files, pack and unpack archives, and transform text with sed and awk.',
-    lessons: [findLesson],
+    lessons: [findLesson, archiveLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
