@@ -403,7 +403,194 @@
     refs: ['sshd(8)', 'ssh(1), the -o option and NumberOfPasswordPrompts', 'NIST SP 800-92, Guide to Computer Security Log Management'],
   };
 
-  const lessons = [weblogLesson, authlogLesson];
+  /* ------------------------------------------------------------- analysis */
+  const WEB = LOGS + '/access.log';
+  const AUTH = LOGS + '/auth.log';
+  const analysisLesson = {
+    id: 'defend-analysis',
+    title: 'Reading logs like an analyst',
+    minutes: 12,
+    objectives: [
+      'Count requests and failures per client address with `awk`, `sort` and `uniq -c`',
+      'Spot the clients that stand out: the noisiest, the one producing most errors, the one failing logins',
+      'Decide what to flag for a closer look, and say why it is a lead and not a verdict',
+    ],
+    intro: T(
+      'A log of a few hundred lines can be read by eye. A real one holds millions, so analysts do not read it: they count it. The method is always the same. Pick one field, count how often each value occurs, sort, and look at what stands out. This lesson applies it to two practice logs from a fictional shop server, a web access log and an SSH log.',
+      '',
+      'The addresses in them come from ranges reserved for documentation (RFC 5737), so they point at no real system. The logs are read-only in `/usr/share/kalima/logs`, and you never need to change them.'
+    ),
+    steps: [
+      {
+        id: 'clients',
+        prompt: T(
+          'The web log is in nginx\'s combined format, with the client address in field 1. Count how many requests each address made:',
+          '',
+          '```',
+          'awk \'{print $1}\' /usr/share/kalima/logs/access.log | sort | uniq -c | sort -rn',
+          '```',
+          '',
+          '`awk` prints field 1 of every line, `sort` groups equal addresses together, `uniq -c` counts each group and `sort -rn` puts the biggest count first. Each output line is a count followed by an address.'
+        ),
+        hint: 'Four commands joined by pipes: `awk`, `sort`, `uniq -c`, `sort -rn`.',
+        solution: 'awk \'{print $1}\' ' + WEB + ' | sort | uniq -c | sort -rn',
+        check: { cmd: 'uniq', args: ['-c'], out: /^\s*110 203\.0\.113\.99$/m },
+      },
+      {
+        id: 'clients-q',
+        prompt: 'Which address made the most requests? Type the address.',
+        hint: 'It is on the first line of the output.',
+        solution: '203.0.113.99',
+        answer: /^203\.0\.113\.99$/,
+      },
+      {
+        id: 'status',
+        prompt: T(
+          'Volume alone proves little: a monitoring probe is noisy by design. Add the status code, field 9, to the picture and count each pair of status and address:',
+          '',
+          '```',
+          'awk \'{print $9, $1}\' /usr/share/kalima/logs/access.log | sort | uniq -c | sort -rn',
+          '```',
+          '',
+          'Most pairs are `200`, a successful page. Look for the ones that are not: `404` is "not found", `401` is "unauthorized": the credentials were missing or refused.'
+        ),
+        hint: 'Like the last command, but print `$9, $1` so that each line holds a status and an address.',
+        solution: 'awk \'{print $9, $1}\' ' + WEB + ' | sort | uniq -c | sort -rn',
+        check: { cmd: 'uniq', out: /^\s*108 404 203\.0\.113\.99$/m, fn: (ev) => /^\s*24 401 198\.51\.100\.150$/m.test(outOf(ev)) },
+      },
+      {
+        id: 'status-q',
+        prompt: 'How many `404` responses did `203.0.113.99` receive? Answer with the number.',
+        hint: 'Find the line that holds `404 203.0.113.99`; the count is the first number.',
+        solution: '108',
+        answer: '108',
+      },
+      {
+        id: 'timing',
+        prompt: T(
+          'When did it happen, and how fast? Print the first and the last request of that address. `sed -n \'1p;$p\'` prints line 1 and the last line (`$`):',
+          '',
+          '```',
+          'grep \'^203\\.0\\.113\\.99 \' /usr/share/kalima/logs/access.log | sed -n \'1p;$p\'',
+          '```',
+          '',
+          'Compare the two times. Read the end of each line too: the user agent names the tool that made the requests. It is a label the client chose, so it is a clue, but a plain one.'
+        ),
+        hint: 'Filter with `grep` on the address at the start of the line, then pipe to `sed -n \'1p;$p\'`.',
+        solution: 'grep \'^203\\.0\\.113\\.99 \' ' + WEB + ' | sed -n \'1p;$p\'',
+        check: { cmd: 'sed', out: /03:12:00 [\s\S]*03:12:44 /, fn: (ev) => /gobuster/.test(outOf(ev)) },
+      },
+      {
+        id: 'timing-q',
+        prompt: 'The first of those requests was at `03:12:00` and the last at `03:12:44`. About how many seconds did the whole run take? Answer with the number.',
+        hint: 'Subtract the two times.',
+        solution: '44',
+        answer: /^(44|45)( seconds?)?$/i,
+      },
+      {
+        id: 'failed',
+        prompt: T(
+          'Now the SSH log. A failed password is recorded as `Failed password for ... from ADDRESS port ...`. `grep -o` prints only the part that matches, here the word `from` and the address, and the rest of the pipeline counts them as before:',
+          '',
+          '```',
+          'grep "Failed password" /usr/share/kalima/logs/auth.log | grep -o "from [0-9.]*" | sort | uniq -c | sort -rn',
+          '```',
+          '',
+          'Four addresses failed to log in, with very different totals.'
+        ),
+        hint: 'Select the `Failed password` lines, extract `from` plus the address with `grep -o`, then `sort | uniq -c | sort -rn`.',
+        solution: 'grep "Failed password" ' + AUTH + ' | grep -o "from [0-9.]*" | sort | uniq -c | sort -rn',
+        check: { cmd: 'uniq', out: /^\s*64 from 203\.0\.113\.99$/m },
+      },
+      {
+        id: 'failed-q',
+        prompt: 'One address is at the top of both counts: the busiest web client and the source of most failed SSH logins. Which address is it?',
+        hint: 'Compare the first line of this output with the answer to the first question.',
+        solution: '203.0.113.99',
+        answer: /^203\.0\.113\.99$/,
+      },
+      {
+        id: 'accepted',
+        prompt: T(
+          'Did any of those sources get in? Look at the successful logins:',
+          '',
+          '```',
+          'grep Accepted /usr/share/kalima/logs/auth.log',
+          '```',
+          '',
+          'There are only four lines. They are logins by the account `deploy` with a *public key*, from two addresses that are not among the four that failed. That does not prove nothing happened, but it shows no sign that the guesses worked. Analysts write down both facts: what was seen and what was not.'
+        ),
+        hint: 'Search the file for the word `Accepted`.',
+        solution: 'grep Accepted ' + AUTH,
+        check: { cmd: 'grep', out: /Accepted publickey for deploy from 198\.51\.100\.23/ },
+      },
+      {
+        id: 'flag',
+        prompt: T(
+          'End the way an analyst does: write down what deserves a closer look, with the reason, in your notes. Append two lines to `~/engagement/notes.md`, one naming `203.0.113.99` and one naming `198.51.100.150`. The second one made 24 requests to `/login` that were all refused (`401`) and 31 failed SSH logins. For example:',
+          '',
+          '```',
+          'echo "REVIEW 203.0.113.99: 108 not-found requests in 44 s (gobuster), 64 failed SSH logins" >> ~/engagement/notes.md',
+          'echo "REVIEW 198.51.100.150: 24 refused /login requests, 31 failed SSH logins" >> ~/engagement/notes.md',
+          '```',
+          '',
+          'Write these as leads. The logs show what happened, not who was behind it or why. Passing them to the owner of the system is the next step, not acting on them yourself.'
+        ),
+        hint: 'Use `echo "..." >> ~/engagement/notes.md` twice, once per address. You can put both on one line with a semicolon.',
+        solution: 'echo "REVIEW 203.0.113.99: 108 not-found requests in 44 s (gobuster), 64 failed SSH logins" >> ~/engagement/notes.md; echo "REVIEW 198.51.100.150: 24 refused /login requests, 31 failed SSH logins" >> ~/engagement/notes.md',
+        check: { line: /notes\.md/, file: { path: '/home/kali/engagement/notes.md', exists: true, contains: /203\.0\.113\.99[\s\S]*198\.51\.100\.150|198\.51\.100\.150[\s\S]*203\.0\.113\.99/ } },
+      },
+    ],
+    quiz: [
+      {
+        q: 'An address made 96 requests, all to `/status`, exactly every fifteen minutes, with the user agent `UptimeProbe/1.4`. What is the most likely explanation?',
+        choices: [
+          'A password guessing attack',
+          'A monitoring service checking that the site is up',
+          'A person browsing the shop',
+          'A compromised account',
+        ],
+        answer: 1,
+        why: 'Regular timing, one path and a tool name that says what it is point to a health check. High volume alone does not make a client suspicious; the pattern does.',
+      },
+      {
+        q: 'Why is a user agent such as `gobuster/3.8` a clue and not proof of who or what made the requests?',
+        choices: [
+          'Because user agents are encrypted',
+          'Because the client chooses the text it sends, so it can be changed or faked',
+          'Because only browsers send user agents',
+          'Because the server adds it itself',
+        ],
+        answer: 1,
+        why: 'The header is whatever the client sends. Here its behavior agrees with the label, which makes it a strong lead; a different name on the same traffic would not change what the traffic did.',
+      },
+      {
+        q: 'The failed-login count for one address is high, and no `Accepted` line from it appears in the log. What do you report?',
+        choices: [
+          'That the account was compromised',
+          'That there were many failed logins from that address and no sign of success in this log, recommending review and blocking at the owner\'s discretion',
+          'Nothing, because failed logins do not matter',
+          'That the address belongs to an attacker, by name',
+        ],
+        answer: 1,
+        why: 'Report what the evidence shows and what it does not, and leave the decisions about response to the system\'s owner. Attribution from a log alone is not possible.',
+      },
+      {
+        q: 'In the pipeline `sort | uniq -c | sort -rn`, why does `sort` come before `uniq -c`?',
+        choices: [
+          '`uniq` only counts equal lines that sit next to each other, so the input must be sorted first',
+          '`uniq` needs numbers',
+          'To make the output shorter',
+          'It does not matter; they can be swapped',
+        ],
+        answer: 0,
+        why: '`uniq` compares each line only with the one before it. Sorting brings identical lines together so that each value is counted once.',
+      },
+    ],
+    refs: ['awk(1)', 'uniq(1)', 'sort(1)', 'RFC 5737', 'NIST SP 800-92, Guide to Computer Security Log Management'],
+  };
+
+  const lessons = [weblogLesson, authlogLesson, analysisLesson];
 
   K.lessons.register({
     id: 'defend',
