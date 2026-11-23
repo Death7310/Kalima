@@ -430,3 +430,13 @@ test('a tool nobody simulates is a stub that says so honestly', async () => {
   assert.equal((await sim.run('hydra -h')).code, 0);
   assert.equal((await sim.run('hydra --help | grep -c atlas')).out.trim(), '1');
 });
+
+test('a stub treats -h as help only when it stands alone, and an empty atlas word names nothing', async () => {
+  const sim = await boot();
+  assert.equal((await sim.run('nikto -h 10.10.10.10')).code, 1);
+  assert.equal((await sim.run('nikto -h')).code, 0);
+  assert.equal((await sim.run('nikto --help')).code, 0);
+  const empty = await sim.run('kalima atlas ""');
+  assert.equal(empty.code, 1);
+  assert.match(empty.err, /no category or tool named ''/);
+});

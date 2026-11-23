@@ -674,6 +674,7 @@
   /** The tool or category a word names: an exact tool name first, then a category by id, title or unique beginning. */
   function atlasLookup(word) {
     const w = word.toLowerCase();
+    if (!w) return { ambiguous: [], similar: [] };
     const tool = K.atlas.get(word) || K.atlas.list().find((t) => t.name.toLowerCase() === w);
     if (tool) return { tool };
     const exact = CATEGORIES.find((c) => c.id === w || c.title.toLowerCase() === w);
@@ -725,7 +726,7 @@
         '       This page stands in for the manual page of the real tool, which is not reproduced.\n\n' +
         'SEE ALSO\n       kalima atlas ' + tool.name + '\n       ' + tool.url,
       run(ctx) {
-        const help = ctx.args.includes('--help') || ctx.args.includes('-h');
+        const help = ctx.args.includes('--help') || (ctx.args.length === 1 && ctx.args[0] === '-h'); // nikto -h HOST names a host, so -h with an operand is not a request for help
         if (help) ctx.out(stubNotice(ctx, tool, pen(ctx))); else ctx.err(stubNotice(ctx, tool, errPen(ctx)));
         return help ? 0 : 1;
       },
