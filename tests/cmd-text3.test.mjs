@@ -305,3 +305,37 @@ table('fmt: errors', [
   [`echo a | fmt -w abc`, '', 'fmt: invalid width: ‘abc’\n', 1],
   [`echo a | fmt -g 90 -w 50`, '', 'fmt: invalid width: ‘90’: Numerical result out of range\n', 1],
 ]);
+
+/* ----------------------------------------------------------------- join */
+// Expected output checked against GNU join 9.4.
+const joinFiles = async () => {
+  await run(`printf '1 a\\n2 b\\n2 bb\\n4 d\\n' > j1; printf '2 x\\n2 y\\n3 z\\n4 w\\n5 v\\n' > j2`);
+  await run(`printf 'k:1:2\\nm:3:4\\n' > c1; printf 'k:9\\nz:8\\n' > c2; printf 'b 1\\na 2\\n' > u1; printf 'a x\\nb y\\n' > u2`);
+  await run(`printf 'id v\\n1 a\\n' > h1; printf 'id w\\n1 b\\n' > h2`);
+};
+test('join: fixtures', joinFiles);
+table('join: pairing, unpairable lines and formats', [
+  [`join j1 j2`, '2 b x\n2 b y\n2 bb x\n2 bb y\n4 d w\n'],
+  [`join -a1 j1 j2`, '1 a\n2 b x\n2 b y\n2 bb x\n2 bb y\n4 d w\n'],
+  [`join -v2 j1 j2`, '3 z\n5 v\n'],
+  [`join -v1 -v2 j1 j2`, '1 a\n3 z\n5 v\n'],
+  [`join -a1 -a2 -e X -o 0,1.2,2.2 j1 j2`, '1 a X\n2 b x\n2 b y\n2 bb x\n2 bb y\n3 X z\n4 d w\n5 X v\n'],
+  [`join -o auto -a1 j1 j2`, '1 a \n2 b x\n2 b y\n2 bb x\n2 bb y\n4 d w\n'],
+  [`join -t: c1 c2`, 'k:1:2:9\n'],
+  [`join -t: -o 1.3,0,2.2 c1 c2`, '2:k:9\n'],
+  [`join --header h1 h2`, 'id v w\n1 a b\n'],
+  [`printf 'A 1\\n' | join -i - j1`, ''],
+  [`cat j2 | join j1 - | head -1`, '2 b x\n'],
+]);
+table('join: sort order checks and errors', [
+  [`join u1 u2`, 'b 1 y\n', 'join: u1:2: is not sorted: a 2\njoin: input is not in sorted order\n', 1],
+  [`join --nocheck-order u1 u2`, 'b 1 y\n'],
+  [`printf 'c 1\\n b 2\\n' | join --check-order - j2`, '', 'join: -:2: is not sorted:  b 2\n', 1],
+  [`join j1`, '', "join: missing operand after ‘j1’\nTry 'join --help' for more information.\n", 1],
+  [`join`, '', "join: missing operand\nTry 'join --help' for more information.\n", 1],
+  [`join -1 0 j1 j2`, '', 'join: invalid field number: ‘0’\n', 1],
+  [`join -o 3.1 j1 j2`, '', 'join: invalid file number in field spec: ‘3.1’\n', 1],
+  [`join -o 1 j1 j2`, '', 'join: invalid field specifier: ‘1’\n', 1],
+  [`join nofile j2`, '', 'join: nofile: No such file or directory\n', 1],
+  [`join -t ab j1 j2`, '', 'join: multi-character tab ‘ab’\n', 1],
+]);

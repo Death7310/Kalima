@@ -3989,5 +3989,179 @@ EXAMPLES
     },
   });
 
+  /* -------------------------------------------------------------- join */
+  function joinSplitFields(line, tab) {
+    if (tab !== null) return line.split(tab);
+    return line.replace(/^[ \t]+/, '').split(/[ \t]+/).filter((f, i, a) => f !== '' || a.length > 1);
+  }
+  /** Parse "-o" specifications into [{file, field}] (file 0 = the join field). Returns {err} on bad input. */
+  function joinParseFormat(strings, q) {
+    const specs = [];
+    for (const str of strings) {
+      for (const tok of str.split(/[ ,\t]/)) {
+        if (tok === '0') { specs.push({ file: 0, field: 0 }); continue; }
+        if (tok[0] === '0') return { err: 'invalid field specifier: ' + q(tok) };
+        if (tok[0] !== '1' && tok[0] !== '2') return { err: 'invalid file number in field spec: ' + q(tok) };
+        if (tok[1] !== '.') return { err: 'invalid field specifier: ' + q(tok) };
+        const num = tok.slice(2);
+        if (!/^\d+$/.test(num) || Number(num) === 0) return { err: 'invalid field number: ' + q(num) };
+        specs.push({ file: Number(tok[0]), field: Number(num) });
+      }
+    }
+    return { specs };
+  }
+  gnu({
+    name: 'join',
+    summary: 'join lines of two files on a common field',
+    synopsis: 'join [OPTION]... FILE1 FILE2',
+    man: `DESCRIPTION
+       For each pair of input lines with identical join fields, write a line to
+       standard output. The default join field is the first, delimited by
+       blanks. Both inputs must be sorted on the join field.
+
+OPTIONS
+       -a FILENUM        also print unpairable lines from file FILENUM (1 or 2)
+       -v FILENUM        like -a, but suppress joined output lines
+       -e STRING         replace missing (empty) input fields with STRING
+       -i, --ignore-case ignore differences in case when comparing fields
+       -j FIELD          equivalent to -1 FIELD -2 FIELD
+       -o FORMAT         output FILENUM.FIELD items (0 is the join field), or auto
+       -t CHAR           use CHAR as input and output field separator
+       -1 FIELD, -2 FIELD  join on this FIELD of file 1 or 2
+       --header          treat the first line in each file as field headers
+       --check-order, --nocheck-order   check or ignore the sort order of the input
+       -z, --zero-terminated   line delimiter is NUL, not newline
+
+EXAMPLES
+       join users.txt groups.txt
+       join -t: -1 1 -2 3 -o 1.1,2.2 /etc/passwd /etc/group`,
+    spec: { short: 'a:e:ij:o:t:v:1:2:z', long: ['ignore-case', 'check-order', 'nocheck-order', 'header', 'zero-terminated', 'help', 'version'], alias: { 'ignore-case': 'i', 'zero-terminated': 'z' } },
+    run: (ctx, g) => joinRun(ctx, g),
+  });
+  async function joinRun(ctx, g) {
+    const q = (x) => quote(ctx, String(x));
+    const die = (m, tryHelp) => { ctx.err('join: ' + m + '\n'); if (tryHelp) ctx.err("Try 'join --help' for more information.\n"); return 1; };
+    const field = (v) => (/^\d+$/.test(String(v)) && Number(v) > 0 ? Number(v) - 1 : null);
+    let j1 = 0; let j2 = 0; let tab = null;
+    const unpair = { 1: false, 2: false }; let pairs = true;
+    for (const [k, v] of g.seq) {
+      if (['1', '2', 'j'].includes(k)) {
+        const f = field(v); if (f === null) return die('invalid field number: ' + q(v));
+        if (k !== '2') j1 = f;
+        if (k !== '1') j2 = f;
+      } else if (k === 'a' || k === 'v') {
+        if (v !== '1' && v !== '2') return die('invalid field number: ' + q(v));
+        unpair[v] = true; if (k === 'v') pairs = false;
+      } else if (k === 't') {
+        const t = String(v) === '\\0' ? '\0' : String(v);
+        if ([...t].length > 1) return die('multi-character tab ' + q(t.replace(/\\/g, '\\\\')));
+        tab = t === '' ? null : t;
+        if (t === '') tab = '\n';
+      }
+    }
+    const rest = g.rest;
+    if (rest.length < 2) return die(rest.length ? 'missing operand after ' + q(rest[0]) : 'missing operand', true);
+    if (rest.length > 2) return die('extra operand ' + q(rest[2]), true);
+    if (rest[0] === '-' && rest[1] === '-') return die('both files cannot be standard input: No such file or directory');
+    const eol = g.opts.z ? '\0' : '\n';
+    const files = [];
+    for (const f of rest) {
+      let text;
+      try { text = f === '-' ? await stdinText(ctx) : ctx.fs.read(f); } catch (e) {
+        if (!(e instanceof K.FsError)) throw e;
+        return die(f + ': ' + e.message);
+      }
+      const lines = text.split(eol); if (lines[lines.length - 1] === '') lines.pop();
+      files.push({ name: f, lines, pos: 0, prev: null, warned: false });
+    }
+    let format = null; let auto = false;
+    if (g.all.o) {
+      if (g.all.o.length === 1 && g.all.o[0] === 'auto') auto = true;
+      else { const p = joinParseFormat(g.all.o.map(String), q); if (p.err) return die(p.err); format = p.specs; }
+    }
+    const filler = g.opts.e === undefined ? null : String(g.opts.e);
+    const fold = g.opts.i ? (s) => s.toLowerCase() : (s) => s;
+    const sep = tab === null ? ' ' : tab;
+    const jf = [j1, j2];
+    const mk = (line) => ({ text: line, fields: joinSplitFields(line, tab) });
+    const keyOf = (l, which) => fold(l.fields[jf[which]] || '');
+    const cmpKeys = (a, wa, b, wb) => { const x = keyOf(a, wa); const y = keyOf(b, wb); return x < y ? -1 : x > y ? 1 : 0; };
+    let checkOrder = 'default';
+    for (const [k] of g.seq) if (k === 'check-order') checkOrder = 'on'; else if (k === 'nocheck-order') checkOrder = 'off';
+    let seenUnpairable = false;
+    const abort = {}; // thrown to stop at once when --check-order finds a disorder
+    const read = (which) => {
+      const f = files[which];
+      if (f.pos >= f.lines.length) return null;
+      const l = mk(f.lines[f.pos++]);
+      if (checkOrder !== 'off' && (checkOrder === 'on' || seenUnpairable) && f.prev && !f.warned && cmpKeys(f.prev, which, l, which) > 0) {
+        if (checkOrder === 'on') { abort.msg = 'join: ' + f.name + ':' + f.pos + ': is not sorted: ' + l.text + '\n'; throw abort; }
+        ctx.err('join: ' + f.name + ':' + f.pos + ': is not sorted: ' + l.text + '\n'); f.warned = true;
+      }
+      f.prev = l;
+      return l;
+    };
+    const spare = [null, null];
+    const take = (which) => { const l = spare[which] || read(which); spare[which] = null; return l; };
+    /** Read the lines following `block[0]` that have the same key. */
+    const extend = (which, block) => {
+      for (let l = read(which); l; l = read(which)) {
+        if (cmpKeys(l, which, block[0], which) !== 0) { spare[which] = l; break; }
+        block.push(l);
+      }
+      return block;
+    };
+    const one = (which) => { const l = take(which); return l ? [l] : []; };
+    let out = '';
+    const fieldText = (l, i) => { const v = l && l.fields[i]; return v ? v : filler === null ? '' : filler; };
+    const prjoin = (l1, l2) => {
+      let specs = format;
+      if (!specs && auto) {
+        specs = [{ file: 0, field: 0 }];
+        for (let w = 1; w <= 2; w++) for (let i = 0; i < autoCount[w - 1]; i++) if (i !== jf[w - 1]) specs.push({ file: w, field: i + 1 });
+      }
+      const items = [];
+      const joinField = () => (l1 ? fieldText(l1, j1) : fieldText(l2, j2));
+      if (specs) for (const s of specs) items.push(s.file === 0 ? joinField() : fieldText(s.file === 1 ? l1 : l2, s.field - 1));
+      else {
+        items.push(joinField());
+        [[l1, j1], [l2, j2]].forEach(([l, j]) => { if (l) l.fields.forEach((_, i) => { if (i !== j) items.push(fieldText(l, i)); }); });
+      }
+      out += items.join(sep) + eol;
+    };
+    const autoCount = [0, 0];
+    if (auto) files.forEach((f, i) => { if (f.lines.length) autoCount[i] = joinSplitFields(f.lines[0], tab).length; });
+    if (g.opts.header) {
+      const h1 = read(0); const h2 = read(1);
+      if (h1 || h2) prjoin(h1, h2);
+    }
+    try {
+      let s1 = one(0); let s2 = one(1);
+      let n = 0;
+      while (s1.length && s2.length) {
+        if (++n % 2000 === 0) await breathe(ctx);
+        const d = cmpKeys(s1[0], 0, s2[0], 1);
+        if (d < 0) { if (unpair[1]) prjoin(s1[0], null); seenUnpairable = true; s1 = one(0); }
+        else if (d > 0) { if (unpair[2]) prjoin(null, s2[0]); seenUnpairable = true; s2 = one(1); }
+        else {
+          extend(0, s1); extend(1, s2);
+          if (pairs) for (const a of s1) for (const b of s2) prjoin(a, b);
+          s1 = one(0); s2 = one(1);
+        }
+      }
+      for (const [which, seq] of [[0, s1], [1, s2]]) {
+        if (!seq.length) continue;
+        seenUnpairable = true;
+        for (let l = seq[0]; l; l = take(which)) if (unpair[which + 1]) prjoin(which === 0 ? l : null, which === 0 ? null : l);
+      }
+    } catch (e) {
+      if (e !== abort) throw e;
+      ctx.out(out); ctx.err(abort.msg); return 1;
+    }
+    ctx.out(out);
+    if (files.some((f) => f.warned)) return die('input is not in sorted order');
+    return 0;
+  }
+
   K.textKit = { gnu, readFiles, stdinText, quote, breathe, bytesOf, HELP, VERSION, usageTry };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
