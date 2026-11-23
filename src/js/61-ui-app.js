@@ -450,7 +450,12 @@
       this.tabs.push(tab);
       return tab;
     }
-    _loginShell(term) { return new K.Shell({ machine: K.kali, term, user: 'kali', interactive: true, login: true }); }
+    _loginShell(term) {
+      // each terminal tab is its own pseudo-terminal: pts/0, pts/1, ... (lowest number not used by another tab)
+      const used = new Set(this.tabs.filter((t) => t.term !== term && t.shell && t.shell.tty).map((t) => t.shell.tty));
+      let n = 0; while (used.has('pts/' + n)) n++;
+      return new K.Shell({ machine: K.kali, term, user: 'kali', interactive: true, login: true, tty: 'pts/' + n, utmp: true });
+    }
 
     /** Run the tab's shell. When it exits the tab closes, or the last tab gets a fresh login shell. */
     async _session(tab) {

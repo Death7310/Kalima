@@ -305,3 +305,45 @@ test('lesson checks', async () => {
   K.lessons.progress.complete('t-1');
   assert.ok(K.lessons.progress.isDone('t-1'));
 });
+
+test('job specs, lowest free job number, background trace, per-shell tty', async () => {
+  const sim = await kernelSim();
+  const { K, shell } = sim;
+  const events = [];
+  K.events.on('command', (e) => events.push(e));
+  let r = await sim.type('k-sleep 300 &');
+  assert.match(r.output, /^\[1\] \d+\n/);
+  assert.deepEqual(events.at(-1).commands.map((c) => c.argv), [['k-sleep', '300']], 'a background-only line is traced');
+  assert.equal(events.at(-1).commands[0].background, true);
+  await shell.jobs[0].promise;
+  // finished but unreported: the number is free again
+  r = await sim.type('k-sleep 301 &');
+  assert.match(r.output, /^\[1\] \d+\n/);
+  await shell.jobs.find((j) => j.text === 'k-sleep 301').promise;
+  await sim.type('true');
+  // specs
+  const s2 = await kernelSim(); const sh = s2.shell;
+  s2.K.cmd.register({ name: 'k-hang', run(ctx) { return new Promise((resolve) => ctx.io.sig.onAbort(() => resolve(143))); } });
+  s2.machine.installCommand(s2.K.cmd.get('k-hang'));
+  await sh.runLine('k-hang one &'); await sh.runLine('k-hang two &');
+  r = await s2.run('jobs');
+  assert.match(r.out, /\[1\]  - running    k-hang one\n\[2\]  \+ running    k-hang two\n/);
+  r = await s2.run('kill %9'); assert.equal(r.err, 'kill: no such job: 9\n');
+  r = await s2.run('kill %nope'); assert.equal(r.err, 'kill: job not found: nope\n');
+  r = await s2.run('fg %?zzz'); assert.equal(r.err, 'fg: job not found: zzz\n');
+  r = await s2.run('kill %-'); assert.equal(r.code, 0);
+  await sh.jobs.find((j) => j.id === 1).promise;
+  r = await s2.run('jobs'); assert.equal(r.out, '[2]  + running    k-hang two\n');
+  r = await s2.run('kill %k-hang'); assert.equal(r.code, 0);
+  await sh.jobs.find((j) => j.id === 2).promise;
+  r = await s2.run('kill %+'); assert.equal(r.err, 'kill: no current job\n');
+  await sh.runLine('k-hang a &'); await sh.runLine('k-hang b &');
+  r = await s2.run('kill %?hang'); assert.equal(r.code, 0, 'zsh picks the most recent match');
+  // tty option is inherited by processes and child shells
+  const K2 = s2.K;
+  const t = new K2.Shell({ machine: s2.machine, term: s2.term, user: 'kali', tty: 'pts/3' });
+  assert.equal(t.proc.tty, 'pts/3');
+  assert.equal(t.fork().proc.tty, 'pts/3');
+  assert.equal(t.child().tty, 'pts/3');
+  assert.equal(shell.tty, 'pts/0');
+});

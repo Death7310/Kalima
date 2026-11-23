@@ -191,6 +191,7 @@
       this.sourceDepth = 0;
       this._trace = [];
       this.login = !!o.login;
+      this.tty = o.tty || (this.parent && this.parent.tty) || 'pts/0';
       this.setUser(o.user || 'kali');
       let cwd = o.cwd || this.user.home;
       if (!this.machine.vfs.exists(cwd) || !this._isDir(cwd)) cwd = '/';
@@ -208,10 +209,15 @@
       this.setVar('HOSTNAME', this.machine.hostname, false);
       this.startTime = K.clock.now();
       this.proc = this.machine.spawn({
-        ppid: this.parent ? this.parent.pid : 1, user: this.user.name, tty: 'pts/0',
+        ppid: this.parent ? this.parent.pid : 1, user: this.user.name, tty: this.tty,
         cmd: (this.login ? '-' : '') + this.flavor, stat: 'S',
       });
       this.pid = this.proc.pid;
+      if (o.utmp && this.machine.state) {
+        // a terminal window's login shell is a utmp record (who, w): one line per pseudo-terminal
+        this.utmp = { user: this.user.name, tty: this.tty, host: ':0', at: this.startTime };
+        (this.machine.state.logins = this.machine.state.logins || []).push(this.utmp);
+      }
     }
 
     setUser(name) {
@@ -223,7 +229,10 @@
     }
 
     _isDir(p) { try { return this.machine.vfs.stat(p).isDir; } catch (e) { return false; } }
-    dispose() { this.machine.reap(this.pid); }
+    dispose() {
+      this.machine.reap(this.pid);
+      if (this.utmp) { const l = this.machine.state.logins; const i = l ? l.indexOf(this.utmp) : -1; if (i >= 0) l.splice(i, 1); this.utmp = null; }
+    }
 
     /* ------------------------------------------------------------- variables */
     setVar(name, value, exp) { this.vars.set(name, String(value)); if (exp) this.exported.add(name); }
@@ -737,7 +746,7 @@
     }
 
     fork() {
-      const c = new Shell({ machine: this.machine, term: this.term, parent: this, user: this.user.name, flavor: this.flavor, cwd: this.cwd, env: {} });
+      const c = new Shell({ machine: this.machine, term: this.term, parent: this, user: this.user.name, flavor: this.flavor, cwd: this.cwd, env: {}, tty: this.tty });
       for (const [k, v] of this.vars) c.vars.set(k, v);
       c.exported = new Set(this.exported);
       c.aliases = new Map(this.aliases);
@@ -931,7 +940,7 @@
 
     async runDef(def, argv, io) {
       const ctx = this.makeCtx(argv, io);
-      const proc = this.machine.spawn({ ppid: this.pid, user: this.user.name, tty: 'pts/0', cmd: argv.join(' '), stat: 'R' });
+      const proc = this.machine.spawn({ ppid: this.pid, user: this.user.name, tty: this.tty, cmd: argv.join(' '), stat: 'R' });
       ctx.pid = proc.pid;
       try {
         const st = await def.run(ctx);
@@ -1010,9 +1019,14 @@
     /* ----------------------------------------------------------- job control */
     startJob(node, io) {
       const sig = new Signal();
-      const id = (this.jobs.length ? Math.max.apply(null, this.jobs.map((j) => j.id)) : 0) + 1;
+      let id = 1;
+      while (this.jobs.some((j) => !j.done && j.id === id)) id++;
       const text = nodeText(node);
-      const proc = this.machine.spawn({ ppid: this.pid, user: this.user.name, tty: 'pts/0', cmd: text, stat: 'S' });
+      const proc = this.machine.spawn({ ppid: this.pid, user: this.user.name, tty: this.tty, cmd: text, stat: 'S' });
+      for (const sn of simpleNodes(node)) {
+        const argv = sn.words.map((w) => unquoteRaw(w.raw));
+        if (argv.length) this.rootShell._trace.push({ argv, code: 0, user: this.user.name, host: this.machine.hostname, background: true });
+      }
       const job = { id, pid: proc.pid, text, sig, done: false, code: 0, reported: false };
       const jio = Object.assign({}, io, { sig, stdin: io.stdin == null ? '' : io.stdin });
       const sub = this.fork();
@@ -1027,6 +1041,35 @@
       this.lastBgPid = proc.pid;
       if (this.interactive) io.err('[' + id + '] ' + proc.pid + '\n');
       return 0;
+    }
+
+    /** Resolve a job spec (%N %+ %% %- %name %?text, or none) to a live job: {job} or {err}. */
+    findJob(spec, cmd) {
+      const live = this.jobs.filter((j) => !j.done);
+      const zsh = this.flavor === 'zsh';
+      const pre = zsh ? '' : this.msgPrefix();
+      const miss = (s, kind) => (zsh
+        ? { err: cmd + ': ' + (kind === 'num' ? 'no such job: ' + s : 'job not found: ' + s) + '\n' }
+        : { err: pre + cmd + ': ' + s + (kind === 'amb' ? ': ambiguous job spec' : ': no such job') + '\n' });
+      if (spec == null || spec === '' || spec === '%' || spec === '%+' || spec === '%%' || spec === '+') {
+        const j = live[live.length - 1];
+        return j ? { job: j } : { err: pre + cmd + ': ' + (zsh ? 'no current job' : 'current: no such job') + '\n' };
+      }
+      let t = spec[0] === '%' ? spec.slice(1) : spec;
+      if (t === '-') {
+        const j = live[live.length - 2];
+        return j ? { job: j } : { err: pre + cmd + ': ' + (zsh ? 'no previous job' : 'previous: no such job') + '\n' };
+      }
+      if (/^\d+$/.test(t)) {
+        const j = live.find((x) => x.id === parseInt(t, 10));
+        return j ? { job: j } : miss(zsh ? t : spec, 'num');
+      }
+      const sub = t[0] === '?';
+      if (sub) t = t.slice(1);
+      const m = live.filter((j) => (sub ? j.text.indexOf(t) >= 0 : j.text.startsWith(t)));
+      if (!m.length) return miss(zsh ? t : spec, 'name');
+      if (m.length > 1 && !zsh) return miss(spec, 'amb');
+      return { job: m[m.length - 1] };
     }
 
     reportJobs(io) {
@@ -1258,6 +1301,19 @@
 
   class ShellError extends Error {}
   K.ShellError = ShellError;
+
+  function simpleNodes(node) {
+    switch (node.type) {
+      case 'simple': return [node];
+      case 'pipeline': return [].concat(...node.cmds.map(simpleNodes));
+      case 'andor': return simpleNodes(node.first).concat(...node.rest.map((r) => simpleNodes(r.node)));
+      case 'list': return [].concat(...node.items.map((i) => simpleNodes(i.node)));
+      default: return [];
+    }
+  }
+  function unquoteRaw(r) {
+    return String(r).replace(/'([^']*)'|"([^"]*)"|\\(.)/g, (m, a, b, c) => (a != null ? a : b != null ? b : c));
+  }
 
   function nodeText(node) {
     const w = (t) => t.raw;
@@ -1581,18 +1637,19 @@
       sh.umask = parseInt(ctx.args[0], 8) & 0o777; return 0;
     },
     jobs(ctx) {
-      for (const j of this.jobs) {
-        if (j.done) continue;
-        ctx.out('[' + j.id + ']  ' + (j === this.jobs[this.jobs.length - 1] ? '+' : '-') + ' running    ' + j.text + '\n');
+      const live = this.jobs.filter((j) => !j.done);
+      for (const j of live) {
+        const k = live.length - 1 - live.indexOf(j);
+        ctx.out('[' + j.id + ']  ' + (k === 0 ? '+' : k === 1 ? '-' : ' ') + ' running    ' + j.text + '\n');
       }
       return 0;
     },
     async fg(ctx) {
       const sh = this;
       const spec = ctx.args[0];
-      const live = sh.jobs.filter((j) => !j.done);
-      const job = spec ? live.find((j) => '%' + j.id === spec || String(j.id) === spec) : live[live.length - 1];
-      if (!job) { ctx.err('fg: ' + (spec ? spec + ': no such job' : 'no current job') + '\n'); return 1; }
+      const found = sh.findJob(spec, 'fg');
+      if (found.err) { ctx.err(found.err); return 1; }
+      const job = found.job;
       ctx.out('[' + job.id + ']  + continued  ' + job.text + '\n');
       const off = sh.term.signal.onAbort(() => job.sig.abort());
       await job.promise;
@@ -1620,8 +1677,9 @@
       if (sigName === '0') sigName = 'NULL';
       for (const t of targets) {
         if (t[0] === '%') {
-          const job = sh.jobs.find((j) => '%' + j.id === t && !j.done);
-          if (!job) { ctx.err('kill: no such job: ' + t + '\n'); st = 1; continue; }
+          const found = sh.findJob(t, 'kill');
+          if (found.err) { ctx.err(found.err); st = 1; continue; }
+          const job = found.job;
           if (sigName !== 'NULL') job.sig.abort();
           continue;
         }

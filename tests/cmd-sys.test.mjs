@@ -1019,3 +1019,17 @@ test('whereis and info', async () => {
   assert.equal(bad.code, 1);
   assert.equal(bad.err, "info: No menu item 'nosuchthing' in node '(dir)Top'.\n");
 });
+
+test('tty, who, w and ps report the shell\'s own terminal', async () => {
+  const sim = await sys();
+  const { K, machine, term } = sim;
+  const t1 = new K.Shell({ machine, term, user: 'kali', interactive: true, login: true, tty: 'pts/1', utmp: true });
+  assert.equal((await t1.capture('tty')).out, '/dev/pts/1\n');
+  assert.equal((await sim.out('tty')).trim(), '/dev/pts/0');
+  assert.match((await t1.capture('ps')).out, /\bpts\/1\b/);
+  const who = await t1.capture('who');
+  assert.match(who.out, /^kali\s+pts\/1\s/m);
+  assert.match((await t1.capture('w -h')).out, /^kali\s+pts\/1\s/m);
+  t1.dispose();
+  assert.doesNotMatch((await sim.out('who')), /pts\/1/, 'closing the tab ends the session');
+});

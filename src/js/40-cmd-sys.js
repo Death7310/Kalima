@@ -774,7 +774,7 @@
     if (g.opts.l) command = 'list';
     else if (g.rest.length) command = [(sh.which && sh.which(g.rest[0])) || g.rest[0]].concat(g.rest.slice(1)).join(' ');
     else command = target.shell;
-    const where = 'TTY=pts/0 ; PWD=' + e.cwd + ' ; USER=' + target.name + ' ; COMMAND=' + command;
+    const where = 'TTY=' + ((sh && sh.tty) || 'pts/0') + ' ; PWD=' + e.cwd + ' ; USER=' + target.name + ' ; COMMAND=' + command;
     const log = (msg, prio) => K.syslog(machine, { ident: 'sudo', pid: machine.nextPid(), facility: 'auth', prio: prio || 'notice', msg });
     const output = String(e.output || '');
     if (/is not in the sudoers file/.test(output)) return log('    ' + invoker.name + ' : user NOT in sudoers ; ' + where, 'alert');
@@ -1825,7 +1825,7 @@
       if (g.opts.version) { ctx.out(coreutilsVersion('tty', 'David MacKenzie')); return 0; }
       if (g.rest.length) { ctx.err("tty: extra operand '" + g.rest[0] + "'\nTry 'tty --help' for more information.\n"); return 2; }
       if (!ctx.stdinTTY) { if (!g.opts.s) ctx.println('not a tty'); return 1; }
-      if (!g.opts.s) ctx.println('/dev/pts/0');
+      if (!g.opts.s) ctx.println('/dev/' + ((ctx.shell && ctx.shell.tty) || 'pts/0'));
       return 0;
     },
   });
