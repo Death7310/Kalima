@@ -44,8 +44,11 @@
     'logs/errors.log': T('2026-11-12 09:14:02 upstream timeout 10.10.10.20', '2026-11-12 09:14:09 upstream timeout 10.10.10.20', '2026-11-12 13:40:51 certificate expires in 12 days', ''),
   };
 
+  const SETTINGS = T('# depot sync agent', 'server = 10.10.10.70', 'port = 8080', 'timeout = 30', 'retries = 3', 'log_level = warn', '');
+
   K.fsSeeds.push((machine) => {
     if (machine.profile !== 'kali') return;
+    machine.vfs.seed(SEED + '/settings.conf', SETTINGS);
     for (const name of Object.keys(SURVEY)) machine.vfs.seed(SEED + '/survey/' + name, SURVEY[name]);
   });
 
@@ -375,7 +378,7 @@
           'ls -l logs',
           '```',
           '',
-          'Compare the two sizes in the listing. Text compresses well, and this log shrinks to a small fraction of the original.'
+          'Compare the two sizes in the listing. Text compresses well, and the `.gz` file is noticeably smaller than the original.'
         ),
         hint: 'Use `gzip -k` and the path of the log.',
         solution: 'gzip -k logs/proxy.log',
@@ -460,11 +463,208 @@
     refs: ['tar(1)', 'gzip(1)', 'zip(1)', 'unzip(1)', 'Kali Linux Revealed, ch. 3'],
   };
 
+  /* ------------------------------------------------------------------- sed */
+  const SD = WORK + '/sed';
+  const SED = ['sed'];
+  const sedLesson = {
+    id: 'tools-sed',
+    title: 'Editing streams with sed',
+    minutes: 11,
+    objectives: [
+      'Replace text in a stream with `sed \'s/old/new/\'` and know what the `g` flag changes',
+      'Print only chosen lines with `-n` and `p`, and select them by pattern or line number',
+      'Edit a file in place with `-i` while keeping a backup, and check the change with `diff`',
+    ],
+    intro: T(
+      'Often you have to change text in bulk: clean up a log before you share it, swap an address throughout a file, or adjust a setting in a configuration file on many machines. Opening each file in an editor does not scale.',
+      '',
+      '`sed` is a stream editor. It reads text a line at a time, applies your instructions to each line and writes the result. Because it works on a stream, it fits into pipelines. By default it leaves the original file alone, which makes it safe to try.'
+    ),
+    steps: [
+      {
+        id: 'setup',
+        prompt: T(
+          'Copy this lesson\'s two practice files into a folder of your own and move there: the depot shift log from earlier lessons and a small configuration file.',
+          '',
+          '```',
+          'mkdir -p ~/practice/tools/sed',
+          'cp /usr/share/kalima/text/shift-log.txt /usr/share/kalima/tools/settings.conf ~/practice/tools/sed',
+          'cd ~/practice/tools/sed',
+          '```',
+          '',
+          'If you run this again later, it overwrites your copies with fresh originals, which is a quick way to start over.'
+        ),
+        hint: 'Create the folder, copy both files into it, then `cd` there.',
+        solution: 'mkdir -p ~/practice/tools/sed && cp /usr/share/kalima/text/shift-log.txt /usr/share/kalima/tools/settings.conf ~/practice/tools/sed && cd ~/practice/tools/sed',
+        check: { cwd: SD, file: { path: SD + '/settings.conf', exists: true }, all: [{ file: { path: SD + '/shift-log.txt', exists: true } }] },
+      },
+      {
+        id: 'subst',
+        prompt: T(
+          'The most used `sed` instruction is substitution, written `s/old/new/`. Replace the word `WARN` with `CAUTION`:',
+          '',
+          '```',
+          'sed \'s/WARN/CAUTION/\' shift-log.txt',
+          '```',
+          '',
+          'The pieces are `s` for substitute, the text to find, the replacement, each separated by `/`, and then the file. The whole instruction is quoted so the shell leaves it alone. Look at the output: every `WARN` line now says `CAUTION`. The file itself is unchanged, because `sed` only prints its result. Run `grep -c WARN shift-log.txt` if you want to see that the original still has them.'
+        ),
+        hint: 'Quote the instruction, `s/WARN/CAUTION/`, and give the file name after it.',
+        solution: 'sed \'s/WARN/CAUTION/\' shift-log.txt',
+        check: { cmd: SED, out: /06:31\s+CAUTION\s+Scanner SC-14 battery/, not: { out: /\bWARN\b/ } },
+      },
+      {
+        id: 'global',
+        prompt: T(
+          'Without a flag, `s` replaces only the first match on each line. Add `g` after the last slash to replace every match on the line. Lines of the log have runs of spaces between the time, the level and the message. Collapse each run into a single space:',
+          '',
+          '```',
+          'sed \'s/  */ /g\' shift-log.txt',
+          '```',
+          '',
+          'In the pattern, the first character is a space and `  *` means "a space followed by any number of further spaces". So `06:02  INFO   Gate opened...` becomes `06:02 INFO Gate opened...`. Try the same command without the `g` and notice that only the first run on each line is collapsed.'
+        ),
+        hint: 'Use the pattern from the example, and put `g` after the final slash.',
+        solution: 'sed \'s/  */ /g\' shift-log.txt',
+        check: { cmd: SED, out: /^06:02 INFO Gate opened, 14 vehicles on site$/m, all: [{ out: /^07:41 WARN \S/m }] },
+      },
+      {
+        id: 'quiet',
+        prompt: T(
+          '`sed` normally prints every line. With `-n` it prints only what you ask for, and the `p` command asks for a line to be printed. Put a pattern in front of `p` and only matching lines qualify:',
+          '',
+          '```',
+          'sed -n \'/ERROR/p\' shift-log.txt',
+          '```',
+          '',
+          'The pattern goes between slashes. You get the four `ERROR` lines, the same as `grep ERROR` would give. Forgetting `-n` is a common mistake: every line is printed once normally, and the matching ones a second time.'
+        ),
+        hint: 'You need `-n` and the instruction `/ERROR/p`.',
+        solution: 'sed -n \'/ERROR/p\' shift-log.txt',
+        check: { cmd: SED, args: ['-n'], out: /Weighbridge reading rejected/, not: { out: /Gate opened|WARN/ } },
+      },
+      {
+        id: 'lines',
+        prompt: T(
+          'A number in front of a command selects a line, and two numbers separated by a comma select a range. `$` means the last line. Print lines 3 to 5:',
+          '',
+          '```',
+          'sed -n \'3,5p\' shift-log.txt',
+          '```',
+          '',
+          'Line 1 is the title and line 2 the column headings, so these are the first three log entries. `sed -n \'$p\'` would print only the last line, which tells you when the log ends.'
+        ),
+        hint: 'Use `-n` with the instruction `3,5p`.',
+        solution: 'sed -n \'3,5p\' shift-log.txt',
+        check: { cmd: SED, args: ['-n'], out: /06:02\s+INFO\s+Gate opened/, all: [{ out: /06:31\s+WARN/ }], not: { out: /Depot shift log|06:48/ } },
+      },
+      {
+        id: 'delete',
+        prompt: T(
+          'The `d` command deletes lines from the output. Addresses work the same way: a number, a range or a pattern. Use it to remove the title and column headings, which are lines 1 and 2, so that only the entries remain:',
+          '',
+          '```',
+          'sed \'1,2d\' shift-log.txt',
+          '```',
+          '',
+          'Now change the approach: write a command that prints the log without the `INFO` lines, using a pattern address. Run it and read the output.'
+        ),
+        hint: 'Put a pattern, `/INFO/`, in front of `d`. The first example shows the shape.',
+        solution: 'sed \'/INFO/d\' shift-log.txt',
+        check: { cmd: SED, out: /Depot shift log/, all: [{ out: /06:31\s+WARN/ }], not: { out: /Gate opened|\bINFO\b/ } },
+      },
+      {
+        id: 'count-left',
+        prompt: 'Look at the lowercase entry at 07:06, which reads `info`. The pattern `/INFO/` is case-sensitive. Does that line still appear in the output of `sed \'/INFO/d\' shift-log.txt`? Answer yes or no.',
+        hint: 'The 07:06 line has the level in lower case, so it does not match `INFO`.',
+        solution: 'yes',
+        answer: /^(yes|y)$/i,
+      },
+      {
+        id: 'redirect',
+        prompt: T(
+          'To keep a result, send the output to a new file with `>`. The original stays as it was, so you can compare the two:',
+          '',
+          '```',
+          'sed \'s/WARN/CAUTION/\' shift-log.txt > shift-log-clean.txt',
+          '```',
+          '',
+          'Never redirect to the same file you are reading from (`> shift-log.txt`). The shell empties the file before `sed` gets to read it, and you lose the content. That is what `-i` is for, in the next step.'
+        ),
+        hint: 'Repeat the substitution and add `> shift-log-clean.txt`.',
+        solution: 'sed \'s/WARN/CAUTION/\' shift-log.txt > shift-log-clean.txt',
+        check: { cmd: SED, file: { path: SD + '/shift-log-clean.txt', contains: /CAUTION/ }, all: [{ file: { path: SD + '/shift-log.txt', contains: /\bWARN\b/ } }] },
+      },
+      {
+        id: 'inplace',
+        prompt: T(
+          '`-i` edits the file in place. A suffix attached to it, as in `-i.bak`, tells `sed` to save the original under that extra ending first. Raise the retry count in the settings file from 3 to 5:',
+          '',
+          '```',
+          'sed -i.bak \'s/^retries = 3/retries = 5/\' settings.conf',
+          'ls',
+          '```',
+          '',
+          'The `^` ties the pattern to the start of the line. `sed` prints nothing, but `ls` now shows `settings.conf.bak` beside `settings.conf`. Keep the backup suffix on every in-place edit, especially on real configuration files: there is no undo.'
+        ),
+        hint: 'Write `-i.bak` with no space between the option and the suffix, then the substitution, then the file.',
+        solution: 'sed -i.bak \'s/^retries = 3/retries = 5/\' settings.conf',
+        check: { cmd: SED, file: { path: SD + '/settings.conf', contains: /^retries = 5$/m }, all: [{ file: { path: SD + '/settings.conf.bak', contains: /^retries = 3$/m } }] },
+      },
+      {
+        id: 'diff',
+        prompt: T(
+          'Confirm exactly what changed by comparing the backup with the edited file:',
+          '',
+          '```',
+          'diff settings.conf.bak settings.conf',
+          '```',
+          '',
+          'Lines starting with `<` come from the first file and `>` from the second. You should see one line of each: `retries = 3` replaced by `retries = 5`. Reviewing a diff after an automated edit is how you make sure the pattern touched only what you meant it to.'
+        ),
+        hint: 'List the old file first and the new file second.',
+        solution: 'diff settings.conf.bak settings.conf',
+        check: { cmd: 'diff', out: /< retries = 3[\s\S]*> retries = 5/ },
+      },
+    ],
+    quiz: [
+      {
+        q: 'A line reads `error error error`. What does `sed \'s/error/ok/\'` print for it?',
+        choices: ['`ok error error`', '`ok ok ok`', '`error error error`', '`ok`'],
+        answer: 0,
+        why: 'Without the `g` flag, `s` replaces only the first match on each line. `s/error/ok/g` would give `ok ok ok`.',
+      },
+      {
+        q: 'What is wrong with `sed -n \'/root/\' auth.log`?',
+        choices: [
+          'It prints nothing, because `-n` turns off automatic printing and there is no `p` command to print',
+          'It prints every line, because `-n` means all',
+          'It deletes the matching lines',
+          'It edits `auth.log` in place',
+        ],
+        answer: 0,
+        why: '`-n` suppresses the automatic output, and the address alone does not print anything. The instruction needs `p`: `sed -n \'/root/p\' auth.log`.',
+      },
+      {
+        q: 'You run `sed -i \'s/8080/9090/\' agent.conf` on a live configuration file and the pattern was wrong. Why is it a good habit to write `-i.bak`?',
+        choices: [
+          'The original is saved as `agent.conf.bak`, so you can restore it',
+          'It makes `sed` run faster',
+          'It stops `sed` from changing more than one line',
+          'It makes `sed` ask for confirmation',
+        ],
+        answer: 0,
+        why: 'In-place editing overwrites the file immediately. A backup suffix keeps the previous version beside it, so a wrong substitution is a one-line fix.',
+      },
+    ],
+    refs: ['sed(1)', 'diff(1)', 'The sed FAQ and the GNU sed manual', 'Kali Linux Revealed, ch. 3'],
+  };
+
   K.lessons.register({
     id: 'tools',
     title: 'Finding files, archives and stream editing',
     order: 27,
     summary: 'Search for files, pack and unpack archives, and transform text with sed and awk.',
-    lessons: [findLesson, archiveLesson],
+    lessons: [findLesson, archiveLesson, sedLesson],
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
