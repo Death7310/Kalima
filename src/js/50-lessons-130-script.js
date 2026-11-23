@@ -218,7 +218,206 @@
     refs: ['bash(1)', 'chmod(1)', 'GNU Bash Reference Manual'],
   };
 
-  const lessons = [firstLesson];
+  /* ----------------------------------------------------------------- flow */
+  const GREET = '#!/bin/bash\\nif [ $# -lt 1 ]; then\\n  echo "usage: $0 name" >&2\\n  exit 2\\nfi\\necho "Hello, $1. You gave $# argument(s)."\\n';
+  const flowLesson = {
+    id: 'script-flow',
+    title: 'Tests, loops and arguments',
+    minutes: 12,
+    objectives: [
+      'Test a condition with `[ ]` and branch with `if` and `else`',
+      'Repeat work with `for` over a list, `while read` over the lines of a file and `while` with a counter',
+      'Make a script take input from its arguments using `$1` and `$#`',
+    ],
+    intro: T(
+      'A script that only replays fixed commands is a start. The useful ones decide and repeat: check that a file exists before reading it, do the same thing for every address in a list, and take their input from the command line instead of having it written into the file.',
+      '',
+      'These are the building blocks of every tool you will write for a security assessment, from a note-taking helper to a careful sweep of a scoped list of hosts.'
+    ),
+    steps: [
+      {
+        id: 'workdir',
+        prompt: T(
+          'Work in a folder of your own so the practice files stay together:',
+          '',
+          '```',
+          SETUP,
+          '```'
+        ),
+        hint: 'Use `mkdir -p` with the path, then `cd` into it.',
+        solution: SETUP,
+        check: { cwd: /\/practice\/script$/ },
+      },
+      {
+        id: 'test',
+        prompt: T(
+          'The brackets in `[ -f /etc/passwd ]` are not decoration: `[` is a command, and it needs a space after it and before the closing `]`. It tests a condition and reports the answer as an exit status, `0` for true and `1` for false. `-f` asks whether a path is a regular file and `-d` whether it is a directory. Try one of each:',
+          '',
+          '```',
+          '[ -f /etc/passwd ]; echo $?; [ -d /nonexistent ]; echo $?',
+          '```',
+          '',
+          'Expect `0` and then `1`.'
+        ),
+        hint: 'One line with two tests and an `echo $?` after each.',
+        solution: '[ -f /etc/passwd ]; echo $?; [ -d /nonexistent ]; echo $?',
+        check: { out: /^0\n1$/m, line: /\[ -f .*\]/ },
+      },
+      {
+        id: 'if',
+        prompt: T(
+          '`if` runs a test and chooses what happens next. On one line, the parts are separated by semicolons:',
+          '',
+          '```',
+          'if [ -f ~/engagement/scope.txt ]; then echo "scope file present"; else echo "scope file missing"; fi',
+          '```',
+          '',
+          'The line is `if` *test*, `then` *commands*, `else` *commands*, `fi`. (`fi` is `if` backwards and closes the block.) Checking that the scope file exists before you do anything else is a good habit.',
+          '',
+          'Numbers and text are compared with different operators. For numbers use `-eq` (equal), `-ne`, `-lt`, `-le`, `-gt` and `-ge`, as in `[ "$ports" -gt 3 ]`. For text use `=` and `!=`, as in `[ "$answer" = yes ]`.'
+        ),
+        hint: 'Copy the line. Every `;` before `then`, `else` and `fi` matters when it is all on one line.',
+        solution: 'if [ -f ~/engagement/scope.txt ]; then echo "scope file present"; else echo "scope file missing"; fi',
+        check: { line: /\bif\b.*\bthen\b.*\bfi\b/, out: /scope file present/ },
+      },
+      {
+        id: 'for-list',
+        prompt: T(
+          'A `for` loop runs the same commands once per item in a list. The loop variable takes each value in turn:',
+          '',
+          '```',
+          'for h in web01 files01 db01; do echo "checking $h"; done',
+          '```',
+          '',
+          'Between `do` and `done` you can put anything you could type at the prompt. This list is typed in the loop; the next steps read it from a file.'
+        ),
+        hint: 'The shape is `for NAME in WORDS; do COMMANDS; done`.',
+        solution: 'for h in web01 files01 db01; do echo "checking $h"; done',
+        check: { line: /\bfor\b.*\bin\b.*\bdo\b.*\bdone\b/, out: /^checking web01\nchecking files01\nchecking db01$/m },
+      },
+      {
+        id: 'hostsfile',
+        prompt: T(
+          'Lists of targets belong in files, not in the loop, so they can be reviewed against the scope. Create `hosts.txt` in your practice folder with three addresses, one per line: `10.10.10.10`, `10.10.10.20` and `10.10.10.30`. These are lab hosts inside the engagement scope.'
+        ),
+        hint: 'Use `printf` with `\\n` between the addresses and redirect into `hosts.txt`, or write the file in an editor.',
+        solution: 'printf \'10.10.10.10\\n10.10.10.20\\n10.10.10.30\\n\' > hosts.txt',
+        check: { file: { path: WORK + '/hosts.txt', exists: true, contains: /^10\.10\.10\.10\n10\.10\.10\.20\n10\.10\.10\.30\n?$/ } },
+      },
+      {
+        id: 'while-read',
+        prompt: T(
+          'To work through a file one line at a time, use `while read` and feed the file into the loop with `<`:',
+          '',
+          '```',
+          'while read -r ip; do echo "address: $ip"; done < hosts.txt',
+          '```',
+          '',
+          '`read` takes one line into the variable and reports failure at the end of the file, which ends the loop. `-r` stops it from treating backslashes specially. You will see one `address:` line per line of the file.'
+        ),
+        hint: 'The file goes in after `done`, using `< hosts.txt`.',
+        solution: 'while read -r ip; do echo "address: $ip"; done < hosts.txt',
+        check: { line: /\bwhile\b.*\bread\b.*\bdone\b/, out: /^address: 10\.10\.10\.10\naddress: 10\.10\.10\.20\naddress: 10\.10\.10\.30$/m },
+      },
+      {
+        id: 'counter',
+        prompt: T(
+          'A `while` loop can also run for as long as a test stays true. Set a counter, test it on every pass and change it inside the loop. `$(( ))` does integer arithmetic. Goal: print `attempt 1`, `attempt 2` and `attempt 3` and then stop.',
+          '',
+          'The pieces: `n=1`, `while [ "$n" -le 3 ]`, `echo "attempt $n"`, and `n=$((n+1))`. If you forget to change the counter the loop never ends; Ctrl-C interrupts it.'
+        ),
+        hint: 'Put the `echo` and the `n=$((n+1))` between `do` and `done`, separated by a semicolon.',
+        solution: 'n=1; while [ "$n" -le 3 ]; do echo "attempt $n"; n=$((n+1)); done',
+        check: { line: /\bwhile\b.*\bdone\b/, out: /^attempt 1\nattempt 2\nattempt 3$/m },
+      },
+      {
+        id: 'args-write',
+        prompt: T(
+          'Scripts receive what you type after their name as *arguments*: `$1` is the first, `$2` the second, `$#` is how many there were, and `$0` is the script\'s own name. Create `greet.sh` that prints a usage message and exits with status 2 when no argument was given, and otherwise greets the first one:',
+          '',
+          '```',
+          '#!/bin/bash',
+          'if [ $# -lt 1 ]; then',
+          '  echo "usage: $0 name" >&2',
+          '  exit 2',
+          'fi',
+          'echo "Hello, $1. You gave $# argument(s)."',
+          '```',
+          '',
+          '`>&2` sends the message to the error stream, where a usage message belongs, and `exit 2` ends the script with a status that says "wrong usage".'
+        ),
+        hint: 'Write it in an editor, or with one `printf` where each `\\n` ends a line. Mind the single quotes around the text.',
+        solution: 'printf \'' + GREET + '\' > greet.sh',
+        check: { file: { path: WORK + '/greet.sh', exists: true, contains: /\$#[\s\S]*exit 2[\s\S]*\$1/ } },
+      },
+      {
+        id: 'args-run',
+        prompt: T(
+          'Make it executable, then run it twice: once with a name, and once with no argument, printing the exit status after the second run.',
+          '',
+          '```',
+          'chmod +x greet.sh; ./greet.sh Ana; ./greet.sh; echo $?',
+          '```',
+          '',
+          'The first run takes the `if` branch that skips the usage message and prints the greeting, and the second takes the branch that prints the usage message and exits early.'
+        ),
+        hint: '`chmod +x greet.sh` once, then `./greet.sh Ana`, then `./greet.sh` with nothing after it and `echo $?`.',
+        solution: 'chmod +x greet.sh; ./greet.sh Ana; ./greet.sh; echo $?',
+        check: { out: /^Hello, Ana\. You gave 1 argument\(s\)\.$/m, fn: (ev) => /^usage: .*greet\.sh name$/m.test(outOf(ev)) && /^2$/m.test(outOf(ev)) },
+      },
+      {
+        id: 'args-q',
+        prompt: 'Which exit status did the script return when you ran it without an argument (the number printed at the end of the last output)? Answer with the number.',
+        hint: 'It is the number printed by `echo $?`, and it comes from the `exit` line in the script.',
+        solution: '2',
+        answer: ['2', 'two'],
+      },
+    ],
+    quiz: [
+      {
+        q: 'What is wrong with `if [-f notes.txt]; then echo yes; fi`?',
+        choices: [
+          'Nothing, it is correct',
+          'There must be spaces inside the brackets, because `[` is a command and `]` is its last argument',
+          '`-f` only works on directories',
+          'The word `then` must be on its own line',
+        ],
+        answer: 1,
+        why: 'The shell would look for a command named `[-f`. Write `[ -f notes.txt ]` with a space after `[` and before `]`.',
+      },
+      {
+        q: 'A file has 40 lines and each line is a host name. Why is `while read -r host; do ...; done < file` safer than `for host in $(cat file)`?',
+        choices: [
+          'It is much faster',
+          'It handles each line as a unit, while the `for` form splits on every space and tab as well',
+          'It works without the file existing',
+          'There is no difference',
+        ],
+        answer: 1,
+        why: 'Command substitution output is split into words at any whitespace. A line with two words becomes two loop passes. `read` takes whole lines.',
+      },
+      {
+        q: 'A script contains `echo "First: $1"` and you run `./list.sh a b c`. What does `$#` hold?',
+        choices: ['1', '3', '4', 'The name of the script'],
+        answer: 1,
+        why: '`$#` counts the arguments, not the script name: a, b and c make three. The name is `$0`.',
+      },
+      {
+        q: 'Which loop never ends, if nothing else stops it?',
+        choices: [
+          '`n=1; while [ "$n" -le 3 ]; do echo $n; n=$((n+1)); done`',
+          '`for i in 1 2 3; do echo $i; done`',
+          '`n=1; while [ "$n" -le 3 ]; do echo $n; done`',
+          '`while read -r x; do echo $x; done < hosts.txt`',
+        ],
+        answer: 2,
+        why: 'Here `n` never changes, so the test stays true for ever. The others change the counter, run out of list items or reach the end of the file.',
+      },
+    ],
+    refs: ['bash(1), sections on Compound Commands and Parameters', 'test(1)', 'GNU Bash Reference Manual'],
+  };
+
+  const lessons = [firstLesson, flowLesson];
 
   K.lessons.register({
     id: 'script',
