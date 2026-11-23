@@ -169,7 +169,20 @@ kali-tools-wireless|2026.3.0|Kali Linux wireless tools|aircrack-ng|misc
   const hash = (s) => U.hash32(String(s));
   const parseRow = (row) => row.split('|');
   const bumpVersion = (v) => v.replace(/(\d+)([^\d]*)$/, (m, n, rest) => (parseInt(n, 10) + 1) + rest);
-  const generatedVersion = (name) => { const h = hash('ver' + name); return (1 + h % 4) + '.' + (h >> 3) % 20 + '.' + (h >> 8) % 9 + '-0kali' + (1 + (h >> 12) % 3); };
+  // A well-formed Debian version of a plausible shape, stable per package name.
+  const generatedVersion = (name) => {
+    const h = hash('ver' + name) >>> 0;
+    const a = 1 + h % 9; const b = (h >>> 4) % 30; const c = (h >>> 9) % 12; const n = 1 + (h >>> 13) % 4;
+    if (/^kali-/.test(name)) return '2026.3.' + (c % 5) + '+kali' + n;
+    switch ((h >>> 16) % 5) {
+      case 0: return a + '.' + b + '-' + n;
+      case 1: return a + '.' + b + '.' + c + '-' + n;
+      case 2: return a + '.' + b + '.' + c + '-0kali' + n;
+      case 3: return a + '.' + b + '+dfsg-' + n + 'kali' + n;
+      case 4: return '1:' + (a + 8) + '.' + b + '.' + c + '-' + n;
+      default: return a + '.' + b + '.' + c + '+ds-' + n;
+    }
+  };
 
   function adminState(machine) {
     const st = machine.state;

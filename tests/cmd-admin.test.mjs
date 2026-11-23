@@ -447,3 +447,15 @@ test('neofetch, fastfetch and the kali-* notes', async () => {
   assert.match(await s.out('kali-undercover'), /Nothing was changed on this machine\./);
   assert.match(await s.out('neofetch --version'), /^Neofetch /);
 });
+
+test('dpkg -l: every package version is a well-formed Debian version', async () => {
+  const s = await boot();
+  const r = await s.run('dpkg -l');
+  const rows = r.out.split('\n').filter((l) => /^[a-z]{2} /.test(l)).map((l) => l.split(/\s+/));
+  assert.ok(rows.length > 100);
+  for (const f of rows) {
+    assert.match(f[2], /^(\d+:)?\d[A-Za-z0-9.+~-]*$/, f[1] + ' ' + f[2]);
+    assert.doesNotMatch(f[2], /[.+-][.+-]|^-|-$/, f[1] + ' ' + f[2]);
+  }
+  assert.doesNotMatch(r.out, /1\.-10\.0|3\.-7\.-1/);
+});
