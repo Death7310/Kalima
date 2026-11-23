@@ -1033,3 +1033,45 @@ test('tty, who, w and ps report the shell\'s own terminal', async () => {
   t1.dispose();
   assert.doesNotMatch((await sim.out('who')), /pts\/1/, 'closing the tab ends the session');
 });
+
+/* ------------------------------------------------------ review fixes */
+
+test('date -d: "now + N unit" with spaced sign and 3pm style times', async () => {
+  const sim = await sys();
+  const base = await sim.out('date -d "now + 3 days" +%F');
+  const plain = await sim.out('date -d "+3 days" +%F');
+  assert.equal(base, plain);
+  assert.equal(await sim.out('date -d "3pm tomorrow" +%H:%M'), '15:00\n');
+  assert.equal(await sim.out('date -d "12am" +%H'), '00\n');
+});
+
+test('top: -o sorts by the named field, and a missing argument is reported like top', async () => {
+  const sim = await sys();
+  const byPid = (await sim.out('top -bn1 -o +PID')).split('\n').slice(7).filter(Boolean).map((l) => +l.trim().split(/\s+/)[0]);
+  assert.deepEqual(byPid, [...byPid].sort((a, b) => a - b));
+  const byMem = (await sim.out('top -bn1 -o %MEM')).split('\n').slice(7).filter(Boolean).map((l) => +l.trim().split(/\s+/)[9]);
+  assert.deepEqual(byMem, [...byMem].sort((a, b) => b - a));
+  const r = await sim.run('top -n');
+  assert.equal(r.err, 'top: -n requires argument\n');
+  assert.equal(r.code, 1);
+  assert.match((await sim.run('top -bn1 -o nosuch')).err, /^top: unknown field name 'nosuch'/);
+});
+
+test('systemctl: cat shows a clean ExecStart, mask and unmask work, list-timers lists timers', async () => {
+  const sim = await sys();
+  assert.match(await sim.out('systemctl cat ssh'), /^ExecStart=\/usr\/sbin\/sshd -D \$SSHD_OPTS$/m);
+  assert.equal(await sim.out('sudo systemctl mask ssh'), "Created symlink '/etc/systemd/system/ssh.service' → '/dev/null'.\n");
+  assert.match(await sim.out('systemctl status ssh'), /Loaded: masked \(Reason: Unit ssh.service is masked.\)/);
+  const r = await sim.run('sudo systemctl start ssh');
+  assert.equal(r.err, 'Failed to start ssh.service: Unit ssh.service is masked.\n');
+  assert.equal(r.code, 1);
+  assert.equal(await sim.out('systemctl is-enabled ssh'), 'masked\n');
+  assert.equal(await sim.out('sudo systemctl unmask ssh'), "Removed '/etc/systemd/system/ssh.service'.\n");
+  assert.equal((await sim.run('sudo systemctl start ssh')).code, 0);
+  const t = await sim.out('systemctl list-timers');
+  assert.match(t, /^NEXT +LEFT LAST +PASSED UNIT +ACTIVATES/);
+  assert.match(t, /apt-daily\.timer +apt-daily\.service/);
+  assert.equal(await sim.out('systemctl is-system-running'), 'running\n');
+  const running = await sim.out('systemctl list-units --type=service --state=running');
+  assert.ok(!/ exited /.test(running.split('\n\n')[0]));
+});

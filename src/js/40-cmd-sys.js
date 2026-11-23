@@ -1073,7 +1073,7 @@
     if (!text) return dayStart(now);
     const base = new Date(now);
     let date = null; let time = null; let shiftMs = 0; let months = 0; let weekday = null;
-    const words = text.replace(/(\d)t(\d)/, '$1 $2').replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+    const words = text.replace(/(\d)t(\d)/, '$1 $2').replace(/(^|\s)([+-])\s+(\d)/g, '$1$2$3').replace(/,/g, ' ').split(/\s+/).filter(Boolean);
     for (let i = 0; i < words.length; i++) {
       const w = words[i]; let m;
       if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(w)) || (m = /^(\d{4})(\d{2})(\d{2})$/.exec(w))) { date = [+m[1], +m[2] - 1, +m[3]]; continue; }
@@ -1086,6 +1086,7 @@
         if (m[4] && m[4] !== 'z') shiftMs -= (m[4][0] === '-' ? -1 : 1) * (+m[4].slice(1, 3) * HOUR + +m[4].slice(-2) * MIN);
         continue;
       }
+      if ((m = /^(\d{1,2})\s*([ap])m$/.exec(w)) && +m[1] >= 1 && +m[1] <= 12) { time = [(+m[1] % 12) + (m[2] === 'p' ? 12 : 0), 0, 0]; continue; }
       if (w === 'now' || w === 'today' || w === 'utc' || w === 'gmt' || w === 'z') continue;
       if (w === 'tomorrow') { shiftMs += DAY; continue; }
       if (w === 'yesterday') { shiftMs -= DAY; continue; }
@@ -2206,8 +2207,10 @@
     name: 'top', pkg: 'procps', summary: 'display Linux processes', synopsis: 'top -hv | -bcEeHiOSs1 -d secs -n max -u|U user -p pid(s) -o field -w [cols]',
     man: 'DESCRIPTION\n       The top program provides a dynamic real-time view of a running system. It can display system summary information as well as a list of processes or threads currently being managed by the Linux kernel.\n\nOPTIONS\n       -b, --batch-mode\n              Starts top in Batch mode, which could be useful for sending output from top to other programs or to a file.\n\n       -c     Command-line/Program-name toggle.\n\n       -d, --delay=SECS\n              Specifies the delay between screen updates.\n\n       -n, --iterations=NUMBER\n              Specifies the maximum number of iterations, or frames, top should produce before ending.\n\n       -p, --pid=PIDLIST\n              Monitor only processes with specified process IDs.\n\n       -u, --filter-only-euser=USER\n              Monitor only processes with an effective user ID or user name matching that given.\n\n       -w, --width[=COLS]\n              In Batch mode, when used without an argument top will format output using the COLUMNS= and LINES= environment variables.\n\n       q      Quit interactive top.\n\nEXAMPLES\n       top\n              Watch the system; press q to leave.\n       top -b -n 1 | head -15\n              One snapshot, ready for a pipe.',
     async run(ctx) {
-      const g = ctx.getopt({ short: 'bcd:n:p:u:U:w::hvHiSsEeO1', long: ['batch', 'help', 'version', 'delay=', 'iterations=', 'pid=', 'filter-only-euser=', 'width=?'] });
+      const g = ctx.getopt({ short: 'bcd:n:p:u:U:o:w::hvHiSsEeO1', long: ['batch', 'help', 'version', 'delay=', 'iterations=', 'pid=', 'filter-only-euser=', 'width=?', 'sort-override='] });
       if (g.err) {
+        const req = /option requires an argument -- '(.)'/.exec(g.err);
+        if (req) { ctx.err('top: -' + req[1] + ' requires argument\n'); return 1; }
         const bad = /option -- '(.)'/.exec(g.err) || /option '(.*)'/.exec(g.err);
         ctx.err('top: unknown option \'' + (bad ? bad[1] : g.err) + '\'\n' + TOP_USAGE);
         return 1;
@@ -2230,8 +2233,21 @@
       const batch = !!(g.opts.b || g.opts.batch) || !ctx.isTTY;
       const width = g.opts.w && g.opts.w !== true ? +g.opts.w : batch ? 512 : ctx.cols;
       const full = !!g.opts.c;
+      const sortKeys = {
+        PID: (v) => v.pid, USER: (v) => v.user, PR: (v) => (v.kthread ? 0 : 20 + v.ni), NI: (v) => v.ni, VIRT: (v) => v.vsz, RES: (v) => v.rss,
+        SHR: (v) => (v.kthread ? 0 : v.rss * 0.36), S: (v) => v.stat[0], '%CPU': (v) => v.cpu, '%MEM': (v) => v.mem, 'TIME+': (v) => v.time, COMMAND: (v) => v.comm,
+      };
+      let sortBy = null;
+      const sortArg = g.opts.o != null ? g.opts.o : g.opts['sort-override'];
+      if (typeof sortArg === 'string') {
+        const m = /^([+-]?)(.*)$/.exec(sortArg);
+        const key = sortKeys[m[2].toUpperCase()];
+        if (!key) { ctx.err("top: unknown field name '" + sortArg + "'\n" + TOP_USAGE); return 1; }
+        sortBy = { key, asc: m[1] === '+' };
+      }
       const frame = (rowsLeft) => {
         const sel = topProcesses(ctx, { pids, user });
+        if (sortBy) sel.shown.sort((a, b) => { const x = sortBy.key(a); const y = sortBy.key(b); const c = x < y ? -1 : x > y ? 1 : 0; return (sortBy.asc ? c : -c) || a.pid - b.pid; });
         const head = sysSummary(ctx, sel.total.length ? allProcs(ctx) : []);
         const col = '    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND';
         const rows = sel.shown.slice(0, rowsLeft).map((v) => {
@@ -2418,6 +2434,7 @@
     const preset = unit.enabled === 'static' ? '' : '; preset: ' + (unit.preset || 'enabled');
     const out = [statusDot(ctx, unit) + ' ' + unit.name + ' - ' + unit.desc];
     const row = (k, v) => out.push(k.padStart(11) + ': ' + v);
+    if (unit.masked) { row('Loaded', 'masked (Reason: Unit ' + unit.name + ' is masked.)'); row('Active', 'inactive (dead)'); return out.join('\n') + '\n'; }
     row('Loaded', 'loaded (' + UNIT_DIR + (unit.instance ? unit.name.replace(/@[^.]*\./, '@.') : unit.name) + '; ' + enabled + preset + ')');
     const state = unit.active + ' (' + unit.sub + ')';
     if (unit.active === 'active') row('Active', state + ' since ' + unitStamp(unit.since) + '; ' + ago(now - unit.since) + ' ago');
@@ -2514,13 +2531,35 @@
       const quiet = !!g.opts.q;
 
       switch (verb) {
-        case 'list-units': case 'list-sockets': case 'list-timers': {
+        case 'list-timers': {
+          const now = K.clock.now();
+          const stamp = (t) => strftime('%a %Y-%m-%d %H:%M:%S UTC', t, true);
+          const rel = (ms) => { const s = Math.round(Math.abs(ms) / 1000); return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'min' : s < 86400 ? Math.floor(s / 3600) + 'h' : Math.floor(s / 86400) + ' days'; };
+          const at = (h, mi) => { const d = new Date(now); d.setUTCHours(h, mi, 0, 0); return d.getTime(); };
+          const defs = [['apt-daily.timer', 'apt-daily.service', 6, 20, 86400000], ['apt-daily-upgrade.timer', 'apt-daily-upgrade.service', 6, 45, 86400000], ['dpkg-db-backup.timer', 'dpkg-db-backup.service', 0, 0, 86400000],
+            ['e2scrub_all.timer', 'e2scrub_all.service', 3, 10, 7 * 86400000], ['fstrim.timer', 'fstrim.service', 0, 0, 7 * 86400000], ['logrotate.timer', 'logrotate.service', 0, 0, 86400000],
+            ['man-db.timer', 'man-db.service', 0, 0, 86400000], ['systemd-tmpfiles-clean.timer', 'systemd-tmpfiles-clean.service', now ? new Date(now).getUTCHours() : 0, 0, 86400000]];
+          const rows = defs.map(([unit, act, h, mi, every]) => {
+            let next = at(h, mi); while (next <= now) next += every; const last = next - every;
+            return { next, last, cells: [stamp(next), rel(next - now), stamp(last), rel(now - last) + ' ago', unit, act] };
+          }).sort((x, y) => x.next - y.next);
+          const head = ['NEXT', 'LEFT', 'LAST', 'PASSED', 'UNIT', 'ACTIVATES'];
+          const widths = head.map((hd, i) => Math.max(hd.length, ...rows.map((r) => r.cells[i].length)));
+          const fmtRow = (cells) => cells.map((c, i) => (i === 1 || i === 3 ? c.padStart(widths[i]) : i === cells.length - 1 ? c : c.padEnd(widths[i]))).join(' ');
+          if (!g.opts['no-legend']) ctx.println(fmtRow(head));
+          for (const r of rows) ctx.println(fmtRow(r.cells));
+          if (!g.opts['no-legend']) ctx.println('\n' + rows.length + ' timers listed.\nPass --all to see loaded but inactive timers, too.');
+          return 0;
+        }
+        case 'list-units': case 'list-sockets': {
           let units = m.units.filter((u) => g.opts.a || g.opts.failed ? true : u.active !== 'inactive' || u.sub === 'exited');
-          if (g.opts.failed) units = units.filter((u) => u.active === 'failed');
+          const wantState = g.opts.state ? String(g.opts.state).split(',') : null;
+          if (wantState) units = m.units.filter((u) => wantState.indexOf(u.active) >= 0 || wantState.indexOf(u.sub) >= 0 || wantState.indexOf('loaded') >= 0);
+          else if (g.opts.failed) units = units.filter((u) => u.active === 'failed');
           else if (!g.opts.a) units = units.filter((u) => u.active === 'active' || u.active === 'failed');
           let list = units.map((u) => u);
           const type = g.opts.t || '';
-          if (!type && !g.opts.failed) list = list.concat(EXTRA_UNITS(m));
+          if (!type && !g.opts.failed && !wantState) list = list.concat(EXTRA_UNITS(m));
           if (type && type !== 'service') list = type === 'target' ? EXTRA_UNITS(m) : [];
           if (names.length) list = list.filter((u) => names.some((p) => U.globToRe(p.replace(/\.service$/, '') + '*').test(u.name)));
           list.sort((a, b) => (a.name < b.name ? -1 : 1));
@@ -2576,9 +2615,9 @@
           for (const n of names) {
             const u = K.sys.unit(m, n);
             if (!u) { ctx.err('Failed to get unit file state for ' + n + ': No such file or directory\n'); code = 1; continue; }
-            const s = u.enabled === 'static' ? 'static' : u.enabled ? 'enabled' : 'disabled';
+            const s = u.masked ? 'masked' : u.enabled === 'static' ? 'static' : u.enabled ? 'enabled' : 'disabled';
             if (!quiet) ctx.println(s);
-            if (s === 'disabled') code = 1;
+            if (s === 'disabled' || s === 'masked') code = 1;
           }
           return code;
         }
@@ -2591,6 +2630,8 @@
             ctx.err('Failed to ' + label + ' ' + units[0].name + ': Interactive authentication required.\nSee system logs and \'systemctl status ' + units[0].name + "' for details.\n");
             return 1;
           }
+          const maskedUnit = verb !== 'stop' && units.find((u) => u.masked);
+          if (maskedUnit) { ctx.err('Failed to ' + label + ' ' + maskedUnit.name + ': Unit ' + maskedUnit.name + ' is masked.\n'); return 1; }
           let code = 0;
           for (const u of units) {
             if (verb === 'reload' && (u.active !== 'active' || NO_RELOAD.test(u.name))) {
@@ -2643,12 +2684,13 @@
             if (!u) { ctx.err('No files found for ' + n + '.\n'); code = 1; continue; }
             const lines = ['# ' + UNIT_DIR + u.name, '[Unit]', 'Description=' + u.desc].concat(u.docs.length ? ['Documentation=' + u.docs.join(' ')] : [], ['', '[Service]', 'Type=' + u.type]);
             if (u.pre) lines.push('ExecStartPre=' + u.pre);
-            if (u.exec.length) lines.push('ExecStart=' + u.exec[0].cmd);
+            if (u.exec.length) lines.push('ExecStart=' + u.exec[0].cmd.replace(/^\w[\w-]*: (?=\/)/, '').replace(/ \[listener\].*$/, '').replace(/^(\/usr\/sbin\/sshd -D)$/, '$1 $SSHD_OPTS'));
             lines.push('', '[Install]', 'WantedBy=multi-user.target');
             ctx.println(lines.join('\n'));
           }
           return code;
         }
+        case 'is-system-running': if (!quiet) ctx.println('running'); return 0;
         case 'get-default': ctx.println(m.profile === 'kali' ? 'graphical.target' : 'multi-user.target'); return 0;
         case 'show': {
           const u = names.length ? K.sys.unit(m, names[0]) : null;
@@ -2659,7 +2701,19 @@
           for (const [k, v] of props) if (!want || want.indexOf(k) >= 0) ctx.println(g.opts.value ? v : k + '=' + v);
           return 0;
         }
-        case 'mask': case 'unmask': case 'kill': case 'isolate': case 'poweroff': case 'reboot': case 'halt': case 'suspend':
+        case 'mask': case 'unmask': {
+          if (!names.length) { ctx.err('Too few arguments.\n'); return 1; }
+          if (!need('Failed to ' + verb + ' unit')) return 1;
+          for (const u of resolveUnits(ctx, names, verb).units) {
+            const link = '/etc/systemd/system/' + u.name;
+            if (verb === 'mask' && !u.masked) { u.masked = true; ctx.println("Created symlink '" + link + "' → '/dev/null'."); }
+            else if (verb === 'unmask' && u.masked) { u.masked = false; ctx.println("Removed '" + link + "'."); }
+          }
+          const bad = resolveUnits(ctx, names, verb).missing;
+          if (bad.length) { ctx.err('Failed to ' + verb + ' unit: Unit file ' + bad[0] + ' does not exist.\n'); return 1; }
+          return 0;
+        }
+        case 'kill': case 'isolate': case 'poweroff': case 'reboot': case 'halt': case 'suspend':
           return need(verb === 'reboot' || verb === 'poweroff' || verb === 'halt' || verb === 'suspend' ? 'Failed to ' + verb + ' system via logind' : 'Failed to ' + verb + ' unit') ? 0 : 1;
         default:
           ctx.err("Unknown command verb '" + verb + "'.\n");
