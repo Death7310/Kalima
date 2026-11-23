@@ -7,7 +7,7 @@
  *
  * Replay note: a background capture needs a moment to start before the traffic
  * it should see is generated, so every solution that generates traffic starts
- * with `sleep 1;`. Background captures use -c with a count the following
+ * with `sleep 1;` (the replay adds a short loop, see SETTLE). Background captures use -c with a count the following
  * commands produce, so `wait` returns by itself. `sudo -v` comes first because
  * a background job cannot ask for a password.
  */
@@ -19,6 +19,10 @@
   const HOME = '/home/kali';
   const PRACTICE = HOME + '/practice/capture';
   const PW = ['kali'];
+  // Replay only: the test terminal's clock is virtual, so `sleep 1` returns at once and the
+  // background capture may not be listening yet when the traffic is generated. A loop of 200
+  // iterations makes the shell yield to the event loop, which lets the capture start first.
+  const SETTLE = 'n=0; while [ $n -lt 200 ]; do n=$((n+1)); done; ';
 
   /* ------------------------------------------------------------------ first */
   const first = {
@@ -103,11 +107,11 @@
           'sudo tcpdump -n -c 5 -i eth0',
           '```',
           '',
-          'Compare with the last capture. Addresses such as `10.10.10.40` replace the host names. The port still shows as a service name; `-nn` would show it as a number too.'
+          'Compare with the last capture. Addresses such as `10.10.10.40` replace the host names. The port still shows as a service name; `-nn` would show it as a number too. A name can still appear inside the detail of a DNS query, because that is data carried in the packet, not a lookup by tcpdump.'
         ),
         hint: 'Add `-n` to the command you ran before.',
         solution: 'sudo tcpdump -n -c 5 -i eth0',
-        check: { all: [{ cmd: 'tcpdump', args: ['-n'], user: 'root' }, { out: /5 packets captured/ }, { not: { out: /halcyon\.lab/ } }] },
+        check: { all: [{ cmd: 'tcpdump', args: ['-n'], user: 'root' }, { out: /5 packets captured/ }, { not: { out: /IP [a-z]/ } }] },
       },
       {
         id: 'count',
@@ -216,6 +220,7 @@
         ),
         hint: 'Use `ping -c 2 web01`. A `sleep 1;` in front is optional but safe.',
         solution: 'sleep 1; ping -c 2 web01',
+        testSolution: SETTLE + 'sleep 1; ping -c 2 web01',
         check: { cmd: 'ping', args: ['-c'], out: /2 received/ },
       },
       {
@@ -273,6 +278,7 @@
         ),
         hint: 'Use `curl -s http://web01/ > /dev/null`.',
         solution: 'sleep 1; curl -s http://web01/ > /dev/null',
+        testSolution: SETTLE + 'sleep 1; curl -s http://web01/ > /dev/null',
         check: { cmd: 'curl', argsRe: /web01/ },
       },
       {
@@ -372,6 +378,7 @@
         ),
         hint: 'Use `curl -s -u student:student http://web01/ > /dev/null`.',
         solution: 'sleep 1; curl -s -u student:student http://web01/ > /dev/null',
+        testSolution: SETTLE + 'sleep 1; curl -s -u student:student http://web01/ > /dev/null',
         check: { cmd: 'curl', args: ['-u'], argsRe: /web01/ },
       },
       {
@@ -427,6 +434,7 @@
         ),
         hint: 'Same command as before, with `https://` and `-k` added.',
         solution: 'sleep 1; curl -sk -u student:student https://web01/ > /dev/null',
+        testSolution: SETTLE + 'sleep 1; curl -sk -u student:student https://web01/ > /dev/null',
         check: { cmd: 'curl', args: ['-u'], argsRe: /https:\/\/web01/ },
       },
       {
@@ -519,6 +527,7 @@
         ),
         hint: 'Use `curl -s http://web01/ > /dev/null`.',
         solution: 'sleep 1; curl -s http://web01/ > /dev/null',
+        testSolution: SETTLE + 'sleep 1; curl -s http://web01/ > /dev/null',
         check: { cmd: 'curl', argsRe: /web01/ },
       },
       {
