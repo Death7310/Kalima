@@ -235,15 +235,15 @@ Engagement `HF-LAB-2026-11` for the fictional *Halcyon Freight Ltd.* Scope:
 
 | Host | IP | Notes |
 | --- | --- | --- |
-| gw | 10.10.10.1 | router; 80/443 open, others filtered |
-| web01 (www, intranet) | 10.10.10.10 | nginx 80/443, ssh; login `student`/`student` |
-| files01 | 10.10.10.20 | ftp, ssh, rpcbind, Samba, nfs; login `student` |
+| gw | 10.10.10.1 | router (OpenWrt); 80/443 open, 53/tcp and 22 filtered, other ports closed |
+| web01 (www, intranet) | 10.10.10.10 | ssh, nginx 80/443; login `student`/`student` |
+| files01 | 10.10.10.20 | ftp, ssh, rpcbind, Samba (139/445), nfs; login `student` |
 | db01 | 10.10.10.30 | ssh, MariaDB 3306; login `student` |
-| mail01 (mail) | 10.10.10.40 | smtp, pop3, imap, submission, imaps |
-| dc01 | 10.10.10.50 | Windows Server 2022, drops ICMP, unknown ports filtered |
-| ns1 | 10.10.10.53 | BIND; authoritative for `halcyon.lab`; allows AXFR from the lab |
-| printer | 10.10.10.60 | JetDirect, http, ipp, snmp/udp |
-| dev01 | 10.10.10.70 | ssh, 3000 (Express), 8080 (Jetty), 5432 filtered; login `student` |
+| mail01 (mail) | 10.10.10.40 | ssh, smtp, pop3, imap, submission, imaps; no shell login |
+| dc01 | 10.10.10.50 | Windows Server 2022 (DNS, Kerberos, RPC, LDAP/LDAPS, SMB, RDP, WinRM), drops ICMP, other ports filtered |
+| ns1 | 10.10.10.53 | ssh, BIND (53 tcp/udp); authoritative for `halcyon.lab`; allows AXFR from the lab; no shell login |
+| printer | 10.10.10.60 | http, https, lpd 515, ipp 631, JetDirect 9100, snmp/udp |
+| dev01 | 10.10.10.70 | ssh, 3000 (Express), 8080 (Jetty), 5432 filtered, other ports closed; login `student` |
 | cam01 | 10.10.10.80 | telnet, http (401), rtsp; 4 % packet loss |
 | backup01 | 10.10.10.90 | drops ICMP, everything filtered except rsync 873 |
 
