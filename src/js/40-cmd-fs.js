@@ -1783,16 +1783,18 @@
       if (!ctx.isTTY || !ctx.term || !ctx.term.editor) { ctx.eprintln(def.notTerminalOut); return 1; }
       const file = g.rest.find((a) => !/^\+\d*$/.test(a)) || null;
       let content = '';
+      let isNew = file == null;
       if (file != null) {
         try {
           if (ctx.fs.isDir(file)) { ctx.eprintln(def.dirMsg(file)); return 1; }
           content = ctx.fs.read(file);
         } catch (e) {
           if (!isFsError(e)) throw e;
-          if (e.code !== 'ENOENT') { ctx.eprintln(def.readError(file, e)); content = ''; }
+          if (e.code === 'ENOENT') isNew = true;
+          else { ctx.eprintln(def.readError(file, e)); content = ''; }
         }
       }
-      const res = await ctx.term.editor({ path: file == null ? null : ctx.fs.abs(file), content, flavor: def.flavor });
+      const res = await ctx.term.editor({ path: file == null ? null : file, content, flavor: def.flavor, isNew });
       if (res && res.saved && file != null) {
         try { ctx.fs.write(file, res.content); } catch (e) {
           if (!isFsError(e)) throw e;

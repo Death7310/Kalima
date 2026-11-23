@@ -421,7 +421,7 @@ test('realpath and readlink', async () => {
   const r = await sh('readlink real');
   assert.equal(r.out, '');
   assert.equal(r.code, 1);
-  assert.equal(await out('readlink -n lnk | od -c | head -1'), (await out('printf lnk | od -c | head -1')));
+  assert.equal(await out('readlink -n lnk | od -c | head -1'), (await out('printf real | od -c | head -1')));
 });
 
 test('mktemp creates files and directories', async () => {
@@ -537,10 +537,13 @@ test('nano, vim and vi call the terminal editor and write the result back', asyn
   let call = null;
   sim.term.editor = async (o) => { call = o; return { saved: true, content: 'new text\n' }; };
   await sim.type('nano /tmp/ed');
-  assert.deepEqual(call, { path: '/tmp/ed', content: 'old\n', flavor: 'nano' });
+  assert.deepEqual(call, { path: '/tmp/ed', content: 'old\n', flavor: 'nano', isNew: false });
   assert.equal(await out('cat /tmp/ed'), 'new text\n');
   await sim.type('vim /tmp/fresh');
-  assert.deepEqual(call, { path: '/tmp/fresh', content: '', flavor: 'vim' });
+  assert.deepEqual(call, { path: '/tmp/fresh', content: '', flavor: 'vim', isNew: true });
+  await sh('cd /tmp; : > empty');
+  await sim.type('cd /tmp; nano empty');
+  assert.deepEqual(call, { path: 'empty', content: '', flavor: 'nano', isNew: false }, 'path as typed; an existing empty file is not new');
   assert.equal(await out('cat /tmp/fresh'), 'new text\n');
   sim.term.editor = async (o) => { call = o; return { saved: false, content: 'ignored' }; };
   await sim.type('vi /tmp/ed');
