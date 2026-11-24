@@ -493,3 +493,13 @@ test('net: a secondary address of the machine itself answers locally', async () 
   const rt = sim.K.net.route(sim.machine, '10.10.10.99');
   assert.equal(rt.ok && rt.self, true);
 });
+
+test('shell review: sudo with no command prints usage, -n never prompts', async () => {
+  const sim = await kernelSim();
+  let r = await sim.run('sudo');
+  assert.match(r.err, /^usage: sudo -h \| -K \| -k \| -V\n/); assert.equal(r.code, 1);
+  r = await sim.run('sudo -n true');
+  assert.equal(r.err, 'sudo: a password is required\n'); assert.equal(r.code, 1);
+  sim.machine.sudoStamp.kali = sim.K.clock.now();
+  assert.equal((await sim.run('sudo -n id -u')).out, '0\n');
+});

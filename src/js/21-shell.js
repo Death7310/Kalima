@@ -1094,7 +1094,7 @@
         for (const [k, v, ex] of saved) { if (v == null) this.unsetVar(k); else { this.vars.set(k, v); if (!ex) this.exported.delete(k); } }
       }
       this.status = st;
-      this.rootShell._trace.push({ argv, code: st, user: this.user.name, host: this.machine.hostname });
+      if (!io.bgJob) this.rootShell._trace.push({ argv, code: st, user: this.user.name, host: this.machine.hostname });
       return st;
     }
 
@@ -1329,7 +1329,7 @@
         if (argv.length) this.rootShell._trace.push({ argv, code: 0, user: this.user.name, host: this.machine.hostname, background: true });
       }
       const job = { id, pid: proc.pid, text, sig, done: false, code: 0, reported: false };
-      const jio = Object.assign({}, io, { sig, stdin: io.stdin == null ? '' : io.stdin });
+      const jio = Object.assign({}, io, { sig, bgJob: true, stdin: io.stdin == null ? '' : io.stdin });
       const sub = this.fork();
       job.promise = (async () => {
         try { job.code = await sub.execNode(node, jio); }
@@ -2380,6 +2380,11 @@
       if (o.k && !g.rest.length) { delete m.sudoStamp[sh.user.name]; return 0; }
       const target = o.u || 'root';
       if (!m.userByName(target)) { ctx.err('sudo: unknown user ' + target + '\nsudo: error initializing audit plugin sudoers_audit\n'); return 1; }
+      if (!g.rest.length && !o.i && !o.s && !o.l && !o.v && !o.k) { ctx.err('usage: sudo -h | -K | -k | -V\nusage: sudo -v [-ABkNnS] [-g group] [-h host] [-p prompt] [-u user]\nusage: sudo -l [-ABkNnS] [-g group] [-h host] [-p prompt] [-U user] [-u user] [command [arg ...]]\nusage: sudo [-ABbEHkNnPS] [-C num] [-D directory] [-g group] [-h host] [-p prompt] [-R directory] [-T timeout] [-u user] [VAR=value] [-i | -s] [command [arg ...]]\n'); return 1; }
+      if (o.n && sh.user.uid !== 0) {
+        const stamp = m.sudoStamp[sh.user.name];
+        if (!(stamp != null && K.clock.now() - stamp < SUDO_TIMEOUT && m.canSudo(sh.user.name))) { ctx.err('sudo: a password is required\n'); return 1; }
+      }
       if (!(await sudoAuth(ctx))) return 1;
       if (o.v) return 0;
       if (o.l) {
