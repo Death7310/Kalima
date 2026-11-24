@@ -409,6 +409,16 @@
       const flushLit = () => { if (lit) { out.push({ s: lit, lit: true }); lit = ''; } };
       for (let i = 0; i < text.length; i++) {
         const ch = text[i];
+        if ((ch === '`' || ch === '$') && text[i - 1] === '\u0000') { lit += ch; continue; }
+        if (ch === '`') {
+          let j = i + 1; while (j < text.length && text[j] !== '`') j += text[j] === '\\' ? 2 : 1;
+          if (j < text.length) {
+            flushLit();
+            const res = await this.captureSource(text.slice(i + 1, j).replace(/\\([`$\\])/g, '$1'), io);
+            out.push({ s: res.replace(/\n+$/, ''), split: true });
+            i = j; continue;
+          }
+        }
         if (ch !== '$') { lit += ch; continue; }
         const end = dollarEnd(text, i);
         const tok = text.slice(i, end);
@@ -480,7 +490,7 @@
         if (op === '-') return unset ? { s: await sub(arg) } : res(v);
         if (op === '=') { if (unset) { v = await sub(arg); this.setVar(name, v); } return { s: v }; }
         if (op === '+') return unset ? { s: '' } : { s: await sub(arg) };
-        if (op === '?') { if (unset) throw new ShellError(this.msgPrefix() + name + ': ' + ((await sub(arg)) || 'parameter null or not set')); return { s: v }; }
+        if (op === '?') { if (unset) throw Object.assign(new ShellError(this.msgPrefix() + name + ': ' + ((await sub(arg)) || 'parameter null or not set')), { fatal: true }); return { s: v }; }
       }
       v = v == null ? '' : v;
       // array slice ${a[@]:off:len}

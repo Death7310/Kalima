@@ -503,3 +503,15 @@ test('shell review: sudo with no command prints usage, -n never prompts', async 
   sim.machine.sudoStamp.kali = sim.K.clock.now();
   assert.equal((await sim.run('sudo -n id -u')).out, '0\n');
 });
+
+test('shell review: arithmetic assignment operators, heredoc backticks, fatal ${x:?}', async () => {
+  const sim = await kernelSim();
+  const out = async (l) => (await sim.run(l)).out;
+  assert.equal(await out('x=10; ((x-=3)); ((x*=2)); echo $x $((x/=4)) $((x%=2)) $((x<<=3)) $((++x)) $((--x)) $x'), '14 3 1 8 9 8 8\n');
+  assert.equal(await out('echo $((4--1)) $((3-1)) $((2*-3)) $((a=5, a*2))'), '5 2 -6 10\n');
+  assert.equal(await out('until [ $((i+=1)) -ge 3 ]; do echo i$i; done'), 'i1\ni2\n');
+  assert.equal(await out('cat <<EOF\nx `echo hi` $(echo sub) \\`e\\` \\$HOME\nEOF'), 'x hi sub `e` $HOME\n');
+  sim.shell.fs.write('/tmp/fa.sh', 'echo "${nope:?}"\necho after\n');
+  const r = await sim.run('bash /tmp/fa.sh');
+  assert.equal(r.out, ''); assert.equal(r.err, '/tmp/fa.sh: line 1: nope: parameter null or not set\n'); assert.equal(r.code, 1);
+});

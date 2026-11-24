@@ -592,13 +592,14 @@
   /* -------------------------------------------------------------- arithmetic */
   function arith(expr, getVar, setVar) {
     const toks = [];
-    const re = /\s*(0[xX][0-9a-fA-F]+|\d+#[0-9a-zA-Z@_]+|\d+|[A-Za-z_][A-Za-z0-9_]*|\*\*|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*\/%()<>!~&|^?:=,])/y;
+    const re = /\s*(0[xX][0-9a-fA-F]+|\d+#[0-9a-zA-Z@_]+|\d+|[A-Za-z_][A-Za-z0-9_]*|<<=|>>=|\*=|\/=|%=|\+=|-=|&=|\|=|\^=|\*\*|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*\/%()<>!~&|^?:=,])/y;
     let m; re.lastIndex = 0;
     let pos = 0;
     while (pos < expr.length) {
       re.lastIndex = pos;
       m = re.exec(expr);
       if (!m) { if (/^\s*$/.test(expr.slice(pos))) break; throw new Error('bad math expression: `' + expr.trim() + '\''); }
+      if ((m[1] === '++' || m[1] === '--') && !(/^[A-Za-z_]/.test(toks[toks.length - 1] || '') || /^\s*[A-Za-z_]/.test(expr.slice(re.lastIndex)))) { toks.push(m[1][0], m[1][0]); pos = re.lastIndex; continue; }
       toks.push(m[1]); pos = re.lastIndex;
     }
     let p = 0;
@@ -613,6 +614,7 @@
     function primary() {
       const t = toks[p++];
       if (t === undefined) throw new Error('bad math expression: operand expected at end of string');
+      if ((t === '++' || t === '--') && /^[A-Za-z_]/.test(toks[p] || '')) { const n = toks[p++]; const v = num(n) + (t === '++' ? 1 : -1); if (setVar) setVar(n, String(v)); return v; }
       if (t === '(') { const v = ternary(); if (!eat(')')) throw new Error("bad math expression: ')' expected"); return v; }
       if (t === '-') return -unary();
       if (t === '+') return +unary();
@@ -627,6 +629,18 @@
       if (/^[A-Za-z_]/.test(t)) {
         if (peek() === '++') { p++; const v = num(t); if (setVar) setVar(t, String(v + 1)); return v; }
         if (peek() === '--') { p++; const v = num(t); if (setVar) setVar(t, String(v - 1)); return v; }
+        const cop = peek();
+        if (cop && /^(<<|>>|[-+*\/%&|^])=$/.test(cop)) {
+          p++; const r = ternary(); const l = num(t); const o = cop.slice(0, -1); let v;
+          switch (o) {
+            case '+': v = l + r; break; case '-': v = l - r; break; case '*': v = l * r; break;
+            case '/': if (r === 0) throw new Error('division by zero'); v = Math.trunc(l / r); break;
+            case '%': if (r === 0) throw new Error('division by zero'); v = l % r; break;
+            case '<<': v = l << r; break; case '>>': v = l >> r; break;
+            case '&': v = l & r; break; case '|': v = l | r; break; default: v = l ^ r;
+          }
+          if (setVar) setVar(t, String(v)); return v;
+        }
         if (peek() === '=' ) { p++; const v = ternary(); if (setVar) setVar(t, String(v)); return v; }
         return num(t);
       }
