@@ -472,3 +472,17 @@ test('shell review: continuation prompts in the repl (here-documents, quotes, op
   assert.match(text, /pipe> k-upper\nP\n/);
   assert.equal(shell.fs.read('/tmp/hd.txt'), 'one $HOME\ntwo\n');
 });
+
+test('shell review: zsh scripts fail on unmatched globs, Kali interactive zsh and bash do not', async () => {
+  const sim = await kernelSim();
+  const z = async (src) => { sim.shell.fs.write('/tmp/ng.zsh', src); return sim.run('zsh /tmp/ng.zsh'); };
+  let r = await z('echo *.nomatch\necho after\n');
+  assert.equal(r.err, '/tmp/ng.zsh:1: no matches found: *.nomatch\n'); assert.equal(r.out, 'after\n');
+  r = await z('for f in *.zz; do echo $f; done\n');
+  assert.equal(r.err, '/tmp/ng.zsh:1: no matches found: *.zz\n');
+  assert.equal((await z('echo "*.x" a\\*\nX="*.zz"; echo $X\n[[ abc == a* ]] && echo yes\n')).out, '*.x a*\n*.zz\nyes\n');
+  assert.equal((await sim.run('echo *.nomatch')).out, '*.nomatch\n', 'Kali .zshrc sets nonomatch');
+  assert.equal((await sim.run('bash -c "echo *.zz"')).out, '*.zz\n');
+  // [[ never globs its operands
+  assert.equal((await sim.run('cd /etc; [[ passwd == pass* ]] && echo yes')).out, 'yes\n');
+});

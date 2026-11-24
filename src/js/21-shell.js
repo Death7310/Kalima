@@ -638,6 +638,8 @@
             const matches = this.glob(f);
             if (matches.length) { results.push.apply(results, matches); continue; }
             if (this.opts.nullglob) continue;
+            // zsh (nomatch is on by default) refuses to run a command with a pattern that matches nothing
+            if (this.flavor === 'zsh' && !this.interactive && !o.noNomatch && text !== '[' && text !== '[[' && !/^[A-Za-z_]\w*=/.test(text)) throw new ShellError(this.msgPrefix() + 'no matches found: ' + text);
           }
           results.push(text);
         }
@@ -772,7 +774,14 @@
           let st = this.status;
           for (const it of node.items) {
             if (it.bg) st = this.startJob(it.node, io);
-            else st = await this.execNode(it.node, io);
+            else {
+              try { st = await this.execNode(it.node, io); }
+              catch (e) {
+                if (!(e instanceof ShellError)) throw e;
+                io.err(e.message + '\n'); st = 1;
+                if (e.fatal && !this.interactive) throw new K.ExitSignal(1);
+              }
+            }
             this.status = st;
             if (st !== 0 && !this.noErrexit && !it.bg) {
               const et = this.traps.get('ERR');
@@ -1043,7 +1052,8 @@
       // expand command words
       let argv = [];
       try {
-        for (const w of node.words) argv.push.apply(argv, await this.expandWord(w, io));
+        const dbl = node.words.length > 0 && node.words[0].raw === '[[' && !node.words[0].quoted;
+        for (const w of node.words) argv.push.apply(argv, await this.expandWord(w, io, dbl ? { noGlob: true } : undefined));
       } catch (e) {
         if (e instanceof ShellError) { io.err(e.message + '\n'); this.status = 1; if (e.fatal && !this.interactive) throw new K.ExitSignal(1); return 1; }
         throw e;
