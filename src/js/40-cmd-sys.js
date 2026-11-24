@@ -1433,7 +1433,9 @@
     };
     const longValued = { pid: valued.p, ppid: (v) => q.ppids.push(...pidList(v)), user: valued.u, User: valued.u, format: valued.o, sort: valued.k, tty: valued.t, cols: () => {}, columns: () => {}, width: () => {}, lines: () => {}, rows: () => {} };
     for (let i = 0; i < args.length; i++) {
-      const a = args[i];
+      let a = args[i];
+      // "ps -aux" and "ps -ax": x is no SysV option, so procps reads the word as BSD syntax
+      if (/^-[axuwfjhrelTS]*x[axuwfjhrelTS]*$/.test(a)) a = a.slice(1);
       if (a.startsWith('--')) {
         const eq = a.indexOf('='); const name = eq < 0 ? a.slice(2) : a.slice(2, eq);
         if (name === 'help') { q.help = (eq < 0 ? args[i + 1] : a.slice(eq + 1)) || ''; return q; }
@@ -3073,10 +3075,17 @@
     complete(info) { return commandsOf(info.ctx.machine).map((d) => d.name).filter((n) => n.indexOf(info.cur) === 0); },
   });
 
-  function whatisRun(ctx, names) {
+  function whatisRun(ctx, names, o) {
     let code = 0;
+    o = o || {};
     for (const n of names) {
-      const hits = allPages(ctx.machine).filter((d) => d.name.toLowerCase() === n.toLowerCase()).sort((a, b) => a.section - b.section);
+      let test = (d) => d.name.toLowerCase() === n.toLowerCase();
+      if (o.regex || o.wildcard) {
+        let re;
+        try { re = new RegExp(o.wildcard ? '^' + n.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$' : n, 'i'); } catch (e) { ctx.err('whatis: invalid regular expression\n'); return 2; }
+        test = (d) => re.test(d.name);
+      }
+      const hits = allPages(ctx.machine).filter(test).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.section - b.section));
       if (!hits.length) { ctx.err(NOTHING(n)); code = 16; } else ctx.println(hits.map(whatisLine).join('\n'));
     }
     return code;
@@ -3091,7 +3100,7 @@
       if (g.opts.V || g.opts.version) { ctx.out('whatis 2.13.1\n'); return 0; }
       if (g.opts['?'] || g.opts.help || g.opts.usage) { ctx.out('Usage: whatis [-dlv?V] [-r|-w] [-s LIST] [-m SYSTEM[,...]] [-M PATH] [-L LOCALE]\n            [-C FILE] [--debug] [--verbose] [--regex] [--wildcard] [--long]\n            [--sections=LIST] [--systems=SYSTEM[,...]] [--manpath=PATH]\n            [--locale=LOCALE] [--config-file=FILE] [--help] [--usage] [--version]\n            KEYWORD...\n'); return 0; }
       if (!g.rest.length) { ctx.err('whatis what?\n'); return 1; }
-      return whatisRun(ctx, g.rest);
+      return whatisRun(ctx, g.rest, { regex: !!(g.opts.r || g.opts.regex), wildcard: !!(g.opts.w || g.opts.wildcard) });
     },
   });
 

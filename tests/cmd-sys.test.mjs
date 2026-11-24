@@ -1088,3 +1088,23 @@ test('man: not-installed catalogue tools have no page, long NAME lines wrap', as
   const page = await sim.out('man netstat');
   assert.ok(page.split('\n').every((l) => l.length <= 80), 'no line wider than the page');
 });
+
+test('ps: -aux and -ax fall back to BSD syntax like procps does', async () => {
+  const sim = await sys();
+  const a = await sim.run('ps -aux'); const b = await sim.run('ps aux');
+  assert.equal(a.code, 0);
+  assert.match(a.out, /^USER +PID +%CPU +%MEM +VSZ +RSS TTY +STAT START +TIME COMMAND\n/);
+  assert.equal(a.out.split('\n').length, b.out.split('\n').length);
+  assert.match(await sim.out('ps -ax | head -1'), /^ +PID TTY +STAT +TIME COMMAND\n/);
+});
+
+test('whatis: -w wildcards and -r regular expressions', async () => {
+  const sim = await sys();
+  const w = await sim.out('whatis -w "ls*"');
+  assert.match(w, /^ls \(1\) +- list directory contents\n/);
+  assert.match(w, /\nlsblk \(8\) /);
+  assert.match(await sim.out('whatis -r "^cal$"'), /^cal \(1\) +- display a calendar\n$/);
+  const bad = await sim.run('whatis -r "("');
+  assert.equal(bad.code, 2);
+  assert.equal((await sim.run('whatis -w "zzq*"')).code, 16);
+});
