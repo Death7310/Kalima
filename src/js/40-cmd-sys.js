@@ -2996,11 +2996,20 @@
     // Page text written hard-wrapped (about 70 columns) would otherwise show ragged breaks once the
     // renderer wraps at 78: join a long prose line with its same-indented continuation.
     const joined = [];
-    for (const l of text.split('\n')) {
+    // A page written with a shallower indent (a pasted --help text) is moved to the usual seven columns, block by block.
+    const src = text.split('\n');
+    for (let a = 0; a < src.length;) {
+      if (!src[a].trim() || /^[A-Z][A-Z ]+$/.test(src[a])) { a++; continue; }
+      let b = a; let min = 99;
+      while (b < src.length && src[b].trim() && !/^[A-Z][A-Z ]+$/.test(src[b])) { min = Math.min(min, /^ */.exec(src[b])[0].length); b++; }
+      if (min < 7) for (let k = a; k < b; k++) src[k] = ' '.repeat(7 - min) + src[k];
+      a = b;
+    }
+    for (const l of src) {
       const prev = joined[joined.length - 1];
       const ind = prev == null ? '' : /^ */.exec(prev)[0];
-      if (prev != null && ind.length >= 7 && l.startsWith(ind) && l.length > ind.length && l[ind.length] !== ' ' && /^[a-z(\[]/.test(l.slice(ind.length)) &&
-          prev.length >= 60 && prev.length < MAN_WIDTH && !/[:.]$/.test(prev) === true && !/^ *-/.test(prev)) joined[joined.length - 1] = prev + ' ' + l.slice(ind.length);
+      if (prev != null && ind.length >= 7 && l.startsWith(ind) && l.length > ind.length && l[ind.length] !== ' ' && /^[^A-Z\s-]/.test(l.slice(ind.length)) &&
+          prev.length >= 60 && !/[:.]$/.test(prev) && !/^ *-/.test(prev)) joined[joined.length - 1] = prev + ' ' + l.slice(ind.length);
       else joined.push(l);
     }
     for (const l of joined) {

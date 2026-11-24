@@ -1108,3 +1108,15 @@ test('whatis: -w wildcards and -r regular expressions', async () => {
   assert.equal(bad.code, 2);
   assert.equal((await sim.run('whatis -w "zzq*"')).code, 16);
 });
+
+test('man: hard-wrapped prose is reflowed and shallow indents are moved to the usual margin', async () => {
+  const sim = await sys();
+  const grep = await sim.out('man grep');
+  assert.match(grep, /\n       matches a pattern\. PATTERNS is one or more patterns separated by\n/);
+  const timeout = await sim.out('man timeout');
+  assert.match(timeout, /\n       -k, --kill-after=DURATION /);
+  for (const name of ['grep', 'tcpdump', 'timeout', 'ls', 'nmap']) {
+    const body = (await sim.out('man ' + name)).split('\n');
+    assert.ok(body.every((l) => l.length <= 78), name + ' fits the page');
+  }
+});
