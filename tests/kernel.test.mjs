@@ -563,3 +563,17 @@ test('shell review: leading-zero numbers are octal in bash and decimal in zsh, v
   assert.equal((await sim.run("bash -c 'echo $BASH_VERSION'")).out, '5.3.3(1)-release\n');
   assert.equal((await sim.run('echo $ZSH_VERSION')).out, '5.9\n');
 });
+
+test('shell review: printf -v, $(<file), wait status, ulimit', async () => {
+  const sim = await kernelSim();
+  const out = async (l) => (await sim.run(l)).out;
+  assert.equal(await out("printf -v v '%03d' 5; echo $v"), '005\n');
+  assert.equal(await out('echo $(< /etc/hostname) x$(</etc/hostname)'), 'kali xkali\n');
+  const r = await sim.run('x=$(< /nonexist); echo "[$x]"'); assert.equal(r.out, '[]\n'); assert.equal(r.err, 'zsh: no such file or directory: /nonexist\n');
+  sim.K.cmd.register({ name: 'k-hang3', run(ctx) { return new Promise((resolve) => ctx.io.sig.onAbort(() => resolve(143))); } });
+  sim.machine.installCommand(sim.K.cmd.get('k-hang3'));
+  assert.equal(await out('k-hang3 & kill $!; wait $!; echo $?'), '143\n');
+  assert.equal((await sim.run('wait 99999')).err, 'zsh: wait: pid 99999 is not a child of this shell\n');
+  assert.equal(await out('ulimit -n; ulimit -n 4096; ulimit -n'), '1024\n4096\n');
+  assert.equal((await out('ulimit -a')).split('\n')[0], 'core file size              (blocks, -c) 0');
+});

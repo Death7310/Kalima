@@ -434,7 +434,15 @@
           catch (e) { throw new ShellError(this.msgPrefix() + e.message); }
           out.push({ s: String(v) });
         } else if (tok.startsWith('$(')) {
-          const res = await this.captureSource(tok.slice(2, -1), io);
+          const inner = tok.slice(2, -1);
+          const rd = /^\s*<\s*([^\s<>|&;()]+)\s*$/.exec(inner);
+          if (rd) {
+            const fname = (await this.expandString(rd[1].replace(/^(['"])(.*)\1$/, '$2'), io)).map((x) => x.s).join('');
+            try { out.push({ s: this.fs.read(fname).replace(/\n+$/, ''), split: true }); }
+            catch (e) { io.err(this.msgPrefix() + (this.flavor === 'zsh' ? this.fsMsg(e) + ': ' + fname : fname + ': ' + e.message) + '\n'); this.lastSubst = 1; out.push({ s: '' }); }
+            continue;
+          }
+          const res = await this.captureSource(inner, io);
           out.push({ s: res.replace(/\n+$/, ''), split: true });
         } else if (tok.startsWith('${')) {
           out.push(await this.expandParam(tok.slice(2, -1), io));
@@ -1854,10 +1862,13 @@
       return 0;
     },
     printf(ctx) {
-      const a = ctx.args.slice();
+      const a = ctx.args.slice(); let vname = null;
+      if (a[0] === '-v') { a.shift(); vname = a.shift(); if (vname == null) { ctx.err(this.msgPrefix() + 'printf: -v: option requires an argument\nprintf: usage: printf [-v var] format [arguments]\n'); return 2; } }
       if (a[0] === '--') a.shift();
-      if (!a.length) { ctx.err('printf: not enough arguments\n'); return 1; }
-      ctx.out(formatPrintf(a[0], a.slice(1)));
+      if (!a.length) { ctx.err(this.flavor === 'zsh' ? 'printf: not enough arguments\n' : this.msgPrefix() + 'printf: usage: printf [-v var] format [arguments]\n'); return this.flavor === 'zsh' ? 1 : 2; }
+      const text = formatPrintf(a[0], a.slice(1));
+      if (vname != null) { this.setVar(vname, text); return 0; }
+      ctx.out(text);
       return 0;
     },
     export(ctx) {
@@ -1911,7 +1922,15 @@
       }
       return st;
     }, autoload() { return 0; }, compinit() { return 0; },
-    bindkey() { return 0; }, zstyle() { return 0; }, ulimit(ctx) { ctx.out('unlimited\n'); return 0; }, disown() { return 0; }, hash() { return 0; },
+    bindkey() { return 0; }, zstyle() { return 0; }, ulimit(ctx) {
+      const L = { c: ['core file size', '(blocks, -c)', '0'], d: ['data seg size', '(kbytes, -d)', 'unlimited'], e: ['scheduling priority', '(-e)', '0'], f: ['file size', '(blocks, -f)', 'unlimited'], i: ['pending signals', '(-i)', '15432'], l: ['max locked memory', '(kbytes, -l)', '498640'], m: ['max memory size', '(kbytes, -m)', 'unlimited'], n: ['open files', '(-n)', '1024'], p: ['pipe size', '(512 bytes, -p)', '8'], q: ['POSIX message queues', '(bytes, -q)', '819200'], r: ['real-time priority', '(-r)', '0'], s: ['stack size', '(kbytes, -s)', '8192'], t: ['cpu time', '(seconds, -t)', 'unlimited'], u: ['max user processes', '(-u)', '15432'], v: ['virtual memory', '(kbytes, -v)', 'unlimited'], x: ['file locks', '(-x)', 'unlimited'] };
+      const a = ctx.args.filter((x) => x !== '-S' && x !== '-H');
+      if (a[0] === '-a') { for (const k of Object.keys(L)) ctx.out(K.util.padEnd(L[k][0], 40 - L[k][1].length) + L[k][1] + ' ' + L[k][2] + '\n'); return 0; }
+      const m = /^-([a-z])$/.exec(a[0] || '-f');
+      if (!m || !L[m[1]]) { ctx.err(this.msgPrefix() + 'ulimit: bad option: ' + a[0] + '\n'); return 1; }
+      if (a.length > 1) { if (!/^(\d+|unlimited)$/.test(a[1])) { ctx.err(this.msgPrefix() + 'ulimit: ' + a[1] + ': invalid number\n'); return 1; } L[m[1]][2] = a[1]; this._ulimits = Object.assign(this._ulimits || {}, { [m[1]]: a[1] }); return 0; }
+      ctx.out(((this._ulimits || {})[m[1]] || L[m[1]][2]) + '\n'); return 0;
+    }, disown() { return 0; }, hash() { return 0; },
     local(ctx) {
       const sh = this;
       if (!sh.funcDepth) { ctx.err('local: can only be used in a function\n'); return 1; }
@@ -2292,7 +2311,22 @@
       sh.dirStack.shift();
       return BUILTINS.dirs.call(sh, ctx);
     },
-    async wait() { await Promise.all(this.jobs.map((j) => j.promise)); return 0; },
+    async wait(ctx) {
+      const root = this.rootShell; const all = this.jobs.concat(root === this ? [] : root.jobs);
+      if (!ctx.args.length) { await Promise.all(this.jobs.map((j) => j.promise)); return 0; }
+      let st = 0;
+      for (const a of ctx.args) {
+        let job;
+        if (a[0] === '%') { const f = this.findJob(a, 'wait'); if (f.err) { ctx.err(f.err); st = 127; continue; } job = f.job; }
+        else {
+          const pid = parseInt(a, 10);
+          job = all.find((j) => j.pid === pid);
+          if (!job) { ctx.err(this.msgPrefix() + (this.flavor === 'zsh' ? 'wait: pid ' + a + ' is not a child of this shell' : 'wait: pid ' + a + ' is not a child of this shell') + '\n'); st = 127; continue; }
+        }
+        await job.promise; st = job.code;
+      }
+      return st;
+    },
     kill(ctx) {
       const sh = this; const m = sh.machine; let st = 0; let sigName = 'TERM';
       const a = ctx.args.slice();
