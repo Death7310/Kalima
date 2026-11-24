@@ -2376,7 +2376,7 @@
     };
     try {
       if (cmdStr != null) {
-        child.scriptName = a[0] || flavor; child.positional = a.slice(1);
+        child.scriptName = a[0] || flavor; child.positional = a.slice(1); child.cmdString = true;
         if (noexec) return syntaxOnly(cmdStr);
         return await child.execSource(cmdStr, ctx.io);
       }

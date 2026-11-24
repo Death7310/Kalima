@@ -542,3 +542,15 @@ test('shell review: bash -n / -x / -e flags, bash on a directory, SHLVL, timeout
   assert.equal((await sim.run('timeout')).code, 125);
   assert.equal((await sim.run('timeout 5 nosuchcmd')).code, 127);
 });
+
+test('shell review: missing redirection target is an error, not a continuation; bash -c syntax errors say -c', async () => {
+  const sim = await kernelSim();
+  const { term, shell, K } = sim;
+  term.feed('cat /tmp/x >', 'echo ok', 'exit'); term.take();
+  await shell.repl();
+  const text = K.util.stripAnsi(term.take());
+  assert.match(text, /zsh: parse error near `\\n'\n/);
+  assert.match(text, /echo ok\nok\n/);
+  assert.equal((await sim.run('bash -c "ls | | x"')).err, "bash: -c: line 1: syntax error near unexpected token `|'\nbash: -c: line 1: `ls | | x'\n");
+  assert.equal((await sim.run('bash -c "cat >"')).err, "bash: -c: line 1: syntax error near unexpected token `newline'\nbash: -c: line 1: `cat >'\n");
+});

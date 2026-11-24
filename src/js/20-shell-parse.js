@@ -416,7 +416,8 @@
       if (r.dup != null) { out.dup = r.dup; return out; }
       if (r.heredoc) { out.heredoc = r.heredoc; return out; }
       const w = this.peek();
-      if (!w || w.type !== 'word') this.fail(w);
+      if (!w) throw new ParseError('parse error near `\\n\'', false, { tok: 'newline', pos: r.pos });
+      if (w.type !== 'word') this.fail(w);
       this.p++;
       out.word = w;
       return out;
