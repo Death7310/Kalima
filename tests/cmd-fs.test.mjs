@@ -854,3 +854,18 @@ test('ls -b/--si/--time-style=+FMT, tree -P/-I/-h/-Q/--prune, more +N and less +
   assert.equal(await out('more +3 n'), '3\n4\n5\n');
   assert.equal(await out('less +F n'), '1\n2\n3\n4\n5\n');
 });
+
+test('ln refuses to hard link files kali does not own, rm -r removes empty unreadable dirs, chgrp wording', async () => {
+  const { sh } = await setup();
+  await sh('mkdir /tmp/q7; cd /tmp/q7');
+  const r = await sh('cd /tmp/q7; ln /etc/hostname h');
+  assert.equal(r.err, "ln: failed to create hard link 'h' => '/etc/hostname': Operation not permitted\n"); assert.equal(r.code, 1);
+  const ok = await sh('cd /tmp/q7; touch mine; ln mine h2; echo $?');
+  assert.equal(ok.out, '0\n');
+  const rm = await sh('cd /tmp/q7; mkdir -p a/b; chmod 000 a/b; rm -r a; echo $?; ls a');
+  assert.equal(rm.out, '0\n'); assert.match(rm.err, /ls: cannot access 'a'/);
+  const c = await sh('cd /tmp/q7; chown :root mine');
+  assert.equal(c.err, "chown: changing group of 'mine': Operation not permitted\n");
+  const m = await sh('cd /tmp/q7; mkdir z; touch z/f; chmod -R 000 z');
+  assert.match(m.err, /chmod: cannot read directory 'z': Permission denied/);
+});

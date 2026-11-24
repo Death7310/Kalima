@@ -944,6 +944,7 @@
             let names;
             try { names = ctx.fs.readdir(path); } catch (e) {
               if (!isFsError(e)) throw e;
+              try { ctx.fs.rmdir(path); verbose(display, st); return true; } catch (e2) { /* not empty: report the original problem */ }
               ctx.eprintln('rm: cannot remove ' + q(display) + ': ' + e.message); status = 1; return false;
             }
             let clean = true;
@@ -988,6 +989,8 @@
   function hardLink(ctx, src, dst) {
     const a = ctx.vfs.walk(ctx.fs.abs(src), { cred: ctx.fs.cred, follow: false });
     if (a.node.t === 'd') throw Object.assign(new K.FsError('EPERM', src), { hardDir: true });
+    // fs.protected_hardlinks: only the owner, or someone with read and write access, may link a file
+    if (!ctx.isRoot && a.node.uid !== ctx.fs.cred.uid && !(ctx.vfs.access(a.node, ctx.fs.cred, 'r') && ctx.vfs.access(a.node, ctx.fs.cred, 'w'))) throw Object.assign(new K.FsError('EPERM', src), { protectedLink: src });
     const b = ctx.vfs.walk(ctx.fs.abs(dst), { cred: ctx.fs.cred, parent: true, follow: false });
     if (b.node) throw new K.FsError('EEXIST', dst);
     if (!ctx.vfs.access(b.parent, ctx.fs.cred, 'w') || !ctx.vfs.access(b.parent, ctx.fs.cred, 'x')) throw new K.FsError('EACCES', dst);
@@ -1034,6 +1037,7 @@
         } catch (e) {
           if (!isFsError(e)) throw e;
           if (e.hardDir) ctx.eprintln('ln: ' + qf(src) + ': hard link not allowed for directory');
+          else if (e.protectedLink) ctx.eprintln('ln: failed to create hard link ' + q(name) + ' => ' + q(src) + ': Operation not permitted');
           else ctx.eprintln('ln: failed to create ' + (o.s ? 'symbolic' : 'hard') + ' link ' + q(name) + ': ' + e.message);
           status = 1;
         }
@@ -1244,17 +1248,23 @@
   const rwxString = (m) => modeString({ mode: m, isDir: false, isLink: false, isDev: false }).slice(1);
 
   /** Visit a path and, with -R, everything below it (symbolic links below are not followed). */
-  async function visitTree(ctx, path, recursive, fn) {
+  async function visitTree(ctx, path, recursive, fn, post, shown) {
     ctx.checkAbort();
     const st = ctx.fs.lstat(path);
-    await fn(path, st);
+    if (!post) await fn(path, st);
     if (recursive && st.isDir) {
-      for (const n of ctx.fs.readdir(path)) await visitTree(ctx, joinPath(path, n), true, fn);
+      let names = null;
+      try { names = ctx.fs.readdir(path); } catch (e) {
+        if (!isFsError(e)) throw e;
+        ctx.eprintln(ctx.name + ': cannot read directory ' + q(shown || path) + ': ' + e.message); ctx._treeFailed = true;
+      }
+      for (const n of names || []) await visitTree(ctx, joinPath(path, n), true, fn, post, joinPath(shown || path, n));
     }
+    if (post) await fn(path, st);
   }
 
   /** Run `change(path, st)` over each operand (and tree with -R) printing GNU-style errors. */
-  async function eachTarget(ctx, files, recursive, verb, change) {
+  async function eachTarget(ctx, files, recursive, verb, change, post) {
     let status = 0;
     for (const f of files) {
       try {
@@ -1267,7 +1277,8 @@
             if (e.code === 'EPERM' || e.code === 'EACCES') { ctx.eprintln(ctx.name + ': ' + verb + ' ' + q(p === start ? f : p) + ': ' + (e.code === 'EPERM' ? 'Operation not permitted' : e.message)); status = 1; }
             else throw e;
           }
-        });
+        }, post, f);
+        if (ctx._treeFailed) { status = 1; ctx._treeFailed = false; }
       } catch (e) {
         if (!isFsError(e)) throw e;
         ctx.eprintln(ctx.name + ': cannot access ' + q(f) + ': ' + e.message); status = 1;
@@ -1341,7 +1352,7 @@
       if (uid == null && gid == null && !groupOnly) return 0;
     }
     const names = (u, gr) => (groupOnly ? group(ctx, gr) : gid != null && spec != null && /[:.]/.test(spec) ? owner(ctx, u) + ':' + group(ctx, gr) : owner(ctx, u));
-    return eachTarget(ctx, files, !!g.opts.R, groupOnly ? 'changing group of' : 'changing ownership of', (p, st, shown) => {
+    return eachTarget(ctx, files, !!g.opts.R, groupOnly || (uid == null && gid != null) ? 'changing group of' : 'changing ownership of', (p, st, shown) => {
       const was = names(st.uid, st.gid);
       const nu = uid == null ? st.uid : uid; const ng = gid == null ? st.gid : gid;
       const changed = nu !== st.uid || ng !== st.gid;
@@ -1350,7 +1361,7 @@
       const label = groupOnly ? 'group' : 'ownership';
       if (changed && (g.opts.v || g.opts.c)) ctx.println('changed ' + label + ' of ' + q(shown) + ' from ' + was + ' to ' + now);
       else if (!changed && g.opts.v) ctx.println(label + ' of ' + q(shown) + ' retained as ' + was);
-    });
+    }, true);
   }
 
   const chownSpec = { short: 'cfvRhH', long: ['changes', 'silent', 'quiet', 'verbose', 'recursive', 'reference=', 'dereference', 'no-dereference', 'preserve-root'], alias: { changes: 'c', silent: 'f', quiet: 'f', verbose: 'v', recursive: 'R', 'no-dereference': 'h' } };
