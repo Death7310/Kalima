@@ -2030,7 +2030,7 @@
       const args = ctx.args.map((a) => (/^-\d+$/.test(a) ? '-n' + a.slice(1) : a));
       const g = K.getopt(args, { short: 'adf:Fin:Rs:t:p:wxhV', long: ['hostlast', 'dns', 'file=', 'fulltimes', 'ip', 'limit=', 'nohostname', 'since=', 'until=', 'present=', 'fullnames', 'system', 'time-format=', 'help', 'version'],
         alias: { hostlast: 'a', dns: 'd', file: 'f', fulltimes: 'F', ip: 'i', limit: 'n', nohostname: 'R', fullnames: 'w', system: 'x', help: 'h', version: 'V' } });
-      if (g.err) { ctx.err('last: ' + g.err + '\n' + LAST_USAGE); return 1; }
+      if (g.err) { ctx.err('last: ' + g.err + "\nTry 'last --help' for more information.\n"); return 1; }
       if (g.opts.h) { ctx.out(LAST_USAGE); return 0; }
       if (g.opts.V) { ctx.out('last from util-linux 2.41\n'); return 0; }
       if (ctx.name === 'lastb' || g.opts.f) {
@@ -2329,7 +2329,7 @@
     man: 'DESCRIPTION\n       watch runs command repeatedly, displaying its output and errors (the first screenfull). This allows you to watch the program output change over time. By default, command is run every 2 seconds and watch will run until interrupted.\n\nOPTIONS\n       -d, --differences\n              Highlight the differences between successive updates.\n\n       -e, --errexit\n              Freeze updates on command error, and exit after a key press.\n\n       -g, --chgexit\n              Exit when the output of command changes.\n\n       -n, --interval seconds\n              Specify update interval. The command will not allow quicker than 0.1 second interval.\n\n       -t, --no-title\n              Turn off the header showing the interval, command, and current time at the top of the display.\n\n       q      Quit watch.\n\nEXAMPLES\n       watch -n 1 date\n              Show the clock, refreshed every second.\n       watch -d free -m\n              Watch memory use and highlight changes.',
     async run(ctx) {
       const g = ctx.getopt({ short: 'bcd::egq:n:prtwxhv', long: ['beep', 'color', 'differences=?', 'errexit', 'chgexit', 'equexit=', 'interval=', 'precise', 'no-rerun', 'no-title', 'no-linewrap', 'exec', 'help', 'version'],
-        alias: { interval: 'n', 'no-title': 't', errexit: 'e', chgexit: 'g', exec: 'x' }, stopAtNonOption: true });
+        alias: { interval: 'n', 'no-title': 't', errexit: 'e', chgexit: 'g', exec: 'x', help: 'h', version: 'v', beep: 'b', color: 'c', differences: 'd', precise: 'p' }, stopAtNonOption: true });
       if (g.err) { ctx.err('watch: ' + g.err + '\n' + WATCH_USAGE); return 1; }
       if (g.opts.h) { ctx.out(WATCH_USAGE); return 0; }
       if (g.opts.v) { ctx.out('watch from procps-ng 4.0.4\n'); return 0; }

@@ -1120,3 +1120,12 @@ test('man: hard-wrapped prose is reflowed and shallow indents are moved to the u
     assert.ok(body.every((l) => l.length <= 78), name + ' fits the page');
   }
 });
+
+test('watch --version and --help; last reports bad options with the short hint', async () => {
+  const sim = await sys();
+  assert.equal(await sim.out('watch --version'), 'watch from procps-ng 4.0.4\n');
+  assert.match(await sim.out('watch --help'), /^\nUsage:\n watch \[options\] command/);
+  const r = await sim.run('last -q');
+  assert.equal(r.err, "last: invalid option -- 'q'\nTry 'last --help' for more information.\n");
+  assert.equal(r.code, 1);
+});
