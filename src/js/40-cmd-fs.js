@@ -301,6 +301,7 @@
         const size = st.isDev ? ({ null: '1, 3', zero: '1, 5', random: '1, 8', tty: '5, 0' }[st.dev] || '1, 3') : o.human ? U.humanSize(st.size) : String(st.size);
         let name = cells[i].text;
         if (st.isLink) name += ' -> ' + st.target;
+        if (e.unknown) return { ino: '?', mode: '-?????????', nlink: '?', owner: '?', group: '?', size: '?', date: U.padStart('?', 12), name, blk: '?' };
         return {
           ino: String(st.ino), mode: modeString(st), nlink: String(st.nlink),
           owner: o.numeric ? String(st.uid) : owner(ctx, st.uid), group: o.numeric ? String(st.gid) : group(ctx, st.gid),
@@ -311,7 +312,7 @@
       const wi = w('ino'); const wl = w('nlink'); const wo = w('owner'); const wg = w('group'); const ws = w('size'); const wb = w('blk');
       let out = '';
       if (withTotal) {
-        const total = entries.reduce((a, e) => a + blocksOf(e.st), 0);
+        const total = entries.reduce((a, e) => a + (e.unknown ? 0 : blocksOf(e.st)), 0);
         out += 'total ' + (o.human ? U.humanSize(total * 1024) : total) + '\n';
       }
       for (const r of rows) {
@@ -387,7 +388,12 @@
       for (const n of names) {
         try { list.push(makeEntry(ctx, o, n, joinPath(e.full, n))); } catch (err) {
           if (!isFsError(err)) throw err;
-          ctx.err('ls: cannot access ' + q(joinPath(display, n)) + ': ' + err.message + '\n'); status = Math.max(status, top ? 2 : 1);
+          // a directory we may read but not search: real ls lists the names, and with -l shows a row of question marks
+          const stub = { name: n, full: joinPath(e.full, n), st: { isDir: false, isFile: false, isLink: false, size: 0, mtime: 0, mode: 0, ino: 0, nlink: 0 }, orphan: false, dirLike: false, unknown: true };
+          if (err.code !== 'EACCES' || o.long || o.blocks || o.color || o.classify || o.indicator || o.sortBy === 'time' || o.sortBy === 'size') {
+            ctx.err('ls: cannot access ' + q(joinPath(display, n)) + ': ' + err.message + '\n'); status = Math.max(status, 1);
+            if (err.code === 'EACCES') list.push(stub);
+          } else list.push(stub);
         }
       }
       sortEntries(list, o);
@@ -490,12 +496,13 @@
   /* ============================================================ head, tail */
 
   /** Rewrite obsolete "-NUM" arguments to "-n NUM" (but not the value of -n / -c itself). */
-  function expandNumericOption(args) {
+  function expandNumericOption(args, plus) {
     const out = [];
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
       if (a === '--') { out.push(...args.slice(i)); break; }
       if (/^-\d+$/.test(a)) out.push('-n', a.slice(1));
+      else if (plus && /^\+\d+$/.test(a)) out.push('-n', a);
       else { out.push(a); if (/^-[nc]$/.test(a) && i + 1 < args.length) out.push(args[++i]); }
     }
     return out;
@@ -510,11 +517,11 @@
   }
 
   /** Read operands for head/tail: returns [{name, text}|{name, error}] */
-  async function readOperand(ctx, f) {
+  async function readOperand(ctx, f, length) {
     if (f === '-') return { name: 'standard input', text: await stdinText(ctx) };
     try {
       if (ctx.fs.isDir(f)) return { name: f, dir: true };
-      return { name: f, text: ctx.fs.read(f) };
+      return { name: f, text: ctx.fs.read(f, length ? { length } : undefined) };
     } catch (e) {
       if (!isFsError(e)) throw e;
       return { name: f, error: e };
@@ -551,7 +558,7 @@
       const headers = g.opts.v || (files.length > 1 && !g.opts.q);
       let status = 0; let printed = false;
       for (const f of files) {
-        const r = await readOperand(ctx, f);
+        const r = await readOperand(ctx, f, byBytes && c.sign !== '-' ? Math.min(c.n, 1 << 24) : 0);
         if (r.error) { ctx.eprintln('head: cannot open ' + q(f) + ' for reading: ' + r.error.message); status = 1; continue; }
         if (headers) ctx.out((printed ? '\n' : '') + '==> ' + r.name + ' <==\n');
         printed = true;
@@ -582,7 +589,7 @@
     man: 'DESCRIPTION\n       Print the last 10 lines of each FILE to standard output. With more than one FILE, precede each with a header giving the file name.\n\nOPTIONS\n       -c, --bytes=[+]NUM\n              output the last NUM bytes; or use -c +NUM to output starting with byte NUM\n       -f, --follow\n              output appended data as the file grows\n       -F     same as --follow=name --retry\n       -n, --lines=[+]NUM\n              output the last NUM lines, instead of the last 10; or use -n +NUM to output starting with line NUM\n       -q, -v headers on or off\n\nEXAMPLES\n       tail -n 20 /var/log/auth.log\n              Show the last twenty authentication events.\n       tail -f /var/log/syslog\n              Follow the system log until Ctrl-C.',
     help: "  -c, --bytes=[+]NUM       output the last NUM bytes; or use -c +NUM to\n                             output starting with byte NUM of each file\n  -f, --follow[={name|descriptor}]\n                           output appended data as the file grows\n  -F                       same as --follow=name --retry\n  -n, --lines=[+]NUM       output the last NUM lines, instead of the last 10;\n                             or use -n +NUM to skip NUM-1 lines at the start\n  -q, --quiet, --silent    never output headers giving file names\n  -s, --sleep-interval=N   with -f, sleep for approximately N seconds\n  -v, --verbose            always output headers giving file names\n",
     authors: 'Paul Rubin, David MacKenzie, Ian Lance Taylor, and Jim Meyering',
-    spec: tailSpec, prep: expandNumericOption,
+    spec: tailSpec, prep: (a) => expandNumericOption(a, true),
     async main(ctx, g) {
       const byBytes = g.opts.c != null;
       const c = byBytes ? parseCount(ctx, g.opts.c, 'bytes') : parseCount(ctx, g.opts.n == null ? '10' : g.opts.n, 'lines');
@@ -723,8 +730,16 @@
     if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
     m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
     if (m) return startOfDay(now) + ((+m[1] * 60 + +m[2]) * 60 + +(m[3] || 0)) * 1000;
-    m = /^(\d{1,2}) (\w{3})\w* (\d{4})$/.exec(s) || null;
-    if (m && U.MONTHS.indexOf(m[2][0].toUpperCase() + m[2].slice(1).toLowerCase()) >= 0) return Date.UTC(+m[3], U.MONTHS.indexOf(m[2][0].toUpperCase() + m[2].slice(1).toLowerCase()), +m[1]);
+    m = /^(\d{4})\/(\d{1,2})\/(\d{1,2})(?: (\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
+    if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    const mon = (w) => { return w.length >= 3 ? U.MONTHS.findIndex((n) => n.toLowerCase() === w.slice(0, 3).toLowerCase()) : -1; };
+    const hms = '(?:\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?)?';
+    // "5 Jan 2021 [10:00]" and "Jan 5[,] 2021 [10:00]"
+    m = new RegExp('^(\\d{1,2})\\s+([A-Za-z]{3,9})\\.?\\s+(\\d{4})' + hms + '$').exec(s);
+    if (m && mon(m[2]) >= 0) return Date.UTC(+m[3], mon(m[2]), +m[1], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    m = new RegExp('^([A-Za-z]{3,9})\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})' + hms + '$').exec(s);
+    if (m && mon(m[1]) >= 0) return Date.UTC(+m[3], mon(m[1]), +m[2], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+    if (typeof K.util.parseDateString === 'function') { const v = K.util.parseDateString(s, now); if (v != null) return v; }
     return null;
   }
 
@@ -892,6 +907,7 @@
           if (!(force && e.code === 'ENOENT')) fail(display, e.message);
           return false;
         }
+        if (!st.isDir && !st.isLink && top && /\/$/.test(display)) { fail(display, 'Not a directory'); return false; }
         if (st.isDir) {
           if (!recursive && !o.d) { fail(display, 'Is a directory'); return false; }
           if (recursive) {

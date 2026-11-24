@@ -790,3 +790,28 @@ test('mktemp error names the template as given', async () => {
   const { sh } = await setup();
   assert.equal((await sh('mktemp /nonexist/XXXXXX')).err, "mktemp: failed to create file via template '/nonexist/XXXXXX': No such file or directory\n");
 });
+
+/* ------------------------------------------------ review regressions (round 2) */
+
+test('ls in a readable but unsearchable directory shows question marks like GNU ls', async () => {
+  const { sh, out } = await setup();
+  await sh('mkdir /tmp/q1; cd /tmp/q1; mkdir d; touch d/x; chmod 444 d');
+  const r = await sh('ls -l d');
+  assert.equal(r.out, 'total 0\n-????????? ? ? ? ?            ? x\n');
+  assert.match(r.err, /^ls: cannot access 'd\/x': Permission denied\n$/);
+  assert.equal(r.code, 1);
+  const p = await sh('ls d');
+  assert.equal(p.out, 'x\n'); assert.equal(p.err, ''); assert.equal(p.code, 0);
+});
+
+test('tail +N obsolete form, head -c on /dev/zero, touch -d with month names, rm file/', async () => {
+  const { sh, out } = await setup();
+  await sh('cd /tmp; seq 1 20 > q2');
+  assert.equal(await out('tail +19 q2'), '19\n20\n');
+  assert.equal((await sh('head -c 8 /dev/zero | wc -c')).out, '8\n');
+  await sh('touch -d "Jan 5 2021" q3; touch -d "5 January 2021 10:30" q4');
+  assert.match(await out('ls -l --full-time q3'), /2021-01-05 00:00:00/);
+  assert.match(await out('ls -l --full-time q4'), /2021-01-05 10:30:00/);
+  const r = await sh('rm q2/');
+  assert.equal(r.err, "rm: cannot remove 'q2/': Not a directory\n"); assert.equal(r.code, 1);
+});
