@@ -358,3 +358,117 @@ test('FsView: empty path is ENOENT, hard links count in nlink', async () => {
   assert.match(lines[1], /^-rw-r--r-- 2 /);
   assert.match(lines[2], /^-rw-r--r-- 1 /);
 });
+
+test('shell review: arrays, readonly, declare, zsh $array expansion', async () => {
+  const sim = await kernelSim();
+  const out = async (l) => (await sim.run(l)).out;
+  assert.equal(await out('a=(x y z); echo ${a[2]} ${#a[@]} $a; for i in $a; do echo "i$i"; done'), 'y 3 x y z\nix\niy\niz\n');
+  assert.equal(await out('a+=(w); echo "${a[@]}" "$a"'), 'x y z w x y z w\n');
+  assert.equal(await out('declare -A m; m[k]=v; m[j]=w; echo ${m[k]}${m[j]}'), 'vw\n');
+  let r = await sim.run('readonly R=1; R=2; echo $R');
+  assert.equal(r.err, 'zsh: read-only variable: R\n');
+  assert.equal(r.out, '1\n');
+  assert.equal((await sim.run("bash -c 'readonly Q=1; Q=2; echo ok'")).err, 'bash: line 1: Q: readonly variable\n');
+  assert.equal(await out('declare -p a'), 'typeset -a a=(x y z w)\n');
+  // top-level return/break do not escape capture()
+  assert.equal((await sim.run('return 3')).code, 3);
+  assert.equal((await sim.run('break')).code, 0);
+});
+
+test('shell review: scripts, set options, trap, let, getopts, read', async () => {
+  const sim = await kernelSim();
+  const b = async (src, ...args) => { sim.shell.fs.write('/tmp/rv.sh', src); return sim.run(['bash /tmp/rv.sh', ...args].join(' ')); };
+  // empty "$@" expands to nothing
+  assert.equal((await b('for a in "$@"; do echo "- $a"; done\necho n=$#\n')).out, 'n=0\n');
+  assert.equal((await b('for a in "$@"; do echo "- $a"; done\n', 'a', '"b c"')).out, '- a\n- b c\n');
+  // set -e stops the script, set -u is fatal, pipefail, nullglob
+  assert.deepEqual((({ out, code }) => ({ out, code }))(await b('set -e\necho start\nfalse\necho no\n')), { out: 'start\n', code: 1 });
+  let r = await sim.run('bash -c \'set -u; echo $nope; echo no\'');
+  assert.equal(r.out, ''); assert.equal(r.err, 'bash: line 1: nope: unbound variable\n'); assert.equal(r.code, 1);
+  assert.equal((await sim.run("bash -c 'false | true; echo $?; set -o pipefail; false | true; echo $?'")).out, '0\n1\n');
+  assert.equal((await sim.run("bash -c 'shopt -s nullglob; echo /tmp/*.nomatch; echo done'")).out, '\ndone\n');
+  // trap EXIT runs when the script ends, also after exit
+  assert.equal((await b('trap "echo cleanup" EXIT\necho body\nexit 3\n')).out, 'body\ncleanup\n');
+  // let, base#, printf %q
+  assert.equal((await sim.run("bash -c 'let y=3+4; echo $y $((2#101)) $((16#ff))'")).out, '7 5 255\n');
+  assert.equal((await sim.run('printf "%q|%q\\n" "a b" "x*y"')).out, 'a\\ b|x\\*y\n');
+  // getopts loop terminates and reports bad options
+  r = await sim.run("bash -c 'while getopts \"ab:\" o; do echo \"o=$o $OPTARG\"; done; echo idx=$OPTIND' _ -a -b val -z");
+  assert.equal(r.out, 'o=a \no=b val\no=? \nidx=5\n');
+  assert.equal(r.err, '_: illegal option -- z\n');
+  // read honours IFS, -a, and keeps the remainder in the last variable
+  assert.equal((await sim.run("bash -c 'IFS=: read a b <<< \"1:2:3\"; echo $a-$b; read x y <<< \"  p   q  r \"; echo [$x][$y]'")).out, '1-2:3\n[p][q  r]\n');
+  assert.equal((await sim.run("bash -c 'read -a arr <<< \"a b c\"; echo ${#arr[@]} ${arr[1]}'")).out, '3 b\n');
+  // BASH_REMATCH
+  assert.equal((await sim.run("bash -c 'if [[ abc =~ ^a(.)c$ ]]; then echo ${BASH_REMATCH[1]}; fi'")).out, 'b\n');
+});
+
+test('shell review: script errors run earlier lines and carry line numbers', async () => {
+  const sim = await kernelSim();
+  sim.shell.fs.write('/tmp/e1.sh', 'echo hi\nfoo\ncd /nonexist\nls /nonexist\n');
+  let r = await sim.run('bash /tmp/e1.sh');
+  assert.equal(r.out, 'hi\n');
+  assert.match(r.err, /^\/tmp\/e1\.sh: line 2: foo: command not found\n\/tmp\/e1\.sh: line 3: cd: \/nonexist: No such file or directory\n/);
+  sim.shell.fs.write('/tmp/e2.sh', 'echo one\necho "oops\necho two\n');
+  r = await sim.run('bash /tmp/e2.sh');
+  assert.equal(r.out, 'one\n');
+  assert.match(r.err, /unexpected EOF while looking for matching `"'/);
+  r = await sim.run('zsh /tmp/e1.sh');
+  assert.match(r.err, /^\/tmp\/e1\.sh:2: command not found: foo\n\/tmp\/e1\.sh:3: cd: no such file or directory: \/nonexist\n/);
+  assert.equal((await sim.run("bash -c 'foo'")).err, 'bash: line 1: foo: command not found\n');
+  assert.equal((await sim.run("bash -c 'cd /nonexist'")).err, 'bash: line 1: cd: /nonexist: No such file or directory\n');
+  assert.equal((await sim.run('cd /nonexist')).err, 'cd: no such file or directory: /nonexist\n');
+});
+
+test('shell review: type, bg, dirs, pushd, popd', async () => {
+  const sim = await kernelSim();
+  const out = async (l) => (await sim.run(l)).out;
+  assert.equal(await out('type -a ls'), 'ls is an alias for ls --color=auto\nls is /usr/bin/ls\nls is /bin/ls\n');
+  assert.equal(await out('type -t ls cd if'), 'alias\nbuiltin\nkeyword\n');
+  assert.equal((await sim.run('type nope')).out, 'nope not found\n');
+  assert.equal((await sim.run("bash -c 'type nope'")).err, 'bash: line 1: type: nope: not found\n');
+  // bg with no job and with a running job
+  assert.equal((await sim.run('bg')).err, 'bg: no current job\n');
+  sim.K.cmd.register({ name: 'k-hang2', run(ctx) { return new Promise((resolve) => ctx.io.sig.onAbort(() => resolve(143))); } });
+  sim.machine.installCommand(sim.K.cmd.get('k-hang2'));
+  await sim.shell.runLine('k-hang2 &');
+  const r = await sim.run('bg %1');
+  assert.equal(r.err, 'bg: job already in background\n'); assert.equal(r.code, 1);
+  await sim.run('kill %1'); await sim.shell.jobs[0].promise;
+  // directory stack
+  assert.equal(await out('cd /tmp; pushd /etc; pushd /var; dirs'), '/etc /tmp\n/var /etc /tmp\n/var /etc /tmp\n');
+  assert.equal(await out('popd; pwd'), '/etc /tmp\n/etc\n');
+  assert.equal((await sim.run('cd /; dirs -c; popd')).err, 'popd: directory stack empty\n');
+});
+
+test('shell review: history expansion', async () => {
+  const sim = await kernelSim();
+  const t = async (l) => (await sim.type(l)).output;
+  await t('echo one two three');
+  assert.equal(await t('echo !$ !^ !*'), 'echo three two two three\nthree two two three\n');
+  assert.equal(await t('!1'), 'echo one two three\none two three\n');
+  assert.equal(await t('!echo:p'), 'echo echo three two two three\n');
+  assert.equal(await t('!?two?:s/two/2/'), 'echo one 2 three\none 2 three\n');
+  assert.equal(await t('echo a b c'), 'a b c\n');
+  assert.equal(await t('echo !!:2 !-1:$'), 'echo b c\nb c\n');
+  assert.equal(await t('^b^X'), 'echo X c\nX c\n');
+  assert.equal(await t('!nonexistent'), 'zsh: event not found: nonexistent\n');
+  assert.equal(await t('echo "hi!"; echo hi! there'), 'hi!\nhi! there\n');
+});
+
+test('shell review: continuation prompts in the repl (here-documents, quotes, operators)', async () => {
+  const sim = await kernelSim();
+  const { term, shell, K } = sim;
+  term.feed("cat > /tmp/hd.txt <<'EOF'", 'one $HOME', 'two', 'EOF', 'cat /tmp/hd.txt',
+    'echo "a', 'b"', 'echo x &&', 'echo y', 'if true; then', 'echo z', 'fi', 'echo p |', 'k-upper', 'exit');
+  term.take();
+  await shell.repl();
+  const text = K.util.stripAnsi(term.take());
+  assert.match(text, /heredoc> one \$HOME\nheredoc> two\nheredoc> EOF\n/);
+  assert.match(text, /one \$HOME\ntwo\n/);
+  assert.match(text, /dquote> b"\na\nb\n/);
+  assert.match(text, /cmdand> echo y\nx\ny\n/);
+  assert.match(text, /then> echo z\nthen> fi\nz\n/);
+  assert.match(text, /pipe> k-upper\nP\n/);
+  assert.equal(shell.fs.read('/tmp/hd.txt'), 'one $HOME\ntwo\n');
+});

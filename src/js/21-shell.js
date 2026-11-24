@@ -384,7 +384,8 @@
       return e;
     }
     msgPrefix() {
-      if (this.interactive || this.flavor === 'zsh') return this.flavor + ': ';
+      if (this.interactive) return this.flavor + ': ';
+      if (this.flavor === 'zsh') return (this.scriptName || 'zsh') + ':' + this.curLine + ': ';
       if (this.flavor === 'sh') return (this.scriptName || 'sh') + ': ' + this.curLine + ': ';
       if (this.cmdString) return this.flavor + ': line ' + this.curLine + ': ';
       return (this.scriptName || this.flavor) + ': line ' + this.curLine + ': ';
@@ -705,7 +706,21 @@
       let ast;
       try { ast = K.shlex.parse(src, this.interactive || this.sourceDepth ? this.aliases : this.aliases); }
       catch (e) {
-        if (e instanceof ParseError) { io.err(this.syntaxMessage(e) + '\n'); const c = this.flavor === 'zsh' || this.interactive ? 1 : 2; this.status = c; return c; }
+        if (e instanceof ParseError) {
+          // a script runs the commands before the broken one, as bash and zsh read it command by command
+          if (!this.interactive && src.indexOf('\n') > 0) {
+            const lines = src.split('\n');
+            let k = e.incomplete ? lines.length - 1 : Math.min((e.line || 1) - 1, lines.length);
+            for (; k >= 1 && lines.length < 3000; k--) {
+              let pre = null;
+              try { pre = K.shlex.parse(lines.slice(0, k).join('\n'), this.aliases); } catch (e2) { continue; }
+              const sl = this.curLine;
+              try { await this.execNode(pre, io); } finally { this.curLine = sl; }
+              break;
+            }
+          }
+          io.err(this.syntaxMessage(e) + '\n'); const c = this.flavor === 'zsh' || this.interactive ? 1 : 2; this.status = c; return c;
+        }
         throw e;
       }
       const savedLine = this.curLine;
@@ -1024,6 +1039,7 @@
     }
 
     async execSimple(node, io) {
+      if (node.line) this.curLine = node.line;
       // expand command words
       let argv = [];
       try {
@@ -1397,18 +1413,67 @@
       return '\x1b[1;32m' + u + '@' + h + '\x1b[0m:\x1b[1;34m' + p + '\x1b[0m' + (isRoot ? '# ' : '$ ');
     }
 
+    /**
+     * History expansion (!!, !$, !^, !*, !N, !-N, !str, !?str?, word designators,
+     * :p, :s/old/new/ and ^old^new). Returns the new line; sets this._histPrint
+     * for :p. Throws an Error with .histErr when an event is not found.
+     */
     histExpand(line) {
-      if (line.indexOf('!') < 0 || !this.history.length) return line;
-      const last = this.history[this.history.length - 1];
+      this._histPrint = false;
+      const hist = this.history;
+      const notFound = (what) => Object.assign(new Error(this.flavor === 'zsh' ? 'zsh: event not found: ' + what : 'bash: !' + what + ': event not found'), { histErr: true });
+      if (line[0] === '^' && /^\^[^^]+\^[^^]*\^?$/.test(line)) {
+        const m = /^\^([^^]+)\^([^^]*)\^?$/.exec(line);
+        const last = hist[hist.length - 1];
+        if (last == null || last.indexOf(m[1]) < 0) throw Object.assign(new Error(this.flavor === 'zsh' ? 'zsh: substitution failed' : 'bash: :s^' + m[1] + '^' + m[2] + ': substitution failed'), { histErr: true });
+        return last.replace(m[1], m[2]);
+      }
+      if (line.indexOf('!') < 0) return line;
       let out = ''; let q = null; let changed = false;
+      const words = (t) => t.trim().split(/\s+/);
       for (let i = 0; i < line.length; i++) {
         const c = line[i];
         if (q === "'") { out += c; if (c === "'") q = null; continue; }
         if (c === '\\') { out += c + (line[i + 1] || ''); i++; continue; }
         if (c === "'") { q = "'"; out += c; continue; }
-        if (c === '!' && line[i + 1] === '!') { out += last; i++; changed = true; continue; }
-        if (c === '!' && line[i + 1] === '$') { const w = last.trim().split(/\s+/); out += w[w.length - 1]; i++; changed = true; continue; }
-        out += c;
+        if (c !== '!') { out += c; continue; }
+        const n = line[i + 1];
+        if (n === undefined || /[\s=(]/.test(n)) { out += c; continue; }
+        let ev = null; let j = i + 1; let what = '';
+        if (n === '!') { ev = hist[hist.length - 1]; j = i + 2; what = '!'; }
+        else if (n === '$' || n === '^' || n === '*') { ev = hist[hist.length - 1]; j = i + 2; what = n; }
+        else if (/\d/.test(n)) { const m = /^\d+/.exec(line.slice(i + 1))[0]; ev = hist[parseInt(m, 10) - 1]; j = i + 1 + m.length; what = m; }
+        else if (n === '-' && /\d/.test(line[i + 2] || '')) { const m = /^\d+/.exec(line.slice(i + 2))[0]; ev = hist[hist.length - parseInt(m, 10)]; j = i + 2 + m.length; what = '-' + m; }
+        else if (n === '?') { const m = /^\?([^?]*)\??/.exec(line.slice(i + 1)); what = m[1]; ev = null; for (let k = hist.length - 1; k >= 0; k--) if (hist[k].indexOf(what) >= 0) { ev = hist[k]; break; } j = i + 1 + m[0].length; }
+        else if (/[A-Za-z0-9_.\/~-]/.test(n)) {
+          const m = /^[^\s:;|&<>()'"]+/.exec(line.slice(i + 1))[0]; what = m; j = i + 1 + m.length;
+          for (let k = hist.length - 1; k >= 0; k--) if (hist[k].startsWith(m)) { ev = hist[k]; break; }
+        } else { out += c; continue; }
+        if (ev == null) throw notFound(what);
+        let res = ev;
+        // word designator on a bare !$ !^ !*
+        if (what === '$') res = words(ev).slice(-1)[0];
+        else if (what === '^') res = words(ev)[1] || '';
+        else if (what === '*') res = words(ev).slice(1).join(' ');
+        // :designators and modifiers
+        for (;;) {
+          const m = /^:([0-9]+|\$|\^|\*|-[0-9]*|p|s\/[^/]*\/[^/]*\/?|h|t|r|e)/.exec(line.slice(j));
+          if (!m) break;
+          const d = m[1]; j += m[0].length;
+          const w = words(res);
+          if (/^[0-9]+$/.test(d)) res = w[parseInt(d, 10)] || '';
+          else if (d === '$') res = w[w.length - 1] || '';
+          else if (d === '^') res = w[1] || '';
+          else if (d === '*') res = w.slice(1).join(' ');
+          else if (d[0] === '-') res = w.slice(0, (parseInt(d.slice(1), 10) || w.length - 1) + 1).join(' ');
+          else if (d === 'p') this._histPrint = true;
+          else if (d[0] === 's') { const sm = /^s\/([^/]*)\/([^/]*)/.exec(d); if (res.indexOf(sm[1]) < 0) throw Object.assign(new Error(this.flavor === 'zsh' ? 'zsh: substitution failed' : 'bash: :s/' + sm[1] + '/' + sm[2] + ': substitution failed'), { histErr: true }); res = res.replace(sm[1], sm[2]); }
+          else if (d === 'h') res = res.replace(/\/[^/]*$/, '') || '.';
+          else if (d === 't') res = res.replace(/^.*\//, '');
+          else if (d === 'r') res = res.replace(/\.[^./]*$/, '');
+          else if (d === 'e') { const em = /\.([^./]*)$/.exec(res); res = em ? em[1] : ''; }
+        }
+        out += res; i = j - 1; changed = true;
       }
       return changed ? out : line;
     }
@@ -1432,9 +1497,12 @@
      */
     async runLine(line) {
       const io = this.ttyIO();
-      const expanded = this.histExpand(line);
+      let expanded;
+      try { expanded = this.histExpand(line); }
+      catch (e) { if (!e.histErr) throw e; io.err(e.message + '\n'); this.status = 1; return 1; }
       if (expanded !== line) { io.out(expanded + '\n'); line = expanded; }
       this.addHistory(line);
+      if (this._histPrint) { this._histPrint = false; this.status = 0; return 0; }
       this.term.signal.reset();
       this.rootShell._trace = [];
       let captured = '';
@@ -1461,6 +1529,37 @@
       return code;
     }
 
+    /** zsh-style secondary prompt naming what is still open (dquote>, heredoc>, cmdand>, ...). */
+    continuationPrompt(line, e) {
+      if (this.flavor !== 'zsh') return '> ';
+      const m = e.message || '';
+      if (/^unmatched "/.test(m)) return 'dquote> ';
+      if (/^unmatched '/.test(m)) return 'quote> ';
+      if (/^unmatched `/.test(m)) return 'bquote> ';
+      if (/^unmatched \$\(/.test(m) || /unmatched \$\(\(/.test(m)) return 'cmdsubst> ';
+      if (/^unmatched \$\{/.test(m)) return 'braceparam> ';
+      if (/here-document/.test(m)) return 'heredoc> ';
+      if (/trailing backslash/.test(m)) return '> ';
+      const t = line.replace(/\s+$/, '');
+      if (/&&$/.test(t)) return 'cmdand> ';
+      if (/\|\|$/.test(t)) return 'cmdor> ';
+      if (/\|$/.test(t)) return 'pipe> ';
+      // innermost open construct
+      const stack = [];
+      for (const w of t.replace(/'[^']*'|"[^"]*"/g, '').split(/[\s;&|]+/)) {
+        if (w === 'if') stack.push('if'); else if (w === 'then' || w === 'elif' || w === 'else') { if (stack[stack.length - 1] === 'if') stack[stack.length - 1] = 'then'; }
+        else if (w === 'fi') stack.pop();
+        else if (w === 'for' || w === 'select') stack.push('for'); else if (w === 'while') stack.push('while'); else if (w === 'until') stack.push('until');
+        else if (w === 'do') { /* keeps loop kind */ } else if (w === 'done') stack.pop();
+        else if (w === 'case') stack.push('case'); else if (w === 'esac') stack.pop();
+        else if (w === '{') stack.push('cursh'); else if (w === '}') stack.pop();
+      }
+      const top = stack[stack.length - 1];
+      if (top) return top + '> ';
+      if ((t.match(/\(/g) || []).length > (t.match(/\)/g) || []).length) return 'subsh> ';
+      return '> ';
+    }
+
     /** Interactive read-eval loop. Resolves with the exit status when the shell ends. */
     async repl() {
       if (!this._inited) { this._inited = true; await this.init(); }
@@ -1478,8 +1577,9 @@
           try { K.shlex.parse(this.histExpand(line), this.aliases); break; }
           catch (e) {
             if (!(e instanceof ParseError) || !e.incomplete) break;
+            const ps2 = this.continuationPrompt(line, e);
             let more;
-            try { more = await this.term.readLine({ prompt: '> ', history: [], continuation: true }); }
+            try { more = await this.term.readLine({ prompt: ps2, history: [], continuation: true }); }
             catch (e2) { if (e2 instanceof K.Interrupt) { line = ''; break; } throw e2; }
             if (more == null) break;
             line += '\n' + more;
@@ -1672,7 +1772,7 @@
       const sh = this; const args = ctx.args.filter((a) => a !== '--' && a !== '-P' && a !== '-L');
       let target = args[0];
       const zsh = sh.flavor === 'zsh';
-      const fail = (msg, t) => { ctx.err(zsh ? 'cd: ' + msg + ': ' + t + '\n' : sh.msgPrefix() + 'cd: ' + t + ': ' + msg + '\n'); return 1; };
+      const fail = (msg, t) => { ctx.err(zsh ? (sh.interactive ? '' : sh.msgPrefix()) + 'cd: ' + msg + ': ' + t + '\n' : sh.msgPrefix() + 'cd: ' + t + ': ' + msg + '\n'); return 1; };
       let print = false;
       if (args.length > 1) {
         if (zsh) return fail('string not in pwd', args[0]);
