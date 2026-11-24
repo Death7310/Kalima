@@ -130,9 +130,9 @@
 
   async function pingRun(ctx) {
     const g = K.getopt(ctx.args, { short: '46aAbBdDfhLnOqrRUvVc:F:i:I:l:m:M:N:p:Q:s:S:t:T:w:W:', long: ['help', 'version'], alias: { help: 'h', version: 'V' } });
-    if (g.err) return usageErr(ctx, 'ping', PING_USAGE, g.err);
+    if (g.err) return usageErr(ctx, 'ping', '\n' + PING_USAGE, g.err);
     const o = g.opts;
-    if (o.h) { ctx.out(PING_USAGE); return 0; }
+    if (o.h) { ctx.err('\n' + PING_USAGE); return 2; }
     if (o.V) { ctx.println(PING_VERSION); return 0; }
     if (!g.rest.length) { ctx.eprintln('ping: usage error: Destination address required'); return 2; }
     if (o.M != null && !['do', 'dont', 'want', 'probe'].includes(o.M)) { ctx.eprintln("ping: invalid argument: '" + o.M + "'"); return 2; }
@@ -1578,7 +1578,11 @@
   }
   async function routeRun(ctx) {
     const args = ctx.args.slice(); let numeric = false;
-    while (args.length && /^-[nNveFC46]+$/.test(args[0])) { if (args.shift().includes('n')) numeric = true; }
+    while (args.length && (/^-[nNveFC46]+$/.test(args[0]) || ((args[0] === '-A' || args[0] === '--inet') && (args[0] === '--inet' || args[1] === 'inet')))) {
+      if (args[0] === '-A') { args.splice(0, 2); continue; }
+      const flag = args.shift();
+      if (/^-[a-zA-Z0-9]+$/.test(flag) && flag.includes('n')) numeric = true;
+    }
     if (args[0] === '-V' || args[0] === '--version') { ctx.println(NET_TOOLS_VERSION); return 0; }
     if (args[0] === '-h' || args[0] === '--help') { ctx.out(ROUTE_USAGE); return 0; }
     if (args[0] && args[0][0] === '-' && !['-net', '-host'].includes(args[0])) { ctx.eprintln("route: invalid option -- '" + args[0].replace(/^-+/, '')[0] + "'"); ctx.err(ROUTE_USAGE); return 1; }

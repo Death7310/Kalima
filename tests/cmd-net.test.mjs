@@ -84,7 +84,10 @@ test('ping: option checking, usage and version', async () => {
   assert.equal(r.err, 'ping: usage error: Destination address required\n');
   assert.equal(r.code, 2);
   r = await sim.run('ping -z 10.10.10.1');
-  assert.match(r.err, /^ping: invalid option -- 'z'\nUsage/);
+  assert.match(r.err, /^ping: invalid option -- 'z'\n\nUsage\n {2}ping \[options\] <destination>/);
+  r = await sim.run('ping -h');
+  assert.equal(r.code, 2);
+  assert.match(r.err, /^\nUsage\n/);
   r = await sim.run('ping -c 0 10.10.10.1');
   assert.equal(r.err, "ping: invalid argument: '0': out of range: 1 <= value <= 9223372036854775807\n");
   r = await sim.run('ping -c x 10.10.10.1');
@@ -796,4 +799,13 @@ test('ip -j neigh prints JSON, [] when the table is empty', async () => {
   assert.equal(rows[0].dst, '10.10.10.10');
   assert.deepEqual(rows[0].state, ['REACHABLE']);
   assert.match(rows[0].lladdr, /^00:0c:29:/);
+});
+
+test('route -A inet and --inet select the IPv4 table without changing name resolution', async () => {
+  const sim = await net();
+  const plain = await sim.out('route');
+  assert.equal(await sim.out('route -A inet'), plain);
+  assert.equal(await sim.out('route --inet'), plain);
+  assert.match(plain, /^default +gw\.halcyon\.lab /m);
+  assert.match(await sim.out('route -n -A inet'), /^0\.0\.0\.0 +10\.10\.10\.1 /m);
 });
