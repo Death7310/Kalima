@@ -1964,7 +1964,18 @@
       if (!m || !L[m[1]]) { ctx.err(this.msgPrefix() + 'ulimit: bad option: ' + a[0] + '\n'); return 1; }
       if (a.length > 1) { if (!/^(\d+|unlimited)$/.test(a[1])) { ctx.err(this.msgPrefix() + 'ulimit: ' + a[1] + ': invalid number\n'); return 1; } L[m[1]][2] = a[1]; this._ulimits = Object.assign(this._ulimits || {}, { [m[1]]: a[1] }); return 0; }
       ctx.out(((this._ulimits || {})[m[1]] || L[m[1]][2]) + '\n'); return 0;
-    }, disown() { return 0; }, hash() { return 0; },
+    }, disown(ctx) {
+      const a = ctx.args.filter((x) => x !== '-h' && x !== '-r');
+      const live = this.jobs.filter((j) => !j.done);
+      if (a.includes('-a')) { for (const j of live) this.jobs.splice(this.jobs.indexOf(j), 1); return 0; }
+      let st = 0;
+      for (const spec of a.length ? a : [undefined]) {
+        const f = this.findJob(spec, 'disown');
+        if (f.err) { ctx.err(f.err); st = 1; continue; }
+        this.jobs.splice(this.jobs.indexOf(f.job), 1);
+      }
+      return st;
+    }, hash() { return 0; },
     local(ctx) {
       const sh = this;
       if (!sh.funcDepth) { ctx.err('local: can only be used in a function\n'); return 1; }
@@ -2230,9 +2241,15 @@
     },
     jobs(ctx) {
       const live = this.jobs.filter((j) => !j.done);
+      const flags = ctx.args.filter((x) => /^-/.test(x)).join('');
+      const bash = this.flavor !== 'zsh';
       for (const j of live) {
         const k = live.length - 1 - live.indexOf(j);
-        ctx.out('[' + j.id + ']  ' + (k === 0 ? '+' : k === 1 ? '-' : ' ') + ' running    ' + j.text + '\n');
+        const mark = k === 0 ? '+' : k === 1 ? '-' : ' ';
+        if (flags.indexOf('p') >= 0) { ctx.out(j.pid + '\n'); continue; }
+        const pid = flags.indexOf('l') >= 0 ? j.pid + ' ' : '';
+        if (bash) ctx.out('[' + j.id + ']' + mark + '  ' + pid + K.util.padEnd('Running', 24) + j.text + ' &\n');
+        else ctx.out('[' + j.id + ']  ' + mark + ' ' + pid + 'running    ' + j.text + '\n');
       }
       return 0;
     },

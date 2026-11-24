@@ -599,3 +599,18 @@ test('shell review: endless producers before head stop, fork bombs are bounded, 
   assert.equal((await sim.run('echo alive')).out, 'alive\n');
   assert.ok(Date.now() - t0 < 20000);
 });
+
+test('shell review: jobs -l / -p and disown', async () => {
+  const sim = await kernelSim();
+  sim.K.cmd.register({ name: 'k-hang4', run(ctx) { return new Promise((resolve) => ctx.io.sig.onAbort(() => resolve(143))); } });
+  sim.machine.installCommand(sim.K.cmd.get('k-hang4'));
+  await sim.shell.runLine('k-hang4 &');
+  const pid = sim.shell.jobs[0].pid;
+  assert.equal((await sim.run('jobs')).out, '[1]  + running    k-hang4\n');
+  assert.equal((await sim.run('jobs -l')).out, '[1]  + ' + pid + ' running    k-hang4\n');
+  assert.equal((await sim.run('jobs -p')).out, pid + '\n');
+  assert.equal((await sim.run("bash -c 'jobs'")).out, '');
+  assert.equal((await sim.run('disown; jobs')).out, '');
+  assert.equal((await sim.run('disown')).err, 'disown: no current job\n');
+  sim.shell.jobs.length = 0;
+});
