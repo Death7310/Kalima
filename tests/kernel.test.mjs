@@ -577,3 +577,13 @@ test('shell review: printf -v, $(<file), wait status, ulimit', async () => {
   assert.equal(await out('ulimit -n; ulimit -n 4096; ulimit -n'), '1024\n4096\n');
   assert.equal((await out('ulimit -a')).split('\n')[0], 'core file size              (blocks, -c) 0');
 });
+
+test('shell review: history expansion !:N, ranges, :gs', async () => {
+  const sim = await kernelSim();
+  const t = async (l) => (await sim.type(l)).output;
+  await t('echo a b c d');
+  assert.equal(await t('echo !:1 !:2-3 !:*'), 'echo a b c a b c d\na b c a b c d\n');
+  assert.equal(await t('echo banana'), 'banana\n');
+  assert.equal(await t('!!:gs/a/X/'), 'echo bXnXnX\nbXnXnX\n');
+  assert.equal(await t('!!:s/a/Y/'), 'zsh: substitution failed\n');
+});

@@ -1498,6 +1498,7 @@
         if (n === undefined || /[\s=(]/.test(n)) { out += c; continue; }
         let ev = null; let j = i + 1; let what = '';
         if (n === '!') { ev = hist[hist.length - 1]; j = i + 2; what = '!'; }
+        else if (n === ':' && /[0-9$^*-]/.test(line[i + 2] || '')) { ev = hist[hist.length - 1]; j = i + 1; what = ':'; }
         else if (n === '$' || n === '^' || n === '*') { ev = hist[hist.length - 1]; j = i + 2; what = n; }
         else if (/\d/.test(n)) { const m = /^\d+/.exec(line.slice(i + 1))[0]; ev = hist[parseInt(m, 10) - 1]; j = i + 1 + m.length; what = m; }
         else if (n === '-' && /\d/.test(line[i + 2] || '')) { const m = /^\d+/.exec(line.slice(i + 2))[0]; ev = hist[hist.length - parseInt(m, 10)]; j = i + 2 + m.length; what = '-' + m; }
@@ -1514,17 +1515,18 @@
         else if (what === '*') res = words(ev).slice(1).join(' ');
         // :designators and modifiers
         for (;;) {
-          const m = /^:([0-9]+|\$|\^|\*|-[0-9]*|p|s\/[^/]*\/[^/]*\/?|h|t|r|e)/.exec(line.slice(j));
+          const m = /^:([0-9]+-(?:[0-9]+|\$)?|[0-9]+|\$|\^|\*|-[0-9]*|p|g?s\/[^/]*\/[^/]*\/?|h|t|r|e)/.exec(line.slice(j));
           if (!m) break;
           const d = m[1]; j += m[0].length;
           const w = words(res);
           if (/^[0-9]+$/.test(d)) res = w[parseInt(d, 10)] || '';
           else if (d === '$') res = w[w.length - 1] || '';
+          else if (/^[0-9]+-/.test(d)) { const rm = /^(\d+)-(\d+|\$)?$/.exec(d); const a0 = parseInt(rm[1], 10); const b0 = rm[2] == null ? w.length - 2 : rm[2] === '$' ? w.length - 1 : parseInt(rm[2], 10); res = w.slice(a0, b0 + 1).join(' '); }
           else if (d === '^') res = w[1] || '';
           else if (d === '*') res = w.slice(1).join(' ');
           else if (d[0] === '-') res = w.slice(0, (parseInt(d.slice(1), 10) || w.length - 1) + 1).join(' ');
           else if (d === 'p') this._histPrint = true;
-          else if (d[0] === 's') { const sm = /^s\/([^/]*)\/([^/]*)/.exec(d); if (res.indexOf(sm[1]) < 0) throw Object.assign(new Error(this.flavor === 'zsh' ? 'zsh: substitution failed' : 'bash: :s/' + sm[1] + '/' + sm[2] + ': substitution failed'), { histErr: true }); res = res.replace(sm[1], sm[2]); }
+          else if (d[0] === 's' || d[0] === 'g') { const gl = d[0] === 'g'; const sm = /^g?s\/([^/]*)\/([^/]*)/.exec(d); if (res.indexOf(sm[1]) < 0) throw Object.assign(new Error(this.flavor === 'zsh' ? 'zsh: substitution failed' : 'bash: :s/' + sm[1] + '/' + sm[2] + ': substitution failed'), { histErr: true }); res = gl ? res.split(sm[1]).join(sm[2]) : res.replace(sm[1], sm[2]); }
           else if (d === 'h') res = res.replace(/\/[^/]*$/, '') || '.';
           else if (d === 't') res = res.replace(/^.*\//, '');
           else if (d === 'r') res = res.replace(/\.[^./]*$/, '');
