@@ -753,3 +753,29 @@ test('ping -f as root prints no per-reply lines and the ipg/ewma summary', async
   const u = await sim.run('ping -f -c 5 10.10.10.10');
   assert.equal(u.code, 2);
 });
+
+test('ping: inet_aton shorthand addresses, kali resolves to itself by name', async () => {
+  const sim = await net();
+  assert.match(await sim.out('ping -c 1 127.1'), /^PING 127\.1 \(127\.0\.0\.1\) 56\(84\) bytes of data\.\n64 bytes from 127\.0\.0\.1: icmp_seq=1/);
+  assert.match(await sim.out('ping -c 1 0x7f000001'), /^PING 0x7f000001 \(127\.0\.0\.1\)/);
+  assert.match(await sim.out('ping -c 1 10.10.10'), /^PING 10\.10\.10 \(10\.10\.0\.10\)/);
+  assert.match(await sim.out('ping -c 1 kali'), /64 bytes from kali \(127\.0\.1\.1\)/);
+  for (const bad of ['08', '300.1.1.1', '1.2.3.4.5']) {
+    const r = await sim.run('ping -c 1 ' + bad);
+    assert.equal(r.code, 2, bad);
+    assert.equal(r.err, 'ping: ' + bad + ': Name or service not known\n');
+  }
+});
+
+test('ping -M do: packets larger than the MTU fail locally, and a lowered MTU is honoured', async () => {
+  const sim = await net();
+  const r = await sim.run('ping -c 2 -M do -s 1473 10.10.10.10');
+  assert.equal(r.code, 1);
+  assert.equal(r.err, 'ping: local error: message too long, mtu=1500\nping: local error: message too long, mtu=1500\n');
+  assert.match(r.out, /2 packets transmitted, 0 received, \+2 errors, 100% packet loss/);
+  assert.match(await sim.out('ping -c 1 -M do -s 1472 10.10.10.10'), /1480 bytes from/);
+  assert.match(await sim.out('ping -c 1 -s 1473 10.10.10.10'), /1481 bytes from/);   // without DF the packet is fragmented
+  await sim.run('sudo ip link set eth0 mtu 1400');
+  assert.match((await sim.run('ping -c 1 -M do -s 1400 10.10.10.10')).err, /mtu=1400/);
+  assert.equal((await sim.run('ping -c 1 -M bogus 10.10.10.10')).err, "ping: invalid argument: 'bogus'\n");
+});

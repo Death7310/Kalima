@@ -30,8 +30,20 @@
   const ifaceByName = (m, n) => m.ifaces.find((i) => i.name === n) || null;
 
   /** Resolve a host argument the way libc does; distinguishes "no such name" from "resolver unreachable". */
+  /** inet_aton shorthand (127.1, 10.10.10, 0x7f000001, 2130706433) as a dotted quad, or null. */
+  function inetAton(name) {
+    if (!/^(0x[0-9a-f]+|\d+)(\.(0x[0-9a-f]+|\d+)){0,3}$/i.test(name)) return null;
+    const parts = name.split('.').map((x) => (/^0x/i.test(x) ? parseInt(x, 16) : /^0\d/.test(x) ? (/^0[0-7]+$/.test(x) ? parseInt(x, 8) : NaN) : parseInt(x, 10)));
+    if (parts.some((x) => !(x >= 0))) return null;
+    const last = parts.pop(); const maxLast = Math.pow(256, 4 - parts.length) - 1;
+    if (parts.some((x) => x > 255) || last > maxLast) return null;
+    const n = parts.reduce((a, x, k) => a + x * Math.pow(256, 3 - k), 0) + last;
+    return U.intToIp(n >>> 0);
+  }
   function lookup(ctx, name) {
     if (U.isIPv4(name)) return { ip: name, name, literal: true };
+    const aton = inetAton(name);
+    if (aton) return { ip: aton, name, literal: true };
     if (/^(localhost|localhost\.localdomain)$/.test(name)) return { ip: '127.0.0.1', name: 'localhost' };
     const r = K.net.resolve(ctx.machine, name);
     if (r) return { ip: r.ip, name: r.name || name };
@@ -42,7 +54,8 @@
 
   /** Reverse name for output lines; loopback is localhost. */
   function rdns(ctx, ip) {
-    if (U.inCidr(ip, '127.0.0.0/8')) return 'localhost';
+    if (ip === '127.0.0.1') return 'localhost';
+    if (U.inCidr(ip, '127.0.0.0/8')) return ip === '127.0.1.1' ? ctx.machine.hostname : K.net.reverse(ctx.machine, ip) || 'localhost';
     if (ctx.machine.ifaces.some((i) => i.ip === ip)) return ctx.machine.hostname;
     return K.net.reverse(ctx.machine, ip);
   }
@@ -122,6 +135,7 @@
     if (o.h) { ctx.out(PING_USAGE); return 0; }
     if (o.V) { ctx.println(PING_VERSION); return 0; }
     if (!g.rest.length) { ctx.eprintln('ping: usage error: Destination address required'); return 2; }
+    if (o.M != null && !['do', 'dont', 'want', 'probe'].includes(o.M)) { ctx.eprintln("ping: invalid argument: '" + o.M + "'"); return 2; }
     const count = o.c != null ? intArg(ctx, 'ping', o.c, 1, Number.MAX_SAFE_INTEGER) : Infinity;
     const interval = o.i != null ? intArg(ctx, 'ping', o.i, 0, 2147483647, true) : 1;
     const size = o.s != null ? intArg(ctx, 'ping', o.s, 0, 65507) : 56;
@@ -151,6 +165,9 @@
     if (!first.ok && first.err === 'ENETUNREACH') { ctx.eprintln('ping: connect: Network is unreachable'); return 2; }
     if (p.bound.dev && first.ok && first.dev !== p.bound.dev && !first.self) { ctx.eprintln('ping: connect: Network is unreachable'); return 2; }
     const id = (ctx.pid & 0xffff) || 1;
+    const outIf = ifaceByName(machine, first.dev);
+    const pathMtu = (outIf && outIf.mtu) || (first.self ? 65536 : 1500);
+    const dfBlock = (o.M === 'do' || o.M === 'probe') && p.size + 28 > pathMtu;
     ctx.println('PING ' + shown + ' (' + dest.ip + ') ' + p.size + '(' + (p.size + 28) + ') bytes of data.');
 
     const from = (ip) => {
@@ -177,8 +194,11 @@
         if (o.O && timedOut != null && !o.q) ctx.println(stamp() + 'no answer yet for icmp_seq=' + timedOut);
         timedOut = null;
         stats.sent++;
-        const r = net.ping(machine, dest.ip, seq, { ttl: p.ttl, size: p.size, id });
-        if (r.status === 'reply') {
+        const r = dfBlock ? { status: 'localerr' } : net.ping(machine, dest.ip, seq, { ttl: p.ttl, size: p.size, id });
+        if (r.status === 'localerr') {
+          stats.errs++;
+          ctx.eprintln('ping: local error: message too long, mtu=' + pathMtu);
+        } else if (r.status === 'reply') {
           stats.recv++; stats.rtts.push(r.rtt); lastAnswer = r.rtt;
           if (!o.q && !o.f) ctx.println(stamp() + (p.size + 8) + ' bytes from ' + from(r.from) + ': icmp_seq=' + seq + ' ttl=' + r.ttl + ' time=' + pingTime(r.rtt) + ' ms');
         } else if (r.status === 'unreachable') {
