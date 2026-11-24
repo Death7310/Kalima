@@ -57,9 +57,31 @@
     }));
   }
 
+  /** The description paragraph of the real --help output, where known. */
+  const HELP_DESC = {
+    ls: 'List information about the FILEs (the current directory by default).\nSort entries alphabetically if none of -cftuvSUX nor --sort is specified.',
+    cat: 'Concatenate FILE(s) to standard output.\n\nWith no FILE, or when FILE is -, read standard input.',
+    rm: 'Remove (unlink) the FILE(s).',
+    mkdir: 'Create the DIRECTORY(ies), if they do not already exist.\n\nMandatory arguments to long options are mandatory for short options too.',
+    cp: 'Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.',
+    mv: 'Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.',
+    touch: 'Update the access and modification times of each FILE to the current time.\n\nA FILE argument that does not exist is created empty, unless -c or -h\nis supplied.',
+    rmdir: 'Remove the DIRECTORY(ies), if they are empty.',
+    head: 'Print the first 10 lines of each FILE to standard output.\nWith more than one FILE, precede each with a header giving the file name.\n\nWith no FILE, or when FILE is -, read standard input.',
+    tail: 'Print the last 10 lines of each FILE to standard output.\nWith more than one FILE, precede each with a header giving the file name.\n\nWith no FILE, or when FILE is -, read standard input.',
+    chmod: 'Change the mode of each FILE to MODE.\nWith --reference, change the mode of each FILE to that of RFILE.',
+    stat: 'Display file or file system status.',
+    df: 'Show information about the file system on which each FILE resides,\nor all file systems by default.',
+    du: 'Summarize device usage of the set of FILEs, recursively for directories.',
+    ln: 'In the 1st form, create a link to TARGET with the name LINK_NAME.',
+  };
+  const HELP_TIGHT = { mkdir: true };
+
   function helpText(def) {
     const sum = def.summary.charAt(0).toUpperCase() + def.summary.slice(1);
-    return 'Usage: ' + def.synopsis + '\n' + sum + '.\n' + (def.help ? '\n' + def.help.replace(/^\n/, '') : '');
+    const synopsis = def.synopsis.replace(/\n {2,3}or:/g, '\n  or:');
+    const desc = HELP_DESC[def.name] != null ? HELP_DESC[def.name] : sum + '.';
+    return 'Usage: ' + synopsis + '\n' + desc + '\n' + (def.help ? (HELP_TIGHT[def.name] ? '' : '\n') + def.help.replace(/^\n/, '') : '');
   }
   function versionText(name, def) {
     return name + ' (GNU ' + (def.pkg || 'coreutils') + ') ' + COREUTILS_VERSION + '\n' +
@@ -1000,7 +1022,7 @@
   }
 
   gnu({
-    name: 'ln', summary: 'make links between files', synopsis: 'ln [OPTION]... [-T] TARGET LINK_NAME\n   or:  ln [OPTION]... TARGET\n   or:  ln [OPTION]... TARGET... DIRECTORY',
+    name: 'ln', summary: 'make links between files', synopsis: 'ln [OPTION]... [-T] TARGET LINK_NAME\n  or:  ln [OPTION]... TARGET\n  or:  ln [OPTION]... TARGET... DIRECTORY\n  or:  ln [OPTION]... -t DIRECTORY TARGET...',
     man: 'DESCRIPTION\n       Create a link to TARGET with the name LINK_NAME. Create hard links by default, symbolic links with --symbolic.\n\nOPTIONS\n       -f, --force\n              remove existing destination files\n       -s, --symbolic\n              make symbolic links instead of hard links\n       -v, --verbose\n              print name of each linked file\n       -n, --no-dereference\n              treat LINK_NAME as a normal file if it is a symbolic link to a directory\n       -T     treat LINK_NAME as a normal file always\n\nEXAMPLES\n       ln -s /usr/share/wordlists ~/wordlists\n              Make a shortcut to the wordlists folder.',
     help: "  -f, --force                 remove existing destination files\n  -n, --no-dereference        treat LINK_NAME as a normal file if\n                                it is a symbolic link to a directory\n  -s, --symbolic              make symbolic links instead of hard links\n  -T, --no-target-directory   treat LINK_NAME as a normal file always\n  -v, --verbose               print name of each linked file\n",
     authors: 'Mike Parker and David MacKenzie',
@@ -2019,7 +2041,7 @@
   }
 
   gnu({
-    name: 'du', summary: 'estimate file space usage', synopsis: 'du [OPTION]... [FILE]...',
+    name: 'du', summary: 'estimate file space usage', synopsis: 'du [OPTION]... [FILE]...\n  or:  du [OPTION]... --files0-from=F',
     man: 'DESCRIPTION\n       Summarize device usage of the set of FILEs, recursively for directories.\n\nOPTIONS\n       -a, --all\n              write counts for all files, not just directories\n       -b, --bytes\n              equivalent to --apparent-size --block-size=1\n       -c, --total\n              produce a grand total\n       -d, --max-depth=N\n              print the total for a directory only if it is N or fewer levels below the command line argument\n       -h, --human-readable\n              print sizes in human readable format (e.g., 1K 234M 2G)\n       -k     like --block-size=1K\n       -s, --summarize\n              display only a total for each argument\n\nEXAMPLES\n       du -sh /var/log\n              Total size of the log directory.\n       du -h -d 1 ~ | sort -h\n              Which top-level folders in the home directory are biggest.',
     help: "  -a, --all             write counts for all files, not just directories\n      --apparent-size   print apparent sizes rather than device usage\n  -b, --bytes           equivalent to '--apparent-size --block-size=1'\n  -c, --total           produce a grand total\n  -d, --max-depth=N     print the total for a directory (or file, with --all)\n                          only if it is N or fewer levels below the command\n                          line argument\n  -h, --human-readable  print sizes in human readable format (e.g., 1K 234M 2G)\n  -k                    like --block-size=1K\n  -m                    like --block-size=1M\n  -s, --summarize       display only a total for each argument\n",
     authors: 'Torbjorn Granlund, David MacKenzie, Paul Eggert, and Jim Meyering',

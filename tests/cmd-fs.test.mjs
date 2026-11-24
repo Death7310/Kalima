@@ -869,3 +869,10 @@ test('ln refuses to hard link files kali does not own, rm -r removes empty unrea
   const m = await sh('cd /tmp/q7; mkdir z; touch z/f; chmod -R 000 z');
   assert.match(m.err, /chmod: cannot read directory 'z': Permission denied/);
 });
+
+test('--help first lines follow GNU coreutils', async () => {
+  const { sh } = await setup();
+  assert.equal((await sh('ls --help | head -3')).out, 'Usage: ls [OPTION]... [FILE]...\nList information about the FILEs (the current directory by default).\nSort entries alphabetically if none of -cftuvSUX nor --sort is specified.\n');
+  assert.equal((await sh('cp --help | head -4')).out, 'Usage: cp [OPTION]... [-T] SOURCE DEST\n  or:  cp [OPTION]... SOURCE... DIRECTORY\n  or:  cp [OPTION]... -t DIRECTORY SOURCE...\nCopy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.\n');
+  assert.match((await sh('rm --help')).out, /^Usage: rm \[OPTION\]\.\.\. \[FILE\]\.\.\.\nRemove \(unlink\) the FILE\(s\)\.\n\n  -f/);
+});
