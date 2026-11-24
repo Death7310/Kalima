@@ -1154,7 +1154,7 @@
           return 127;
         }
       }
-      io.err(this.flavor === 'zsh' ? 'zsh: command not found: ' + name + '\n' : this.msgPrefix() + name + ': command not found\n');
+      io.err(this.msgPrefix() + (this.flavor === 'zsh' ? 'command not found: ' + name : name + ': command not found') + '\n');
       return 127;
     }
 

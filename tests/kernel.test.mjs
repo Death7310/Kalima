@@ -397,7 +397,7 @@ test('shell review: scripts, set options, trap, let, getopts, read', async () =>
   assert.equal(r.out, 'o=a \no=b val\no=? \nidx=5\n');
   assert.equal(r.err, '_: illegal option -- z\n');
   // read honours IFS, -a, and keeps the remainder in the last variable
-  assert.equal((await sim.run("bash -c 'IFS=: read a b <<< \"1:2:3\"; echo $a-$b; read x y <<< \"  p   q  r \"; echo [$x][$y]'")).out, '1-2:3\n[p][q  r]\n');
+  assert.equal((await sim.run("bash -c 'IFS=: read a b <<< \"1:2:3\"; echo $a-$b; read x y <<< \"  p   q  r \"; echo [$x][$y]'")).out, '1-2:3\n[p][q r]\n');
   assert.equal((await sim.run("bash -c 'read -a arr <<< \"a b c\"; echo ${#arr[@]} ${arr[1]}'")).out, '3 b\n');
   // BASH_REMATCH
   assert.equal((await sim.run("bash -c 'if [[ abc =~ ^a(.)c$ ]]; then echo ${BASH_REMATCH[1]}; fi'")).out, 'b\n');
@@ -445,9 +445,9 @@ test('shell review: history expansion', async () => {
   const sim = await kernelSim();
   const t = async (l) => (await sim.type(l)).output;
   await t('echo one two three');
-  assert.equal(await t('echo !$ !^ !*'), 'echo three two two three\nthree two two three\n');
+  assert.equal(await t('echo !$ !^ !*'), 'echo three one one two three\nthree one one two three\n');
   assert.equal(await t('!1'), 'echo one two three\none two three\n');
-  assert.equal(await t('!echo:p'), 'echo echo three two two three\n');
+  assert.equal(await t('!echo:p'), 'echo one two three\n');
   assert.equal(await t('!?two?:s/two/2/'), 'echo one 2 three\none 2 three\n');
   assert.equal(await t('echo a b c'), 'a b c\n');
   assert.equal(await t('echo !!:2 !-1:$'), 'echo b c\nb c\n');
