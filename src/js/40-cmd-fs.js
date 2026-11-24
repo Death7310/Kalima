@@ -220,6 +220,28 @@
     alias: { ignore: 'I', width: 'w', escape: 'b', kibibytes: 'k', all: 'a', 'almost-all': 'A', 'human-readable': 'h', recursive: 'R', reverse: 'r', directory: 'd', classify: 'F', 'numeric-uid-gid': 'n', inode: 'i', dereference: 'L', 'quote-name': 'Q' },
   };
 
+  /** Human readable size like GNU (ceil), powers of 1000 with a lower case k when `si` is set. */
+  function humanBase(n, si) {
+    if (!si) return U.humanSize(n);
+    if (n < 1000) return String(n);
+    const u = ['k', 'M', 'G', 'T', 'P']; let i = -1; let v = n;
+    do { v /= 1000; i++; } while (v >= 1000 && i < u.length - 1);
+    return (v < 10 ? (Math.ceil(v * 10) / 10).toFixed(1) : String(Math.ceil(v))) + u[i];
+  }
+
+  /** A small strftime for ls --time-style=+FORMAT. */
+  function strftime(fmt, ms) {
+    const d = new Date(ms); const p = U.pad2;
+    const map = {
+      Y: () => d.getUTCFullYear(), y: () => p(d.getUTCFullYear() % 100), m: () => p(d.getUTCMonth() + 1), d: () => p(d.getUTCDate()), e: () => U.padStart(d.getUTCDate(), 2),
+      H: () => p(d.getUTCHours()), M: () => p(d.getUTCMinutes()), S: () => p(d.getUTCSeconds()), b: () => U.MONTHS[d.getUTCMonth()], h: () => U.MONTHS[d.getUTCMonth()],
+      a: () => U.DAYS[d.getUTCDay()], Z: () => 'UTC', z: () => '+0000', s: () => Math.floor(ms / 1000), n: () => '\n', t: () => '\t', '%': () => '%',
+      F: () => d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()), T: () => p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()),
+      R: () => p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()),
+    };
+    return fmt.replace(/%(.)/g, (m0, c) => (map[c] ? String(map[c]()) : m0));
+  }
+
   function lsOptions(ctx, g) {
     const o = g.opts;
     const color = o.color === undefined ? false : (o.color === true || o.color === 'always' || o.color === 'yes' || o.color === 'force') ? true
@@ -230,7 +252,7 @@
     return {
       ignorePats: [].concat(g.all.I || [], g.all.ignore || [], o.hide && !o.all && !o.a ? [o.hide] : []).filter((x) => typeof x === 'string').map(globRe),
       context: !!o.Z, across: !!o.x, commas: !!o.m, columns: !!(o.C || o.x), noOwner: !!o.g, noGroup: !!(o.o || o.G), followCmd: !!o.H,
-      long: isLong, numeric: !!o.n, all: !!(o.a || o.f), almost: !!o.A, human: !!o.h,
+      long: isLong, numeric: !!o.n, all: !!(o.a || o.f), almost: !!o.A, human: !!(o.h || o.si), si: !!o.si, escape: !!o.b,
       recursive: !!o.R, reverse: !!o.r, dirOnly: !!o.d, classify: !!o.F || o['indicator-style'] === 'classify', indicator: !!(o.F || o.p) || ['classify', 'slash', 'file-type'].includes(o['indicator-style']), inode: !!o.i, blocks: !!o.s,
       color, sortBy, dirsFirst: !!o['group-directories-first'], follow: !!o.L, oneColumn: !!o[1], fullTime: o['full-time'] != null,
       quote: !!o.Q, indStyle: typeof o['indicator-style'] === 'string' ? o['indicator-style'] : null,
@@ -254,8 +276,11 @@
     switch (o.timeStyle) {
       case 'full-iso': return iso + ' ' + hm + ':' + p(d.getUTCSeconds()) + '.000000000 +0000';
       case 'long-iso': return iso + ' ' + hm;
-      case 'iso': return Math.abs(K.clock.now() - ms) > 15778800000 ? iso : iso.slice(5) + ' ' + hm;
-      default: return timeOf(ms);
+      case 'iso': return Math.abs(K.clock.now() - ms) > 15778800000 ? iso + ' ' : iso.slice(5) + ' ' + hm;
+      default:
+        if (typeof o.timeStyle === 'string' && o.timeStyle[0] === '+') return strftime(o.timeStyle.slice(1).split('\n')[Math.abs(K.clock.now() - ms) > 15778800000 ? 0 : (o.timeStyle.indexOf('\n') >= 0 ? 1 : 0)], ms);
+        if (o.timeStyle === 'locale') return timeOf(ms);
+        return timeOf(ms);
     }
   }
 
@@ -282,10 +307,14 @@
     return list;
   }
 
+  function escapeName(n) {
+    return n.replace(/[\\]|[^\x21-\x7e\u00a1-\uffff]/g, (c) => (c === ' ' ? '\\ ' : c === '\\' ? '\\\\' : c === '\n' ? '\\n' : c === '\t' ? '\\t' : '\\' + U.padStart(c.charCodeAt(0).toString(8), 3, '0')));
+  }
+
   function lsRender(ctx, o, entries, withTotal) {
     const needQuote = o.tty && entries.some((e) => quoteName(e.name) !== e.name);
     const cell = (e) => {
-      let text = (o.context ? '? ' : '') + (o.quote ? '"' + e.name.replace(/(["\\])/g, '\\$1') + '"' : o.tty ? quoteName(e.name) : e.name);
+      let text = (o.context ? '? ' : '') + (o.escape ? escapeName(e.name) : o.quote ? '"' + e.name.replace(/(["\\])/g, '\\$1') + '"' : o.tty ? quoteName(e.name) : e.name);
       const plainLen = text.length;
       const key = o.color ? colorKey(e.st, e.orphan) : null;
       if (key) text = e.orphan && key === 'or' ? '\x1b[0m' + paint(LS_COLOR.ln, text) : paint(LS_COLOR[key], text);
@@ -294,18 +323,18 @@
       return { text: text + ind, w: plainLen + ind.length };
     };
     const cells = entries.map(cell);
-    const prefix = (e) => (o.inode ? e.st.ino + ' ' : '') + (o.blocks ? (o.human ? U.humanSize(blocksOf(e.st) * 1024) : blocksOf(e.st)) + ' ' : '');
+    const prefix = (e) => (o.inode ? e.st.ino + ' ' : '') + (o.blocks ? (o.human ? humanBase(blocksOf(e.st) * 1024, o.si) : blocksOf(e.st)) + ' ' : '');
     if (o.long) {
       const rows = entries.map((e, i) => {
         const st = e.st;
-        const size = st.isDev ? ({ null: '1, 3', zero: '1, 5', random: '1, 8', tty: '5, 0' }[st.dev] || '1, 3') : o.human ? U.humanSize(st.size) : String(st.size);
+        const size = st.isDev ? ({ null: '1, 3', zero: '1, 5', random: '1, 8', tty: '5, 0' }[st.dev] || '1, 3') : o.human ? humanBase(st.size, o.si) : String(st.size);
         let name = cells[i].text;
         if (st.isLink) name += ' -> ' + st.target;
         if (e.unknown) return { ino: '?', mode: '-?????????', nlink: '?', owner: '?', group: '?', size: '?', date: U.padStart('?', 12), name, blk: '?' };
         return {
           ino: String(st.ino), mode: modeString(st), nlink: String(st.nlink),
           owner: o.numeric ? String(st.uid) : owner(ctx, st.uid), group: o.numeric ? String(st.gid) : group(ctx, st.gid),
-          size, date: fmtTime(st.mtime, o), name, blk: String(o.human ? U.humanSize(blocksOf(st) * 1024) : blocksOf(st)),
+          size, date: fmtTime(st.mtime, o), name, blk: String(o.human ? humanBase(blocksOf(st) * 1024, o.si) : blocksOf(st)),
         };
       });
       const w = (k) => Math.max.apply(null, [0].concat(rows.map((r) => r[k].length)));
@@ -313,7 +342,7 @@
       let out = '';
       if (withTotal) {
         const total = entries.reduce((a, e) => a + (e.unknown ? 0 : blocksOf(e.st)), 0);
-        out += 'total ' + (o.human ? U.humanSize(total * 1024) : total) + '\n';
+        out += 'total ' + (o.human ? humanBase(total * 1024, o.si) : total) + '\n';
       }
       for (const r of rows) {
         out += (o.inode ? U.padStart(r.ino, wi) + ' ' : '') + (o.blocks ? U.padStart(r.blk, wb) + ' ' : '') + r.mode + ' ' + U.padStart(r.nlink, wl) + ' ' +
@@ -400,7 +429,7 @@
       if (!first) ctx.out('\n');
       if (multi) ctx.out(display + ':\n');
       first = false;
-      if (o.blocks && !o.long) { const t = list.reduce((a, c) => a + blocksOf(c.st), 0); ctx.out('total ' + (o.human ? U.humanSize(t * 1024) : t) + '\n'); }
+      if (o.blocks && !o.long) { const t = list.reduce((a, c) => a + blocksOf(c.st), 0); ctx.out('total ' + (o.human ? humanBase(t * 1024, o.si) : t) + '\n'); }
       ctx.out(lsRender(ctx, o, list, true));
       if (o.recursive) {
         for (const c of list) if (c.st.isDir && c.name !== '.' && c.name !== '..') await listDir(c, joinPath(display, c.name), false);
@@ -1852,7 +1881,9 @@
 
   /** Shared pager front end: files or stdin, pager on a terminal, plain output otherwise. */
   async function pageFiles(ctx, g, missing, opts) {
-    const files = g.rest;
+    const plus = g.rest.filter((a) => /^\+./.test(a));
+    const files = g.rest.filter((a) => !/^\+./.test(a));
+    const startLine = ctx.name === 'more' && plus.length && /^\+\d+$/.test(plus[0]) ? parseInt(plus[0].slice(1), 10) : 0;
     let status = 0; const chunks = [];
     if (!files.length) {
       if (ctx.stdin == null) { ctx.eprintln(opts.noInput); return 1; }
@@ -1867,6 +1898,7 @@
         ctx.eprintln(missing(f, e)); status = 1;
       }
     }
+    if (startLine > 1) for (const c of chunks) c.text = splitLines(c.text).slice(startLine - 1).map((l) => l + '\n').join('');
     if (g.opts.N) {
       for (const c of chunks) { let n = 0; c.text = splitLines(c.text).map((l) => U.padStart(++n, 6) + ' ' + l).join('\n') + (c.text.endsWith('\n') ? '\n' : ''); }
     }
@@ -1963,7 +1995,7 @@
   function duUnit(g) {
     const o = g.opts;
     if (o.b) return { div: 1, human: false, apparent: true };
-    if (o.h) return { div: 1, human: true, apparent: !!o['apparent-size'] };
+    if (o.h || o.si) return { div: 1, human: true, apparent: !!o['apparent-size'] };
     if (o.m) return { div: 1048576, human: false, apparent: !!o['apparent-size'] };
     if (o.k) return { div: 1024, human: false, apparent: !!o['apparent-size'] };
     const bs = o.B != null ? o.B : o['block-size'];
@@ -1987,7 +2019,7 @@
       const maxDepth = o.s ? 0 : o.d == null ? Infinity : parseInt(o.d, 10);
       if (o.d != null && !/^\d+$/.test(o.d)) { ctx.eprintln('du: invalid maximum depth ' + q(o.d)); ctx.eprintln("Try 'du --help' for more information."); return 1; }
       const unit = duUnit(g);
-      const fmt = (bytes) => (unit.human ? U.humanSize(bytes) : String(Math.ceil(bytes / unit.div)) + (unit.suffix || ''));
+      const fmt = (bytes) => (unit.human ? humanBase(bytes, !!o.si && !o.h) : String(Math.ceil(bytes / unit.div)) + (unit.suffix || ''));
       const excl = [].concat(g.all && g.all.exclude || o.exclude || []).filter((x) => typeof x === 'string').map(globRe);
       const eol = o['0'] || o.null ? '\0' : '\n';
       const sizeOf = (st) => (unit.apparent ? st.size : diskBytes(st));
@@ -2032,7 +2064,7 @@
 
   function dfRows(ctx, g) {
     const hum = g.opts.h || g.opts.H;
-    const fmt = (kib) => (hum ? U.humanSize(kib * 1024) : String(kib));
+    const fmt = (kib) => (hum ? humanBase(kib * 1024, !!g.opts.H && !g.opts.h) : String(kib));
     const unitHead = hum ? 'Size' : '1K-blocks';
     const rows = (list) => list.map((m) => {
       const avail = m.size - m.used;
@@ -2098,18 +2130,20 @@
     man: 'DESCRIPTION\n       Tree is a recursive directory listing program that produces a depth indented listing of files. With no arguments, tree lists the files in the current directory. When directory arguments are given, tree lists all the files and/or directories found in the given directories each in turn. Upon completion of listing all files and directories found, tree returns the total number of files and/or directories listed.\n\nOPTIONS\n       -a     All files are printed, including hidden ones\n       -d     List directories only\n       -f     Print the full path prefix for each file\n       -L level\n              Max display depth of the directory tree\n       -C     Turn colorization on always\n       --noreport\n              Omits printing of the file and directory report at the end of the tree listing\n       --dirsfirst\n              List directories before files\n\nEXAMPLES\n       tree -L 2 ~/engagement\n              Show two levels of the engagement folder.\n       tree -a -d\n              Every directory, including hidden ones, but no files.',
     help: "  ------- Listing options -------\n  -a            All files are listed.\n  -d            List directories only.\n  -l            Follow symbolic links like directories.\n  -f            Print the full path prefix for each file.\n  -L level      Descend only level directories deep.\n  --dirsfirst   List directories before files (-U disables).\n  --noreport    Turn off file/directory count at end of tree listing.\n  -C            Turn colorization on always.\n",
     version: 'tree v2.2.1 (c) 1996 - 2024 by Steve Baker, Thomas Moore, Francesc Rocher, Florian Sesser, Kyosuke Tokoro\n',
-    spec: { short: 'adflL:CNpPIsiqrthuUF', long: ['noreport', 'dirsfirst', 'charset=', 'filelimit=', 'prune', 'inodes', 'device'] },
+    spec: { short: 'adflL:CNpP:I:sihqrtuUFnQxD', long: ['noreport', 'dirsfirst', 'charset=', 'filelimit=', 'prune', 'inodes', 'device'] },
     main(ctx, g) {
       const o = g.opts;
       if (o.L != null && !/^\d+$/.test(o.L) || o.L === '0') { ctx.eprintln('tree: Invalid level, must be greater than 0.'); return 1; }
       const maxLevel = o.L == null ? Infinity : parseInt(o.L, 10);
       const utf = !/^(C|POSIX)$/.test(ctx.env.LC_ALL || ctx.env.LANG || 'C') && !/ascii/i.test(o.charset || '');
       const glyph = utf ? { mid: '├── ', last: '└── ', bar: '│   ', gap: '    ' } : { mid: '|-- ', last: '`-- ', bar: '|   ', gap: '    ' };
-      const color = !!o.C;
+      const color = !!o.C && !o.n;
+      const patRe = (v) => [].concat(v || []).filter((x) => typeof x === 'string').join('|').split('|').filter(Boolean).map(globRe);
+      const showPats = patRe(g.all.P); const hidePats = patRe(g.all.I);
       const collate = collator(ctx.env);
       let dirs = 0; let files = 0;
       const label = (e, shown) => {
-        let t = shown + (o.F && e.st.isDir ? '/' : '');
+        let t = (o.Q ? '"' + shown + '"' : shown) + (o.F && e.st.isDir ? '/' : '');
         const key = color ? colorKey(e.st, false) : null;
         if (key) t = paint(LS_COLOR[key], t);
         if (e.st.isLink) t += ' -> ' + e.st.target;
@@ -2121,17 +2155,32 @@
         if (!o.a) names = names.filter((n) => n[0] !== '.');
         let entries = names.map((n) => ({ name: n, full: joinPath(path, n), st: ctx.fs.lstat(joinPath(path, n)) }));
         if (o.d) entries = entries.filter((e) => e.st.isDir);
-        entries.sort((a, b) => collate(a.name, b.name));
+        if (hidePats.length) entries = entries.filter((e) => !hidePats.some((re) => re.test(e.name)));
+        if (showPats.length) entries = entries.filter((e) => e.st.isDir || showPats.some((re) => re.test(e.name)));
+        if (o.prune) {
+          const hasShown = (dir) => {
+            let ns; try { ns = ctx.fs.readdir(dir); } catch (e) { return false; }
+            return ns.some((n) => {
+              if (!o.a && n[0] === '.') return false;
+              if (hidePats.some((re) => re.test(n))) return false;
+              const st = ctx.fs.lstat(joinPath(dir, n));
+              return st.isDir ? hasShown(joinPath(dir, n)) : (!o.d && (!showPats.length || showPats.some((re) => re.test(n))));
+            });
+          };
+          entries = entries.filter((e) => !e.st.isDir || hasShown(e.full));
+        }
+        entries.sort((a, b) => (o.t ? b.st.mtime - a.st.mtime : 0) || collate(a.name, b.name));
         if (o.r) entries.reverse();
         if (o.dirsfirst) entries = entries.filter((e) => e.st.isDir).concat(entries.filter((e) => !e.st.isDir));
         entries.forEach((e, i) => {
           const last = i === entries.length - 1;
           let extra = '';
           if (o.p) extra += '[' + modeString(e.st) + ']  ';
-          if (o.s) extra += '[' + U.padStart(e.st.size, 11) + ']  ';
+          if (o.h) extra += '[' + U.padStart(U.humanSize(e.st.size).replace(/B$/, ''), 4) + ']  ';
+          else if (o.s) extra += '[' + U.padStart(e.st.size, 11) + ']  ';
           const readable = !e.st.isDir || (ctx.fs.can(e.full, 'r') && ctx.fs.can(e.full, 'x'));
           if (e.st.isDir) dirs++; else files++;
-          ctx.out(prefix + (last ? glyph.last : glyph.mid) + extra + label(e, o.f ? e.full : e.name) + (readable ? '' : '  [error opening dir]') + '\n');
+          ctx.out((o.i ? '' : prefix + (last ? glyph.last : glyph.mid)) + extra + label(e, o.f ? e.full : e.name) + (readable ? '' : '  [error opening dir]') + '\n');
           if (e.st.isDir && readable && level < maxLevel) visit(e.full, prefix + (last ? glyph.gap : glyph.bar), level + 1);
         });
       };

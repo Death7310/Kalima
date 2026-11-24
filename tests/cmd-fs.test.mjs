@@ -838,3 +838,19 @@ test('ln -r/-b/-L/-P/-t, chmod long octal, du -B/--exclude/-0/--time, df -i/-x, 
   const r = await sh('file');
   assert.equal(r.out, ''); assert.match(r.err, /^Usage: file/);
 });
+
+test('ls -b/--si/--time-style=+FMT, tree -P/-I/-h/-Q/--prune, more +N and less +F', async () => {
+  const { sh, out } = await setup();
+  await sh('mkdir -p /tmp/q6; cd /tmp/q6; printf x > "sp ace"; head -c 1500 /dev/zero > f; touch -d "2026-01-01 10:20" f');
+  assert.equal(await out('ls -b'), 'f\nsp\\ ace\n');
+  assert.match(await out('ls -l --si f'), / 1\.5k /);
+  assert.match(await out('ls -l --time-style=+%Y-%m-%d f'), / 2026-01-01 f\n$/);
+  await sh('mkdir -p t/a/b t/c; touch t/a/f t/a/b/g t/h');
+  assert.equal(await out('tree --noreport -I "a|c" t'), 't\n└── h\n');
+  assert.equal(await out('tree --noreport -P g --prune t'), 't\n└── a\n    └── b\n        └── g\n');
+  assert.match(await out('tree -Q --noreport t'), /"a"/);
+  assert.match(await out('tree -h --noreport t'), /\[4\.0K\]  a/);
+  await sh('seq 1 5 > n');
+  assert.equal(await out('more +3 n'), '3\n4\n5\n');
+  assert.equal(await out('less +F n'), '1\n2\n3\n4\n5\n');
+});
