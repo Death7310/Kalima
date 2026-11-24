@@ -152,8 +152,34 @@
     return status;
   }
 
+  /** ping to ::1: the one IPv6 address the lab machines have. */
+  async function pingLoopback6(ctx, target, p) {
+    const lit = target === '::1';
+    const shown = lit ? '::1 (::1)' : target + '(' + target + ' (::1))';
+    const from = lit ? '::1' : target + ' (::1)';
+    ctx.println('PING ' + shown + ' ' + p.size + ' data bytes');
+    const rtts = []; let t = 0; let n = 0;
+    try {
+      for (let seq = 1; seq <= p.count; seq++) {
+        const rtt = K.net.jitter(0.04, 0.02); rtts.push(rtt); n++;
+        if (!p.o.q) ctx.println((p.size + 8) + ' bytes from ' + from + ': icmp_seq=' + seq + ' ttl=64 time=' + pingTime(rtt) + ' ms');
+        if (seq === p.count || (p.deadline && t + p.interval * 1000 >= p.deadline * 1000)) break;
+        await ctx.sleep(p.interval * 1000); t += p.interval * 1000;
+      }
+    } catch (e) { if (!(e instanceof K.Interrupt)) throw e; }
+    ctx.println('\n--- ' + (lit ? '::1' : target) + ' ping statistics ---');
+    ctx.println(n + ' packets transmitted, ' + n + ' received, 0% packet loss, time ' + Math.floor(t + (n > 1 ? 2 + K.net.rand() * 3 : 0)) + 'ms');
+    const avg = rtts.reduce((x, y) => x + y, 0) / rtts.length;
+    const mdev = Math.sqrt(Math.max(0, rtts.reduce((x, y) => x + y * y, 0) / rtts.length - avg * avg));
+    ctx.println('rtt min/avg/max/mdev = ' + [Math.min.apply(null, rtts), avg, Math.max.apply(null, rtts), mdev].map((x) => x.toFixed(3)).join('/') + ' ms');
+    return 0;
+  }
+
   async function pingOne(ctx, target, p) {
     const { o } = p; const net = K.net; const machine = ctx.machine;
+    const v6lo = target === '::1' || ((o['6'] || target === 'ip6-localhost' || target === 'ip6-loopback') && /^(localhost|ip6-localhost|ip6-loopback)$/.test(target));
+    if (v6lo) return pingLoopback6(ctx, target, p);
+    if (target.indexOf(':') >= 0 && /^[0-9a-f:.]+$/i.test(target)) { ctx.eprintln('ping: connect: Network is unreachable'); return 2; }
     if (o['6']) { ctx.eprintln('ping: ' + target + ': Address family for hostname not supported'); return 2; }
     const dest = lookup(ctx, target);
     if (dest.err) { ctx.eprintln('ping: ' + target + ': ' + RESOLVE_MSG[dest.err]); return 2; }

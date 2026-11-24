@@ -809,3 +809,15 @@ test('route -A inet and --inet select the IPv4 table without changing name resol
   assert.match(plain, /^default +gw\.halcyon\.lab /m);
   assert.match(await sim.out('route -n -A inet'), /^0\.0\.0\.0 +10\.10\.10\.1 /m);
 });
+
+test('ping ::1 and ping -6 localhost answer from the IPv6 loopback', async () => {
+  const sim = await net();
+  let r = await sim.run('ping -c 2 ::1');
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^PING ::1 \(::1\) 56 data bytes\n64 bytes from ::1: icmp_seq=1 ttl=64 time=0\.\d{3} ms\n/);
+  assert.match(r.out, /--- ::1 ping statistics ---\n2 packets transmitted, 2 received, 0% packet loss, time \d+ms\nrtt /);
+  r = await sim.run('ping -6 -c 1 localhost');
+  assert.match(r.out, /^PING localhost\(localhost \(::1\)\) 56 data bytes\n64 bytes from localhost \(::1\): icmp_seq=1 ttl=64/);
+  r = await sim.run('ping -c 1 fe80::1');
+  assert.equal(r.err, 'ping: connect: Network is unreachable\n');
+});
