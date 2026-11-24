@@ -216,6 +216,7 @@
       this.setVar('PWD', this.cwd, true);
       if (!this.vars.has('PATH')) this.setVar('PATH', DEFAULT_PATH, true);
       this.setVar('HOSTNAME', this.machine.hostname, false);
+      if (this.flavor === 'bash') { this.setVar('BASH_VERSION', '5.3.3(1)-release', false); } else if (this.flavor === 'zsh') this.setVar('ZSH_VERSION', '5.9', false);
       this.startTime = K.clock.now();
       this.proc = this.machine.spawn({
         ppid: this.parent ? this.parent.pid : 1, user: this.user.name, tty: this.tty,
@@ -267,7 +268,7 @@
       const text = (await this.expandString(idx, io)).map((x) => x.s).join('');
       if (a && a.assoc) return text.replace(/^(["'])(.*)\1$/, '$2');
       let k;
-      try { k = arith(text, (n) => this.getVar(n), (n, val) => this.setVar(n, val)); }
+      try { k = arith(text, (n) => this.getVar(n), (n, val) => this.setVar(n, val), { octal: this.flavor !== 'zsh' }); }
       catch (e) { throw new ShellError(this.msgPrefix() + e.message); }
       return k;
     }
@@ -429,7 +430,7 @@
         if (tok.startsWith('$((')) {
           const expr = (await this.expandString(tok.slice(3, -2), io)).map((x) => x.s).join('');
           let v;
-          try { v = arith(expr, (n) => this.getVar(n), (n, val) => this.setVar(n, val)); }
+          try { v = arith(expr, (n) => this.getVar(n), (n, val) => this.setVar(n, val), { octal: this.flavor !== 'zsh' }); }
           catch (e) { throw new ShellError(this.msgPrefix() + e.message); }
           out.push({ s: String(v) });
         } else if (tok.startsWith('$(')) {
@@ -852,7 +853,7 @@
           if (r.error) { io.err(r.error + '\n'); return 1; }
           try {
             const expr = (await this.expandString(node.expr, io)).map((x) => x.s).join('');
-            const v = arith(expr, (n) => this.getVar(n), (n, val) => this.setVar(n, val));
+            const v = arith(expr, (n) => this.getVar(n), (n, val) => this.setVar(n, val), { octal: this.flavor !== 'zsh' });
             return v === 0 ? 1 : 0;
           } catch (e) {
             if (e instanceof ShellError) { io.err(e.message + '\n'); return 1; }
@@ -966,7 +967,7 @@
         case 'cfor': {
           const ev = async (t) => {
             const expr = (await this.expandString(t, io)).map((x) => x.s).join('');
-            try { return arith(expr, (n) => this.getVar(n), (n, val) => this.setVar(n, val)); }
+            try { return arith(expr, (n) => this.getVar(n), (n, val) => this.setVar(n, val), { octal: this.flavor !== 'zsh' }); }
             catch (e) { throw new ShellError(this.msgPrefix() + e.message); }
           };
           let st = 0; let guard = 0;
@@ -2225,7 +2226,7 @@
       const sh = this; let v = 0;
       if (!ctx.args.length) { ctx.err(sh.msgPrefix() + 'let: expression expected\n'); return 1; }
       for (const e of ctx.args) {
-        try { v = arith(e, (n) => sh.getVar(n), (n, val) => sh.setVar(n, val)); }
+        try { v = arith(e, (n) => sh.getVar(n), (n, val) => sh.setVar(n, val), { octal: sh.flavor !== 'zsh' }); }
         catch (err) { ctx.err(sh.msgPrefix() + (sh.flavor === 'zsh' ? '' : 'let: ') + err.message + '\n'); return 1; }
       }
       return v === 0 ? 1 : 0;

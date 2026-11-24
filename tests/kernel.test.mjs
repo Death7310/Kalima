@@ -554,3 +554,12 @@ test('shell review: missing redirection target is an error, not a continuation; 
   assert.equal((await sim.run('bash -c "ls | | x"')).err, "bash: -c: line 1: syntax error near unexpected token `|'\nbash: -c: line 1: `ls | | x'\n");
   assert.equal((await sim.run('bash -c "cat >"')).err, "bash: -c: line 1: syntax error near unexpected token `newline'\nbash: -c: line 1: `cat >'\n");
 });
+
+test('shell review: leading-zero numbers are octal in bash and decimal in zsh, version variables', async () => {
+  const sim = await kernelSim();
+  assert.equal((await sim.run('echo $((017)) $((010+1))')).out, '17 11\n');
+  assert.equal((await sim.run("bash -c 'echo $((017)) $((010+1)) $((10#08))'")).out, '15 9 8\n');
+  assert.equal((await sim.run("bash -c 'echo $((08))'")).err, 'bash: line 1: 08: value too great for base (error token is "08")\n');
+  assert.equal((await sim.run("bash -c 'echo $BASH_VERSION'")).out, '5.3.3(1)-release\n');
+  assert.equal((await sim.run('echo $ZSH_VERSION')).out, '5.9\n');
+});

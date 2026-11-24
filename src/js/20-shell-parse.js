@@ -597,7 +597,8 @@
   }
 
   /* -------------------------------------------------------------- arithmetic */
-  function arith(expr, getVar, setVar) {
+  function arith(expr, getVar, setVar, aopts) {
+    const octal = !!(aopts && aopts.octal);
     const toks = [];
     const re = /\s*(0[xX][0-9a-fA-F]+|\d+#[0-9a-zA-Z@_]+|\d+|[A-Za-z_][A-Za-z0-9_]*|<<=|>>=|\*=|\/=|%=|\+=|-=|&=|\|=|\^=|\*\*|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*\/%()<>!~&|^?:=,])/y;
     let m; re.lastIndex = 0;
@@ -631,6 +632,10 @@
         const bs = parseInt(t, 10); const dg = t.slice(t.indexOf('#') + 1); const nv = parseInt(dg, bs);
         if (bs < 2 || bs > 36 || isNaN(nv) || nv.toString(bs) !== dg.toLowerCase().replace(/^0+(?=.)/, '')) throw new Error('bad math expression: value too great for base (error token is "' + t + '")');
         return nv;
+      }
+      if (octal && /^0\d/.test(t)) {
+        if (/[89]/.test(t)) throw new Error(t + ': value too great for base (error token is "' + t + '")');
+        return parseInt(t, 8);
       }
       if (/^\d/.test(t)) return /^0[xX]/.test(t) ? parseInt(t, 16) : parseInt(t, 10);
       if (/^[A-Za-z_]/.test(t)) {
