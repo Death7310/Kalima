@@ -1075,3 +1075,16 @@ test('systemctl: cat shows a clean ExecStart, mask and unmask work, list-timers 
   const running = await sim.out('systemctl list-units --type=service --state=running');
   assert.ok(!/ exited /.test(running.split('\n\n')[0]));
 });
+
+test('man: not-installed catalogue tools have no page, long NAME lines wrap', async () => {
+  const sim = await sys();
+  const stub = sim.K.cmd.list().find((d) => d.installed === false);
+  assert.ok(stub);
+  const r = await sim.run('man ' + stub.name);
+  assert.equal(r.code, 16);
+  assert.match(r.err, /^No manual entry for /);
+  assert.equal((await sim.run('whatis ' + stub.name)).code, 16);
+  assert.ok(!(await sim.out('apropos ' + stub.name)).includes(stub.name + ' ('));
+  const page = await sim.out('man netstat');
+  assert.ok(page.split('\n').every((l) => l.length <= 80), 'no line wider than the page');
+});

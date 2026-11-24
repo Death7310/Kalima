@@ -1244,7 +1244,7 @@
   async function runWithEnv(ctx, env, cwd, argv) {
     const sh = ctx.shell; const name = argv[0];
     const child = sh.child({ env, cwd });
-    for (const k of ['HOME', 'USER', 'LOGNAME', 'PWD']) if (!(k in env)) child.unsetVar(k);
+    for (const k of ['HOME', 'USER', 'LOGNAME', 'PWD', 'SHLVL']) if (!(k in env)) child.unsetVar(k);
     if (!('PATH' in env)) child.exported.delete('PATH'); // still searched, like execvp's default path
     try {
       if (name.indexOf('/') >= 0) {
@@ -2933,7 +2933,7 @@
 
   /** Command definitions the machine really has (lab servers lack the Kali-only tools). */
   function commandsOf(machine) {
-    return K.cmd.list().filter((d) => !(d.only === 'kali' && machine.profile !== 'kali'));
+    return K.cmd.list().filter((d) => !(d.only === 'kali' && machine.profile !== 'kali') && d.installed !== false);
   }
   const manBody = (def) => (typeof def.man === 'function' ? def.man() : def.man) || MAN_BODIES[def.name] || '';
 
@@ -2988,7 +2988,7 @@
     const heading = (h) => (bold ? K.c.bold(h) : h);
     const body = manBody(def).replace(/\n+$/, '');
     const lines = [threeColumns(title, SECTION_TITLES[def.section] || 'User Commands', title), ''];
-    lines.push(heading('NAME'), '       ' + def.name + ' - ' + def.summary, '');
+    lines.push(heading('NAME'), ...wrapManLine('       ' + def.name + ' - ' + def.summary), '');
     if (def.synopsis) lines.push(heading('SYNOPSIS'), ...def.synopsis.split('\n').flatMap((l) => wrapManLine((l.startsWith('       ') ? '' : '       ') + l)), '');
     const text = /^[A-Z][A-Z ]+(\n|$)/.test(body) ? body : 'DESCRIPTION\n       ' + body;
     // Page text written hard-wrapped (about 70 columns) would otherwise show ragged breaks once the
