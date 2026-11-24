@@ -815,3 +815,26 @@ test('tail +N obsolete form, head -c on /dev/zero, touch -d with month names, rm
   const r = await sh('rm q2/');
   assert.equal(r.err, "rm: cannot remove 'q2/': Not a directory\n"); assert.equal(r.code, 1);
 });
+
+test('ln -r/-b/-L/-P/-t, chmod long octal, du -B/--exclude/-0/--time, df -i/-x, file details', async () => {
+  const { sh, out } = await setup();
+  await sh('mkdir -p /tmp/q5/a/b /tmp/q5/c; cd /tmp/q5; touch a/b/f');
+  await sh('ln -sr a/b/f c/l');
+  assert.equal(await out('readlink c/l'), '../a/b/f\n');
+  await sh('touch f; ln -b f g; ln -b f g');
+  assert.equal(await out('ls g*'), 'g\ng~\n');
+  assert.equal((await sh('ln -L f h; ln -P f i; ln -t c f; ls c')).out, 'f\nl\n');
+  assert.equal((await sh('chmod 00640 f; echo $?')).out, '0\n');
+  assert.match(await out('du -BM a'), /^1M\ta\/b\n1M\ta\n$/);
+  assert.equal(await out('du --exclude=b a'), '4\ta\n');
+  assert.equal(await out('du -0 a | tr "\\0" X'), '4\ta/bX8\taX');
+  assert.match(await out('du --time a'), /^4\t\d{4}-\d\d-\d\d \d\d:\d\d\ta\/b\n/);
+  assert.match(await out('df -i /'), /^Filesystem +Inodes +IUsed +IFree IUse% Mounted on\n/);
+  assert.equal((await out('df -x tmpfs -x devtmpfs')).split('\n').length, 3);
+  await sh('printf "a\\r\\nb\\n" > crlf; printf "int main(){}\\n" > m.c; ln -s nowhere dang');
+  assert.equal(await out('file crlf'), 'crlf: ASCII text, with CRLF, LF line terminators\n');
+  assert.equal(await out('file m.c'), 'm.c: C source, ASCII text\n');
+  assert.equal(await out('file -L dang'), "dang: cannot open `dang' (No such file or directory)\n");
+  const r = await sh('file');
+  assert.equal(r.out, ''); assert.match(r.err, /^Usage: file/);
+});

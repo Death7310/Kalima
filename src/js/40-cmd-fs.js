@@ -654,8 +654,8 @@
    */
   function applyMode(spec, cur, isDir, umask) {
     if (/^[0-7]+$/.test(spec)) {
-      if (spec.length > 4) return null;
       const n = parseInt(spec, 8);
+      if (n > 0o7777) return null;
       return isDir && spec.length < 5 ? n | (cur & 0o6000) : n;
     }
     let mode = cur;
@@ -972,15 +972,16 @@
     man: 'DESCRIPTION\n       Create a link to TARGET with the name LINK_NAME. Create hard links by default, symbolic links with --symbolic.\n\nOPTIONS\n       -f, --force\n              remove existing destination files\n       -s, --symbolic\n              make symbolic links instead of hard links\n       -v, --verbose\n              print name of each linked file\n       -n, --no-dereference\n              treat LINK_NAME as a normal file if it is a symbolic link to a directory\n       -T     treat LINK_NAME as a normal file always\n\nEXAMPLES\n       ln -s /usr/share/wordlists ~/wordlists\n              Make a shortcut to the wordlists folder.',
     help: "  -f, --force                 remove existing destination files\n  -n, --no-dereference        treat LINK_NAME as a normal file if\n                                it is a symbolic link to a directory\n  -s, --symbolic              make symbolic links instead of hard links\n  -T, --no-target-directory   treat LINK_NAME as a normal file always\n  -v, --verbose               print name of each linked file\n",
     authors: 'Mike Parker and David MacKenzie',
-    spec: { short: 'sfvnTi', long: ['symbolic', 'force', 'verbose', 'no-dereference', 'no-target-directory', 'interactive'], alias: { symbolic: 's', force: 'f', verbose: 'v', 'no-dereference': 'n', 'no-target-directory': 'T' } },
+    spec: { short: 'sfvnTirbLPt:S:', long: ['symbolic', 'force', 'verbose', 'no-dereference', 'no-target-directory', 'interactive', 'relative', 'backup=?', 'logical', 'physical', 'target-directory=', 'suffix='], alias: { symbolic: 's', force: 'f', verbose: 'v', 'no-dereference': 'n', 'no-target-directory': 'T', relative: 'r', 'target-directory': 't', logical: 'L', physical: 'P', suffix: 'S' } },
     main(ctx, g) {
       const o = g.opts; const args = g.rest.slice();
       if (!args.length) return missingOperand(ctx, 'file operand');
       let dest;
-      if (args.length === 1) { dest = '.'; } else dest = args.pop();
+      if (o.t != null) dest = o.t; else if (args.length === 1) { dest = '.'; } else dest = args.pop();
+      if (o.t != null && !ctx.fs.isDir(dest)) { ctx.eprintln('ln: target ' + q(dest) + ': ' + notDirReason(ctx, dest)); return 1; }
       const destIsDir = !o.T && (o.n ? (tryLstat(ctx, dest) && tryLstat(ctx, dest).isDir) : ctx.fs.isDir(dest));
       if (args.length > 1 && !destIsDir) { ctx.eprintln('ln: target ' + q(dest) + ': ' + notDirReason(ctx, dest)); return 1; }
-      if (args.length === 1 && g.rest.length === 1 && !destIsDir) return 1;
+      if (args.length === 1 && g.rest.length === 1 && o.t == null && !destIsDir) return 1;
       let status = 0;
       for (const src of args) {
         const name = destIsDir ? joinPath(dest, VFS.basename(src)) : dest;
@@ -988,11 +989,18 @@
           if (!o.s) {
             if (!tryLstat(ctx, src)) { ctx.eprintln('ln: failed to access ' + q(src) + ': No such file or directory'); status = 1; continue; }
           }
-          if (tryLstat(ctx, name)) {
-            if (!o.f) throw new K.FsError('EEXIST', name);
-            ctx.fs.unlink(name);
+          let target = src;
+          if (o.s && o.r) {
+            const from = ctx.fs.abs(name).split('/').slice(0, -1).filter(Boolean); const to = ctx.fs.abs(src).split('/').filter(Boolean);
+            let i = 0; while (i < from.length && i < to.length - 1 && from[i] === to[i]) i++;
+            target = from.slice(i).map(() => '..').concat(to.slice(i)).join('/') || '.';
           }
-          if (o.s) ctx.fs.symlink(src, name); else hardLink(ctx, src, name);
+          if (tryLstat(ctx, name)) {
+            if (o.b != null || o.backup != null) ctx.fs.rename(name, backupName(ctx, name, backupMode(o.backup != null ? o.backup : true), o.S || o.suffix || null));
+            else if (!o.f) throw new K.FsError('EEXIST', name);
+            else ctx.fs.unlink(name);
+          }
+          if (o.s) ctx.fs.symlink(target, name); else hardLink(ctx, src, name);
           if (o.v) ctx.println(q(name) + (o.s ? ' -> ' : ' => ') + q(src));
         } catch (e) {
           if (!isFsError(e)) throw e;
@@ -1625,9 +1633,13 @@
     const longest = Math.max.apply(null, lines.map((l) => U.byteLen(l.replace(/\r$/, ''))));
     const mods = [];
     if (longest > 300) mods.push('with very long lines (' + longest + ')');
-    if (/\r\n/.test(text)) mods.push('with CRLF line terminators');
-    else if (/\r/.test(text)) mods.push('with CR line terminators');
-    if (text.indexOf('\n') < 0) mods.push('with no line terminators');
+    const kinds = [];
+    if (/\r\n/.test(text)) kinds.push('CRLF');
+    if (/\r(?!\n)/.test(text)) kinds.push('CR');
+    if (/(^|[^\r])\n/.test(text)) kinds.push(kinds.length ? 'LF' : '');
+    if (kinds.length && kinds[kinds.length - 1] === '') kinds.pop();
+    if (kinds.length) mods.push('with ' + kinds.join(', ') + ' line terminators');
+    if (!/[\r\n]/.test(text)) mods.push('with no line terminators');
     return { base: d, mods, ascii };
   }
 
@@ -1745,6 +1757,7 @@
     if (/^[[{]/.test(head)) {
       try { JSON.parse(s); return text('JSON text data', 'application/json'); } catch (e) { /* plain text */ }
     }
+    if (/^\s*#\s*include\s*[<"][\w./]+[>"]/m.test(s) || /^\s*(?:int|void)\s+main\s*\(/m.test(s)) return text('C source, ' + tail(), 'text/x-c');
     if (looksLikeCsv(s)) return text('CSV ' + tail(), 'text/csv');
     return text(tail(), 'text/plain');
   }
@@ -1767,9 +1780,6 @@
     let st;
     try { st = o.follow ? ctx.fs.stat(f) : ctx.fs.lstat(f); } catch (e) {
       if (!isFsError(e)) throw e;
-      if (o.follow && e.code === 'ENOENT') {
-        try { const l = ctx.fs.lstat(f); if (l.isLink) return { desc: 'broken symbolic link to ' + l.target, mime: 'inode/symlink', enc: 'binary' }; } catch (e2) { /* fall through */ }
-      }
       return { error: e };
     }
     if (st.isLink) {
@@ -1789,7 +1799,7 @@
       if (g.opts.version) { ctx.out('file-5.45\nmagic file from /etc/magic:/usr/share/misc/magic\n'); return 0; }
       if (g.opts.help) { ctx.out('Usage: file [OPTION...] [FILE...]\nDetermine type of FILEs.\n\n  -b, --brief                do not prepend filenames to output lines\n  -i, --mime                 output MIME type strings (--mime-type and\n                             --mime-encoding)\n  -L, --dereference          follow symlinks\n  -h, --no-dereference       don\'t follow symlinks (default)\n      --help                 display this help and exit\n      --version              output version information and exit\n'); return 0; }
       const files = g.rest.length ? g.rest : null;
-      if (!files) { ctx.out(FILE_USAGE); return 1; }
+      if (!files) { ctx.err(FILE_USAGE); return 1; }
       const o = { follow: !!g.opts.L };
       const width = Math.max.apply(null, files.map((f) => (f === '-' ? '/dev/stdin' : f).length)) + 1;
       for (const f of files) {
@@ -1945,6 +1955,8 @@
 
   /* ================================================================ du, df */
 
+  const timeIso = (ms) => { const d = new Date(ms); const p = U.pad2; return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()); };
+
   /** Blocks (in bytes) that an entry occupies on disk. */
   const diskBytes = (st) => blocksOf(st) * 1024;
 
@@ -1953,9 +1965,14 @@
     if (o.b) return { div: 1, human: false, apparent: true };
     if (o.h) return { div: 1, human: true, apparent: !!o['apparent-size'] };
     if (o.m) return { div: 1048576, human: false, apparent: !!o['apparent-size'] };
-    const bs = o['block-size'];
-    const n = bs && /^\d+[KMG]?$/.test(bs) ? parseSize(bs.replace(/^(\d+)([KMG])$/, '$1$2')) : null;
-    return { div: n || 1024, human: false, apparent: !!o['apparent-size'] };
+    if (o.k) return { div: 1024, human: false, apparent: !!o['apparent-size'] };
+    const bs = o.B != null ? o.B : o['block-size'];
+    const m = typeof bs === 'string' ? /^(\d*)([KMGTkmgt])?(B)?$/.exec(bs) : null;
+    if (m && (m[1] || m[2])) {
+      const base = m[3] ? 1000 : 1024; const pow = m[2] ? 'KMGT'.indexOf(m[2].toUpperCase()) + 1 : 0;
+      return { div: (parseInt(m[1] || '1', 10) || 1) * Math.pow(base, pow), human: false, apparent: !!o['apparent-size'], suffix: m[1] ? '' : m[2].toUpperCase() + (m[3] || '') };
+    }
+    return { div: 1024, human: false, apparent: !!o['apparent-size'] };
   }
 
   gnu({
@@ -1963,17 +1980,19 @@
     man: 'DESCRIPTION\n       Summarize device usage of the set of FILEs, recursively for directories.\n\nOPTIONS\n       -a, --all\n              write counts for all files, not just directories\n       -b, --bytes\n              equivalent to --apparent-size --block-size=1\n       -c, --total\n              produce a grand total\n       -d, --max-depth=N\n              print the total for a directory only if it is N or fewer levels below the command line argument\n       -h, --human-readable\n              print sizes in human readable format (e.g., 1K 234M 2G)\n       -k     like --block-size=1K\n       -s, --summarize\n              display only a total for each argument\n\nEXAMPLES\n       du -sh /var/log\n              Total size of the log directory.\n       du -h -d 1 ~ | sort -h\n              Which top-level folders in the home directory are biggest.',
     help: "  -a, --all             write counts for all files, not just directories\n      --apparent-size   print apparent sizes rather than device usage\n  -b, --bytes           equivalent to '--apparent-size --block-size=1'\n  -c, --total           produce a grand total\n  -d, --max-depth=N     print the total for a directory (or file, with --all)\n                          only if it is N or fewer levels below the command\n                          line argument\n  -h, --human-readable  print sizes in human readable format (e.g., 1K 234M 2G)\n  -k                    like --block-size=1K\n  -m                    like --block-size=1M\n  -s, --summarize       display only a total for each argument\n",
     authors: 'Torbjorn Granlund, David MacKenzie, Paul Eggert, and Jim Meyering',
-    spec: { short: 'abchkmsd:xSDLP0', long: ['all', 'bytes', 'total', 'human-readable', 'summarize', 'max-depth=', 'apparent-size', 'block-size=', 'si', 'one-file-system', 'null'], alias: { all: 'a', bytes: 'b', total: 'c', 'human-readable': 'h', summarize: 's', 'max-depth': 'd' } },
+    spec: { short: 'abchkmsd:xSDLP0B:', long: ['all', 'bytes', 'total', 'human-readable', 'summarize', 'max-depth=', 'apparent-size', 'block-size=', 'si', 'one-file-system', 'null', 'time=?', 'exclude='], alias: { all: 'a', bytes: 'b', total: 'c', 'human-readable': 'h', summarize: 's', 'max-depth': 'd' } },
     main(ctx, g) {
       const o = g.opts;
       if (o.s && o.d != null) { ctx.eprintln('du: warning: summarizing conflicts with --max-depth=' + o.d); ctx.eprintln("Try 'du --help' for more information."); return 1; }
       const maxDepth = o.s ? 0 : o.d == null ? Infinity : parseInt(o.d, 10);
       if (o.d != null && !/^\d+$/.test(o.d)) { ctx.eprintln('du: invalid maximum depth ' + q(o.d)); ctx.eprintln("Try 'du --help' for more information."); return 1; }
       const unit = duUnit(g);
-      const fmt = (bytes) => (unit.human ? U.humanSize(bytes) : String(Math.ceil(bytes / unit.div)));
+      const fmt = (bytes) => (unit.human ? U.humanSize(bytes) : String(Math.ceil(bytes / unit.div)) + (unit.suffix || ''));
+      const excl = [].concat(g.all && g.all.exclude || o.exclude || []).filter((x) => typeof x === 'string').map(globRe);
+      const eol = o['0'] || o.null ? '\0' : '\n';
       const sizeOf = (st) => (unit.apparent ? st.size : diskBytes(st));
       let status = 0; let grand = 0;
-      const line = (bytes, name) => ctx.out(fmt(bytes) + '\t' + name + '\n');
+      const line = (bytes, name, st) => ctx.out(fmt(bytes) + '\t' + (o.time && st ? timeIso(st.mtime) + '\t' : '') + name + eol);
       const walk = (path, name, depth) => {
         ctx.checkAbort();
         let st;
@@ -1981,6 +2000,7 @@
           if (!isFsError(e)) throw e;
           ctx.eprintln('du: cannot access ' + q(name) + ': ' + e.message); status = 1; return 0;
         }
+        if (depth > 0 && excl.some((re) => re.test(VFS.basename(path)))) return 0;
         let total = sizeOf(st);
         if (st.isDir) {
           let names = [];
@@ -1989,8 +2009,8 @@
             ctx.eprintln('du: cannot read directory ' + q(name) + ': ' + e.message); status = 1;
           }
           for (const n of names) total += walk(joinPath(path, n), joinPath(name, n), depth + 1);
-          if (depth <= maxDepth) line(total, name);
-        } else if ((o.a && depth <= maxDepth) || depth === 0) line(total, name);
+          if (depth <= maxDepth) line(total, name, st);
+        } else if ((o.a && depth <= maxDepth) || depth === 0) line(total, name, st);
         return total;
       };
       for (const f of g.rest.length ? g.rest : ['.']) grand += walk(f, f, 0);
@@ -2021,10 +2041,10 @@
     return { rows, unitHead, hum };
   }
 
-  function dfTable(ctx, rows, o, hum, unitHead) {
+  function dfTable(ctx, rows, o, hum, unitHead, inodes) {
     const cols = [{ k: 'dev', h: 'Filesystem', min: 14, left: true }];
     if (o.T) cols.push({ k: 'type', h: 'Type', left: true });
-    cols.push({ k: 'size', h: unitHead, min: hum ? 5 : 0 }, { k: 'used', h: 'Used', min: hum ? 5 : 0 }, { k: 'avail', h: hum ? 'Avail' : 'Available', min: hum ? 5 : 0 }, { k: 'pct', h: 'Use%', min: 0 }, { k: 'mount', h: 'Mounted on', left: true, last: true });
+    cols.push({ k: 'size', h: unitHead, min: hum ? 5 : 0 }, { k: 'used', h: inodes ? 'IUsed' : 'Used', min: hum ? 5 : 0 }, { k: 'avail', h: inodes ? 'IFree' : hum ? 'Avail' : 'Available', min: hum ? 5 : 0 }, { k: 'pct', h: inodes ? 'IUse%' : 'Use%', min: 0 }, { k: 'mount', h: 'Mounted on', left: true, last: true });
     for (const c of cols) c.w = Math.max(c.min || 0, c.h.length, ...rows.map((r) => r[c.k].length));
     const fmtRow = (r) => cols.map((c) => (c.last ? r[c.k] : c.left ? U.padEnd(r[c.k], c.w) : U.padStart(r[c.k], c.w))).join(' ');
     const head = {}; for (const c of cols) head[c.k] = c.h;
@@ -2036,7 +2056,7 @@
     man: 'DESCRIPTION\n       This manual page documents the GNU version of df. df displays the amount of space available on the file system containing each file name argument. If no file name is given, the space available on all currently mounted file systems is shown.\n\nOPTIONS\n       -h, --human-readable\n              print sizes in powers of 1024 (e.g., 1023M)\n       -T, --print-type\n              print file system type\n       -k     like --block-size=1K\n\nEXAMPLES\n       df -h\n              Show every filesystem in human readable sizes.\n       df -hT /\n              Show the type and usage of the root filesystem.',
     help: "  -a, --all             include pseudo, duplicate, inaccessible file systems\n  -h, --human-readable  print sizes in powers of 1024 (e.g., 1023M)\n  -H, --si              print sizes in powers of 1000 (e.g., 1.1G)\n  -k                    like --block-size=1K\n  -T, --print-type      print file system type\n",
     authors: 'Torbjorn Granlund, David MacKenzie, and Paul Eggert',
-    spec: { short: 'ahHkTPl', long: ['all', 'human-readable', 'si', 'print-type', 'local'], alias: { all: 'a', 'human-readable': 'h', si: 'H', 'print-type': 'T' } },
+    spec: { short: 'ahHkTPlix:t:', long: ['all', 'human-readable', 'si', 'print-type', 'local', 'inodes', 'exclude-type=', 'type=', 'total'], alias: { all: 'a', 'human-readable': 'h', si: 'H', 'print-type': 'T', inodes: 'i', 'exclude-type': 'x', type: 't' } },
     main(ctx, g) {
       const { rows, unitHead, hum } = dfRows(ctx, g);
       let list = MOUNTS; let status = 0;
@@ -2052,6 +2072,19 @@
           if (list.indexOf(m) < 0) list.push(m);
         }
         if (!list.length) return status;
+      }
+      const xs = [].concat(g.all.x || [], g.all['exclude-type'] || []).filter((v) => typeof v === 'string');
+      const ts = [].concat(g.all.t || [], g.all.type || []).filter((v) => typeof v === 'string');
+      if (xs.length) list = list.filter((m) => xs.indexOf(m.type) < 0);
+      if (ts.length) list = list.filter((m) => ts.indexOf(m.type) >= 0);
+      if (g.opts.i) {
+        const fmtN = (n) => (hum ? U.humanSize(n).replace(/B$/, '') : String(n));
+        const irows = list.map((m) => {
+          const total = Math.floor(m.size / 4); const used = m.mount === '/' ? 245803 : Math.min(total, 4 + Math.floor(m.used / 40000));
+          return { dev: m.dev, type: m.type, size: fmtN(total), used: fmtN(used), avail: fmtN(total - used), pct: (Math.ceil(used / total * 100) || 0) + '%', mount: m.mount };
+        });
+        ctx.out(dfTable(ctx, irows, g.opts, hum, 'Inodes', true));
+        return status;
       }
       ctx.out(dfTable(ctx, rows(list), g.opts, hum, unitHead));
       return status;
