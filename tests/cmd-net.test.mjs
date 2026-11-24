@@ -732,3 +732,24 @@ test('mtr: -s takes a size, -u selects UDP, -P sets the port', async () => {
   assert.match(r.out, /1\.\|-- 10\.10\.10\.10/);
   assert.equal((await sim.run('mtr -rn -c 2 -u 10.10.10.10')).code, 0);
 });
+
+test('netstat -s prints the SNMP counter sections; -t and -u narrow them', async () => {
+  const sim = await net();
+  const all = await sim.out('netstat -s');
+  assert.match(all, /^Ip:\n {4}Forwarding: 2\n {4}\d+ total packets received/);
+  for (const sec of ['Icmp:', 'IcmpMsg:', 'Tcp:', 'Udp:', 'TcpExt:', 'IpExt:']) assert.ok(all.includes('\n' + sec + '\n'), sec);
+  const tcp = await sim.out('netstat -st');
+  assert.match(tcp, /^Tcp:\n/m);
+  assert.doesNotMatch(tcp, /^Udp:/m);
+  assert.doesNotMatch(await sim.out('netstat -su'), /^Tcp:/m);
+});
+
+test('ping -f as root prints no per-reply lines and the ipg/ewma summary', async () => {
+  const sim = await net();
+  const r = await sim.run('sudo ping -f -c 20 10.10.10.10');
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.out, /bytes from/);
+  assert.match(r.out, /20 packets transmitted, 20 received, 0% packet loss, time \d+ms\nrtt min\/avg\/max\/mdev = [\d.\/]+ ms, ipg\/ewma \d+\.\d{3}\/\d+\.\d{3} ms\n$/);
+  const u = await sim.run('ping -f -c 5 10.10.10.10');
+  assert.equal(u.code, 2);
+});

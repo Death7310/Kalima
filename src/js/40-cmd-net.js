@@ -158,7 +158,7 @@
       return n ? n + ' (' + ip + ')' : ip;
     };
     const stamp = () => (o.D ? '[' + nowSec().toFixed(6) + '] ' : '');
-    const interval = Math.max(p.interval, o.f ? 0 : 0.002) * 1000;
+    const interval = o.f && !o.i ? 1 : Math.max(p.interval, 0.002) * 1000;
     const stats = { sent: 0, recv: 0, errs: 0, rtts: [] };
     const pending = []; // unreachable probes the kernel reports after the ARP timeout
     let t = 0; let lastAnswer = 0; let timedOut = null;
@@ -180,7 +180,7 @@
         const r = net.ping(machine, dest.ip, seq, { ttl: p.ttl, size: p.size, id });
         if (r.status === 'reply') {
           stats.recv++; stats.rtts.push(r.rtt); lastAnswer = r.rtt;
-          if (!o.q) ctx.println(stamp() + (p.size + 8) + ' bytes from ' + from(r.from) + ': icmp_seq=' + seq + ' ttl=' + r.ttl + ' time=' + pingTime(r.rtt) + ' ms');
+          if (!o.q && !o.f) ctx.println(stamp() + (p.size + 8) + ' bytes from ' + from(r.from) + ': icmp_seq=' + seq + ' ttl=' + r.ttl + ' time=' + pingTime(r.rtt) + ' ms');
         } else if (r.status === 'unreachable') {
           pending.push(seq);
         } else if (r.status === 'ttl-exceeded') {
@@ -208,7 +208,8 @@
     if (stats.recv) {
       const a = stats.rtts; const avg = a.reduce((x, y) => x + y, 0) / a.length;
       const mdev = Math.sqrt(a.reduce((x, y) => x + y * y, 0) / a.length - avg * avg);
-      ctx.println('rtt min/avg/max/mdev = ' + [Math.min.apply(null, a), avg, Math.max.apply(null, a), mdev].map((x) => x.toFixed(3)).join('/') + ' ms');
+      const ipg = stats.sent > 1 ? t / (stats.sent - 1) : 0;
+      ctx.println('rtt min/avg/max/mdev = ' + [Math.min.apply(null, a), avg, Math.max.apply(null, a), mdev].map((x) => x.toFixed(3)).join('/') + ' ms' + (o.f ? ', ipg/ewma ' + ipg.toFixed(3) + '/' + lastAnswer.toFixed(3) + ' ms' : ''));
     } else if (stats.errs && first.err && stats.sent > 1) ctx.println('pipe ' + stats.sent);
     return stats.recv ? 0 : 1;
   }
@@ -1271,6 +1272,28 @@
     return rows.map((r) => Object.assign(r, numeric ? {} : { dst: r.def ? 'default' : r.dst, via: r.via === '0.0.0.0' ? r.via : rdns(ctx, r.via) || r.via }));
   }
 
+  /** netstat -s: the kernel's SNMP counters, scaled from the interface byte counts so they stay consistent between runs. */
+  function netstatStats(ctx, o) {
+    const m = ctx.machine;
+    const ifs = m.ifaces.map((i) => nlStats(m, i));
+    const rxp = ifs.reduce((a, s) => a + s.rxp, 0); const txp = ifs.reduce((a, s) => a + s.txp, 0);
+    const all = !o.t && !o.u && !o.w;
+    const icmpIn = 4 + (U.hash32(m.hostname) % 20); const udpIn = Math.floor(rxp / 40); const tcpIn = Math.floor(rxp * 0.55);
+    const out = [];
+    const sec = (title, lines) => { out.push(title + ':'); lines.forEach((l) => out.push('    ' + l)); };
+    if (all) {
+      sec('Ip', ['Forwarding: 2', rxp + ' total packets received', '0 forwarded', '0 incoming packets discarded', rxp + ' incoming packets delivered', txp + ' requests sent out', '20 outgoing packets dropped']);
+      sec('Icmp', [icmpIn + ' ICMP messages received', '0 input ICMP message failed', 'ICMP input histogram:', '    destination unreachable: 2', '    echo replies: ' + (icmpIn - 2), (icmpIn + 3) + ' ICMP messages sent', '0 ICMP messages failed', 'ICMP output histogram:', '    destination unreachable: 2', '    echo requests: ' + (icmpIn + 1)]);
+      out.push('IcmpMsg:', '        InType0: ' + (icmpIn - 2), '        InType3: 2', '        OutType3: 2', '        OutType8: ' + (icmpIn + 1));
+    }
+    if (all || o.t) sec('Tcp', ['41 active connection openings', '3 passive connection openings', '0 failed connection attempts', '2 connection resets received', '1 connections established', tcpIn + ' segments received', Math.floor(txp * 0.5) + ' segments sent out', '9 segments retransmitted', '0 bad segments received', '14 resets sent']);
+    if (all || o.u) sec('Udp', [udpIn + ' packets received', '4 packets to unknown port received', '0 packet receive errors', Math.floor(txp * 0.2) + ' packets sent', '0 receive buffer errors', '0 send buffer errors', 'IgnoredMulti: 11']);
+    if (all) { sec('UdpLite', []); }
+    if (all || o.t) sec('TcpExt', ['6 TCP sockets finished time wait in fast timer', '112 delayed acks sent', '8 packet headers predicted', Math.floor(tcpIn * 0.4) + ' acknowledgments not containing data payload received', '9 other TCP timeouts', 'TCPTimeouts: 9', 'TCPOrigDataSent: ' + Math.floor(txp * 0.4)]);
+    if (all) sec('IpExt', ['InMcastPkts: 12', 'InBcastPkts: 33', 'InOctets: ' + ifs.reduce((a, s) => a + s.rx, 0), 'OutOctets: ' + ifs.reduce((a, s) => a + s.tx, 0), 'InMcastOctets: 1104', 'InBcastOctets: 6842', 'InNoECTPkts: ' + rxp]);
+    return out.join('\n');
+  }
+
   async function netstatRun(ctx) {
     const g = K.getopt(ctx.args, { short: 'rIiMgsvWnNecoplaFCZtuUSwxd46hVA:', long: ['route', 'interfaces', 'groups', 'statistics', 'verbose', 'wide', 'numeric', 'numeric-hosts', 'numeric-ports', 'numeric-users', 'symbolic', 'extend', 'programs', 'timers', 'continuous', 'listening', 'all', 'fib', 'cache', 'tcp', 'udp', 'raw', 'unix', 'help', 'version', 'ipv4', 'ipv6', 'masquerade', 'udplite', 'sctp', 'context'], alias: { route: 'r', interfaces: 'i', numeric: 'n', programs: 'p', listening: 'l', all: 'a', tcp: 't', udp: 'u', raw: 'w', unix: 'x', help: 'h', version: 'V', extend: 'e', wide: 'W', verbose: 'v', ipv4: '4', ipv6: '6' } });
     if (g.err) { ctx.eprintln('netstat: ' + g.err); ctx.err(NETSTAT_USAGE); return 1; }
@@ -1298,7 +1321,7 @@
       ctx.println(['Kernel Interface table', IFACE_STATS_HEAD].concat(list.map((i) => ifaceStatsRow(m, i))).join('\n'));
       return 0;
     }
-    if (o.s) { ctx.eprintln('netstat: statistics are not available in the simulator'); return 1; }
+    if (o.s) { ctx.println(netstatStats(ctx, o)); return 0; }
     const anyProto = o.t || o.u || o.w || o.x;
     const f = { tcp: !anyProto || !!o.t, udp: !anyProto || !!o.u, listening: !!o.l, all: !!o.a, v4: !!o['4'], v6: !!o['6'] };
     const rows = selectSockets(ctx, f);
