@@ -141,7 +141,7 @@ test('ssh: a command argument runs remotely and returns its status', async () =>
   assert.equal(r.out, 'WEB01\n');
   r = await withInput(sim, `ssh ${WEB01} nosuchcommand`, ['student']);
   assert.equal(r.code, 127);
-  assert.equal(r.err, 'bash: nosuchcommand: command not found\n');
+  assert.equal(r.err, 'bash: line 1: nosuchcommand: command not found\n');
   r = await withInput(sim, `echo 'echo piped on $(hostname)' | ssh ${WEB01}`, ['student']);
   assert.match(r.err, /^Pseudo-terminal will not be allocated because stdin is not a terminal\.\n/);
   assert.match(r.out, /piped on web01\n$/);
