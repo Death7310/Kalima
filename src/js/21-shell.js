@@ -9,6 +9,8 @@
   const VFS = K.VFS;
   const { lex, Parser, ParseError, dollarEnd, arith } = K.shlex;
 
+  const pushAll = (a, b) => { for (let i = 0; i < b.length; i++) a.push(b[i]); };
+
   /* ------------------------------------------------------------------ signal */
   class Signal {
     constructor() { this.aborted = false; this._l = new Set(); }
@@ -66,6 +68,22 @@
   class ReturnSignal { constructor(code) { this.code = code; } }
 
   const MAX_CAPTURE = 4 * 1024 * 1024;
+  /** number of lines a following plain `head` reads from the pipe, or null when it is not a simple head */
+  function headLimit(cmd) {
+    if (!cmd || cmd.type !== 'simple' || !cmd.words.length || cmd.redirs.length) return null;
+    const plain = (w) => (w.parts.length === 1 && w.parts[0].q !== 'd' && !/[$`*?\[{]/.test(w.parts[0].s) ? w.parts[0].s : null);
+    if (plain(cmd.words[0]) !== 'head') return null;
+    let n = 10;
+    for (let k = 1; k < cmd.words.length; k++) {
+      const t = plain(cmd.words[k]);
+      if (t == null) return null;
+      let m;
+      if (t === '-n') { const v = plain(cmd.words[++k] || { parts: [] }); if (v == null || !/^\d+$/.test(v)) return null; n = parseInt(v, 10); }
+      else if ((m = /^-n(\d+)$/.exec(t)) || (m = /^-(\d+)$/.exec(t))) n = parseInt(m[1], 10);
+      else return null;
+    }
+    return n + 1;
+  }
   const DEFAULT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games';
 
   function editDistance(a, b) {
@@ -586,7 +604,7 @@
           const res = [];
           for (const alt of alts) {
             const parts = word.parts.slice(0, pi).concat([{ q: 'n', s: s.slice(0, i) + alt + s.slice(j + 1) }], word.parts.slice(pi + 1));
-            res.push.apply(res, this.braceExpand({ type: 'word', parts: parts.filter((p) => p.s !== ''), quoted: word.quoted || true, raw: word.raw }));
+            pushAll(res, this.braceExpand({ type: 'word', parts: parts.filter((p) => p.s !== ''), quoted: word.quoted || true, raw: word.raw }));
           }
           return res;
         }
@@ -680,7 +698,7 @@
           const hasGlob = !o.noGlob && !this.opts.noglob && f.some((x) => x.glob && /[*?\[]/.test(x.s));
           if (hasGlob) {
             const matches = this.glob(f);
-            if (matches.length) { results.push.apply(results, matches); continue; }
+            if (matches.length) { pushAll(results, matches); continue; }
             if (this.opts.nullglob) continue;
             // zsh (nomatch is on by default) refuses to run a command with a pattern that matches nothing
             if (this.flavor === 'zsh' && !this.interactive && !o.noNomatch && text !== '[' && text !== '[[' && !/^[A-Za-z_]\w*=/.test(text)) throw new ShellError(this.msgPrefix() + 'no matches found: ' + text);
@@ -886,12 +904,23 @@
           const last = i === n - 1;
           const cmd = node.cmds[i];
           if (last) { st = await this.execNode(cmd, Object.assign({}, io, { stdin })); codes.push(st); break; }
-          let buf = ''; let overflow = false;
-          const sink = (s) => { if (buf.length < MAX_CAPTURE) buf += s; else overflow = true; };
-          const sub = Object.assign({}, io, { stdin, out: sink, outTTY: false });
+          let buf = ''; let lines = 0;
+          // the reader is `head`: stop a producer that never ends (yes, ping, while true) once head has what it wants
+          const lim = headLimit(node.cmds[i + 1]);
+          const stageSig = new Signal();
+          const offParent = io.sig ? io.sig.onAbort(() => stageSig.abort()) : null;
+          const sink = (s) => {
+            if (stageSig.aborted) return;
+            if (buf.length < MAX_CAPTURE) buf += s; else { stageSig.abort(); return; }
+            if (lim != null) { for (let k = s.indexOf('\n'); k >= 0; k = s.indexOf('\n', k + 1)) lines++; if (lines >= lim) stageSig.abort(); }
+          };
+          const sub = Object.assign({}, io, { stdin, out: sink, outTTY: false, sig: stageSig });
           if (cmd.pipeErr) { sub.err = sink; sub.errTTY = false; }
-          codes.push(await this.execNode(cmd, sub));
-          void overflow;
+          let c;
+          try { c = await this.execNode(cmd, sub); }
+          catch (e) { if (e instanceof K.Interrupt && stageSig.aborted && !(io.sig && io.sig.aborted)) c = 141; else throw e; }
+          finally { if (offParent) offParent(); }
+          codes.push(c);
           stdin = buf;
         }
       } finally { if (node.neg) this.noErrexit--; }
@@ -1012,7 +1041,7 @@
         }
         case 'for': {
           let items = [];
-          if (node.words) for (const w of node.words) items.push.apply(items, await this.expandWord(w, io));
+          if (node.words) for (const w of node.words) pushAll(items, await this.expandWord(w, io));
           else items = this.positional.slice();
           let st = 0;
           this.loopDepth++;
@@ -1099,7 +1128,7 @@
       let argv = [];
       try {
         const dbl = node.words.length > 0 && node.words[0].raw === '[[' && !node.words[0].quoted;
-        for (const w of node.words) argv.push.apply(argv, await this.expandWord(w, io, dbl ? { noGlob: true } : undefined));
+        for (const w of node.words) pushAll(argv, await this.expandWord(w, io, dbl ? { noGlob: true } : undefined));
       } catch (e) {
         if (e instanceof ShellError) { io.err(e.message + '\n'); this.status = 1; if (e.fatal && !this.interactive) throw new K.ExitSignal(1); return 1; }
         throw e;
@@ -1366,6 +1395,8 @@
 
     /* ----------------------------------------------------------- job control */
     startJob(node, io) {
+      const root = this.rootShell; root._bgCount = (root._bgCount || 0) + 1;
+      if (this.machine.procs.length > 400 || root._bgCount > 1500) { io.err((this.flavor === 'zsh' ? 'zsh: fork failed: resource temporarily unavailable' : this.msgPrefix() + 'fork: retry: Resource temporarily unavailable') + '\n'); return 1; }
       const sig = new Signal();
       let id = 1;
       while (this.jobs.some((j) => !j.done && j.id === id)) id++;
@@ -1563,6 +1594,7 @@
       this.addHistory(line);
       if (this._histPrint) { this._histPrint = false; this.status = 0; return 0; }
       this.term.signal.reset();
+      this.rootShell._bgCount = 0;
       this.rootShell._trace = [];
       let captured = '';
       const tee = (f) => (s) => { if (captured.length < 262144) captured += s; f(s); };

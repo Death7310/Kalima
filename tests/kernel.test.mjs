@@ -587,3 +587,15 @@ test('shell review: history expansion !:N, ranges, :gs', async () => {
   assert.equal(await t('!!:gs/a/X/'), 'echo bXnXnX\nbXnXnX\n');
   assert.equal(await t('!!:s/a/Y/'), 'zsh: substitution failed\n');
 });
+
+test('shell review: endless producers before head stop, fork bombs are bounded, huge expansions do not overflow the stack', async () => {
+  const sim = await kernelSim();
+  const t0 = Date.now();
+  let r = await sim.run('while true; do echo x; done | head -n 2');
+  assert.equal(r.out, 'x\nx\n'); assert.equal(r.err, '');
+  r = await sim.run('i=0; while true; do i=$((i+1)); echo $i; done | head -3'); assert.equal(r.out, '1\n2\n3\n');
+  assert.equal((await sim.run('echo {a..z}{a..z}{a..z}{a..z} | wc -w')).out, '456976\n');
+  r = await sim.run(':(){ :|:& };:'); assert.match(r.err, /^\[1\] \d+\n/);
+  assert.equal((await sim.run('echo alive')).out, 'alive\n');
+  assert.ok(Date.now() - t0 < 20000);
+});
