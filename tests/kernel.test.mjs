@@ -527,3 +527,18 @@ test('shell review: process substitution, status of assignment from $(...), exit
   assert.equal(sim.shell.fs.exists('/dev/fd/63'), false, 'temporary files are removed');
   assert.equal(await out('x=$(false); echo $?; x=$(true); echo $?; x=$(exit 3) || echo "failed $?"; echo alive'), '1\n0\nfailed 3\nalive\n');
 });
+
+test('shell review: bash -n / -x / -e flags, bash on a directory, SHLVL, timeout', async () => {
+  const sim = await kernelSim();
+  sim.shell.fs.write('/tmp/nx.sh', 'echo ran\n[ -z "" ]\n');
+  let r = await sim.run('bash -n /tmp/nx.sh'); assert.equal(r.out, ''); assert.equal(r.code, 0);
+  r = await sim.run('bash -x /tmp/nx.sh');
+  assert.equal(r.out, 'ran\n'); assert.equal(r.err, "+ echo ran\n+ '[' -z '' ']'\n");
+  r = await sim.run('bash -ex -c "false; echo no"'); assert.equal(r.out, ''); assert.equal(r.code, 1);
+  r = await sim.run('bash /tmp'); assert.equal(r.err, 'bash: /tmp: Is a directory\n'); assert.equal(r.code, 126);
+  assert.equal((await sim.run('echo $SHLVL; bash -c \'echo $SHLVL\'')).out, '1\n2\n');
+  r = await sim.run('timeout 1 k-sleep 5; echo rc=$?'); assert.equal(r.out, 'rc=124\n');
+  assert.equal((await sim.run('timeout 10 k-sleep 1; echo rc=$?')).out, 'slept\nrc=0\n');
+  assert.equal((await sim.run('timeout')).code, 125);
+  assert.equal((await sim.run('timeout 5 nosuchcmd')).code, 127);
+});

@@ -209,6 +209,7 @@
         PATH: DEFAULT_PATH, LANG: 'en_US.UTF-8', TERM: 'xterm-256color', COLORTERM: 'truecolor',
       };
       for (const k of Object.keys(base)) this.setVar(k, base[k], true);
+      this.setVar('SHLVL', String((parseInt(base.SHLVL, 10) || 0) + 1), true);
       this.setVar('HOME', this.user.home, true);
       this.setVar('USER', this.user.name, true);
       this.setVar('LOGNAME', this.user.name, true);
@@ -1121,7 +1122,7 @@
         }
         return node.assigns.length ? (this.lastSubst || 0) : this.status;
       }
-      if (this.opts.xtrace) cio.err('+ ' + argv.join(' ') + '\n');
+      if (this.opts.xtrace) cio.err('+ ' + (this.flavor === 'zsh' ? argv.join(' ') : argv.map((x) => (/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(x) ? x : "'" + x.replace(/'/g, "'\\''") + "'")).join(' ')) + '\n');
       // temporary environment for this command only
       const saved = [];
       for (const [k, v] of assigns) { saved.push([k, this.vars.has(k) ? this.vars.get(k) : null, this.exported.has(k)]); this.setVar(k, v, true); }
@@ -2348,25 +2349,46 @@
   /* ----------------------------------------------- shells, sudo, su as commands */
   async function shellCommand(ctx, flavor) {
     const sh = ctx.shell; const a = ctx.args.slice();
-    let cmdStr = null; let login = false;
-    while (a.length && a[0][0] === '-' && a[0] !== '-') {
+    let cmdStr = null; let login = false; let noexec = false; const setOpts = [];
+    const FLAGS = { x: 'xtrace', e: 'errexit', u: 'nounset', f: 'noglob', C: 'noclobber' };
+    while (a.length && (a[0][0] === '-' || a[0][0] === '+') && a[0] !== '-' && a[0] !== '+') {
       const f = a.shift();
-      if (f === '-c') { cmdStr = a.shift(); if (cmdStr == null) return ctx.fail('-c: option requires an argument', 2); break; }
-      if (f === '-l' || f === '--login') login = true;
       if (f === '--') break;
       if (f === '--version') { ctx.out(flavor === 'zsh' ? 'zsh 5.9.1 (x86_64-debian-linux-gnu)\n' : flavor === 'bash' ? 'GNU bash, version 5.3.3(1)-release (x86_64-pc-linux-gnu)\n' : 'dash 0.5.12\n'); return 0; }
+      if (f === '--login') { login = true; continue; }
+      if (f === '-o' || f === '+o') { const o = a.shift(); if (o && f === '-o') setOpts.push(o); continue; }
+      if (f[0] === '+' || f[1] === '-') continue;
+      let stop = false;
+      for (const ch of f.slice(1)) {
+        if (ch === 'c') { cmdStr = a.shift(); if (cmdStr == null) return ctx.fail('-c: option requires an argument', 2); stop = true; }
+        else if (ch === 'l') login = true;
+        else if (ch === 'n') noexec = true;
+        else if (FLAGS[ch]) setOpts.push(FLAGS[ch]);
+      }
+      if (stop) break;
     }
     const child = sh.child({ flavor, interactive: cmdStr == null && !a.length && ctx.stdin == null, login });
+    const LONG = { xtrace: 'xtrace', errexit: 'errexit', nounset: 'nounset', noglob: 'noglob', noclobber: 'noclobber', pipefail: 'pipefail' };
+    for (const o of setOpts) if (LONG[o]) child.opts[LONG[o]] = true;
+    const syntaxOnly = (text) => {
+      try { K.shlex.parse(text, child.aliases); return 0; }
+      catch (e) { if (!(e instanceof ParseError)) throw e; ctx.err(child.syntaxMessage(e) + '\n'); return 2; }
+    };
     try {
       if (cmdStr != null) {
         child.scriptName = a[0] || flavor; child.positional = a.slice(1);
+        if (noexec) return syntaxOnly(cmdStr);
         return await child.execSource(cmdStr, ctx.io);
       }
       if (a.length) {
         let text;
         try { text = sh.fs.read(a[0]); }
-        catch (e) { ctx.err(flavor + ': ' + (flavor === 'zsh' ? "can't open input file: " + a[0] : a[0] + ': ' + e.message) + '\n'); return 127; }
+        catch (e) {
+          if (e.code === 'EISDIR') { ctx.err(flavor + ': ' + a[0] + ': Is a directory\n'); return 126; }
+          ctx.err(flavor + ': ' + (flavor === 'zsh' ? "can't open input file: " + a[0] : a[0] + ': ' + e.message) + '\n'); return 127;
+        }
         child.scriptName = a[0]; child.positional = a.slice(1);
+        if (noexec) return syntaxOnly(text);
         return await child.execSource(text, ctx.io);
       }
       if (ctx.stdin != null) return await child.execSource(ctx.stdin, Object.assign({}, ctx.io, { stdin: '' }));
@@ -2444,6 +2466,38 @@
         if (e instanceof K.ExitSignal) return e.code;
         throw e;
       } finally { child.dispose(); }
+    },
+  });
+
+  K.cmd.register({
+    name: 'timeout', pkg: 'coreutils', summary: 'run a command with a time limit',
+    synopsis: 'timeout [OPTION] DURATION COMMAND [ARG]...',
+    man: 'Start COMMAND, and kill it if still running after DURATION.\n\n  -k, --kill-after=DURATION  also send a KILL signal if COMMAND is still running this long after the initial signal was sent\n  -s, --signal=SIGNAL        specify the signal to be sent on timeout\n      --preserve-status      exit with the same status as COMMAND, even when the command times out\n\nDURATION is a floating point number with an optional suffix: s (seconds, the default), m, h or d. A duration of 0 disables the timeout.\nIf the command times out, the exit status is 124 (or the status of COMMAND with --preserve-status).',
+    async run(ctx) {
+      const g = K.getopt(ctx.args, { short: 's:k:fp', long: ['signal=', 'kill-after=', 'preserve-status', 'foreground', 'verbose', 'help', 'version'], stopAtNonOption: true });
+      if (g.err) return ctx.fail(g.err + "\nTry 'timeout --help' for more information.", 125);
+      if (g.opts.help) { ctx.out('Usage: timeout [OPTION] DURATION COMMAND [ARG]...\n  or:  timeout [OPTION]\nStart COMMAND, and kill it if still running after DURATION.\n'); return 0; }
+      if (g.opts.version) { ctx.out('timeout (GNU coreutils) 9.7\n'); return 0; }
+      if (g.rest.length < 2) { ctx.err('timeout: missing operand\nTry \'timeout --help\' for more information.\n'); return 125; }
+      const m = /^(\d*\.?\d+)([smhd]?)$/.exec(g.rest[0]);
+      if (!m) return ctx.fail("invalid time interval '" + g.rest[0] + "'\nTry 'timeout --help' for more information.", 125);
+      const secs = parseFloat(m[1]) * ({ s: 1, m: 60, h: 3600, d: 86400 }[m[2] || 's']);
+      const sh = ctx.shell; const argv = g.rest.slice(1);
+      if (!sh.which(argv[0]) && argv[0].indexOf('/') < 0 && !sh.functions.has(argv[0]) && !K.builtins[argv[0]]) return ctx.fail("failed to run command '" + argv[0] + "': No such file or directory", 127);
+      const sig = new Signal(); const off = ctx.io.sig ? ctx.io.sig.onAbort(() => sig.abort()) : null;
+      let timedOut = false; let timer = null; const t0 = K.clock.now();
+      if (secs > 0 && !K.clock._virtual) timer = setTimeout(() => { timedOut = true; sig.abort(); }, secs * 1000 * K.settings.timeScale);
+      let code; let held = '';
+      // with the virtual clock a sleeping command returns at once, so its output is held back and dropped when the limit was exceeded
+      const tio = Object.assign({}, ctx.io, { sig });
+      if (K.clock._virtual && secs > 0) tio.out = (x) => { held += x; };
+      try { code = await sh.execArgv(argv, tio, { external: !!sh.which(argv[0]) }); }
+      catch (e) { if (e instanceof K.Interrupt && timedOut) code = 143; else throw e; }
+      finally { if (timer) clearTimeout(timer); if (off) off(); }
+      if (!timedOut && secs > 0 && K.clock._virtual && K.clock.now() - t0 > secs * 1000) timedOut = true;
+      if (held && !timedOut) ctx.io.out(held);
+      if (timedOut) return g.opts['preserve-status'] ? code : 124;
+      return code;
     },
   });
 
