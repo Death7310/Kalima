@@ -508,3 +508,11 @@ test('review: dig +multiline lays out the SOA record', async () => {
   assert.match(r.out, /SOA\tns1\.halcyon\.lab\. hostmaster\.halcyon\.lab\. \(\n\t{5}2026111201 ; serial\n\t{5}3600       ; refresh \(1 hour\)\n/);
   assert.match(r.out, /\t{5}86400      ; minimum \(1 day\)\n\t{5}\)\n$/);
 });
+
+test('review: nslookup treats a lone "-" as a server only after the name', async () => {
+  const sim = await dnsSim();
+  const r = await sim.run('nslookup web01.halcyon.lab -');
+  assert.equal(r.code, 1);
+  assert.doesNotMatch(r.out + r.err, /simulator error/);
+  assert.match(r.err, /couldn't get address for '-'/);
+});

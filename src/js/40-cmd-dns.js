@@ -842,7 +842,7 @@
       const a = ctx.args[i];
       if (/^-ver/i.test(a)) { ctx.eprintln('nslookup ' + BIND); return 0; }
       if (a[0] === '-' && a.length > 1) nsOption(ctx, st, a.slice(1));
-      else if (a === '-') target = { interactive: true };
+      else if (a === '-' && !target) target = { interactive: true };
       else if (!target) { target = { name: a, type: st.type }; interactive = false; }
       else if (i + 1 < ctx.args.length) {
         ctx.err('Usage:\n   nslookup [-opt ...]             # interactive mode using default server\n   nslookup [-opt ...] - server    # interactive mode using \'server\'\n' +
