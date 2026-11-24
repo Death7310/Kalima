@@ -54,9 +54,18 @@
     if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(loc)) return loc;
     const origin = base.scheme + '://' + base.hostport;
     if (loc.startsWith('//')) return base.scheme + ':' + loc;
-    if (loc[0] === '/') return origin + loc;
+    if (loc[0] === '/') return origin + dotSegments(loc);
+    if (loc[0] === '?') return origin + base.path.replace(/[?].*$/, '') + loc;
     const dir = base.path.replace(/[?].*$/, '').replace(/[^\/]*$/, '');
-    return origin + dir + loc;
+    return origin + dotSegments(dir + loc);
+  }
+  /** Remove "." and ".." segments from a path (keeps a trailing query). */
+  function dotSegments(p) {
+    const q = p.indexOf('?'); const path = q < 0 ? p : p.slice(0, q); const rest = q < 0 ? '' : p.slice(q);
+    const out = [];
+    const parts = path.split('/');
+    parts.forEach((seg, i) => { if (seg === '..') { if (out.length > 1) out.pop(); } else if (seg !== '.') out.push(seg); if ((seg === '..' || seg === '.') && i === parts.length - 1) out.push(''); });
+    return out.join('/') + rest;
   }
 
   /** Response headers in the order real servers send them. */
@@ -655,7 +664,7 @@
     const lines = Math.max(1, Math.ceil(size / per));
     for (let i = 0; i < lines; i++) {
       const bytes = Math.min(per, size - i * per);
-      const dots = Math.max(1, Math.floor(bytes / 1024));
+      const dots = Math.floor(bytes / 1024);
       const d = U.padEnd(Array.from({ length: Math.ceil(dots / 10) }, (x, g) => '.'.repeat(Math.min(10, dots - g * 10))).join(' '), 54);
       const last = i === lines - 1;
       const pct = last ? 100 : Math.floor(((i + 1) * per * 100) / size);
@@ -670,14 +679,30 @@
     return o.prefix ? o.prefix.replace(/\/$/, '') + '/' + name : name;
   }
 
+  /** Where wget -r saves a page: host[:port]/dir/file (-nH drops the host directory, -nd flattens). */
+  function wgetRecName(o, u) {
+    let p = u.path.replace(/[?].*$/, ''); const q = u.path.indexOf('?') >= 0 ? u.path.slice(u.path.indexOf('?')) : '';
+    try { p = decodeURIComponent(p); } catch (e) { /* keep as is */ }
+    if (p.endsWith('/')) p += 'index.html';
+    let rel = p.replace(/^\//, '');
+    if (o.noDirs) rel = rel.replace(/^.*\//, '');
+    const dflt = u.scheme === 'https' ? 443 : 80;
+    const full = (o.noDirs || o.noHostDirs ? '' : (u.port !== dflt ? u.host + ':' + u.port : u.host) + '/') + rel + q;
+    return o.prefix ? o.prefix.replace(/\/$/, '') + '/' + full : full;
+  }
+
   function wgetTarget(ctx, name, noClobber) {
     if (!ctx.fs.exists(name)) return name;
     if (noClobber) return null;
     for (let i = 1; ; i++) if (!ctx.fs.exists(name + '.' + i)) return name + '.' + i;
   }
 
+  const WGET_LONG = ['quiet', 'verbose', 'no-verbose', 'version', 'help', 'server-response', 'output-document=', 'directory-prefix=', 'user-agent=', 'tries=', 'timeout=', 'no-clobber', 'no-check-certificate', 'spider', 'header=', 'post-data=', 'user=', 'password=', 'max-redirect=', 'content-on-error',
+    'recursive', 'mirror', 'level=', 'accept=', 'reject=', 'no-parent', 'no-host-directories', 'no-directories', 'execute=', 'input-file=', 'output-file=', 'append-output=', 'limit-rate=', 'show-progress', 'progress=', 'referer=', 'http-user=', 'http-password=', 'content-disposition', 'no-cookies', 'no-proxy', 'wait=', 'waitretry=', 'random-wait', 'retry-connrefused', 'no-hsts', 'continue', 'page-requisites', 'convert-links', 'adjust-extension', 'timestamping', 'inet4-only', 'inet6-only', 'connect-timeout=', 'read-timeout=', 'dns-timeout=', 'span-hosts', 'no-http-keep-alive', 'debug', 'no-dns-cache'];
+  const WGET_NOARG = { '-nv': '--no-verbose', '-nc': '--no-clobber', '-np': '--no-parent', '-nH': '--no-host-directories', '-nd': '--no-directories' };
+
   async function wgetRun(ctx) {
-    const g = K.getopt(ctx.args, { short: 'qvVhSO:P:U:t:T:ncdr', long: ['quiet', 'verbose', 'no-verbose', 'version', 'help', 'server-response', 'output-document=', 'directory-prefix=', 'user-agent=', 'tries=', 'timeout=', 'no-clobber', 'no-check-certificate', 'spider', 'header=', 'post-data=', 'user=', 'password=', 'max-redirect=', 'content-on-error'], alias: { quiet: 'q', verbose: 'v', version: 'V', help: 'h', 'server-response': 'S', 'output-document': 'O', 'directory-prefix': 'P', 'user-agent': 'U', tries: 't', timeout: 'T', 'no-clobber': 'n' } });
+    const g = K.getopt(ctx.args.map((a) => WGET_NOARG[a] || a), { short: 'qvVhSO:P:U:t:T:crmkpNEl:A:R:i:e:o:a:w:46d', long: WGET_LONG, alias: { quiet: 'q', verbose: 'v', version: 'V', help: 'h', 'server-response': 'S', 'output-document': 'O', 'directory-prefix': 'P', 'user-agent': 'U', tries: 't', timeout: 'T', recursive: 'r', mirror: 'm', level: 'l', accept: 'A', reject: 'R', execute: 'e', 'input-file': 'i', 'output-file': 'o', 'append-output': 'a', wait: 'w', continue: 'c', 'page-requisites': 'p', 'convert-links': 'k', timestamping: 'N', 'adjust-extension': 'E', 'inet4-only': '4', 'inet6-only': '6', debug: 'd' } });
     if (g.err) {
       const m = /^invalid option -- '(.)'/.exec(g.err);
       const rq = /^option requires an argument -- '(.)'/.exec(g.err);
@@ -690,23 +715,118 @@
     const x = g.opts;
     if (x.h) { ctx.out(WGET_HELP); return 0; }
     if (x.V) { ctx.out(WGET_VERSION_TEXT); return 0; }
-    // -nv and -nc are written "n" plus a letter; getopt sees -n -v / -n -c
-    const nv = !!x.n && !!x.v && !(g.count.v > 1); const nc = !!x.n && !!x.c;
+    const execs = (g.all.e || []).map((e) => /^\s*([\w-]+)\s*=\s*(.*?)\s*$/.exec(e)).filter(Boolean);
+    const exec = (k) => { const m = execs.filter((e) => e[1] === k).pop(); return m ? m[2] : null; };
     const o = {
-      quiet: !!x.q, nv: nv, spider: !!x.spider, headers: !!x.S, out: x.O != null ? x.O : null, prefix: x.P || '',
+      quiet: !!x.q, nv: !!x['no-verbose'], spider: !!x.spider, headers: !!x.S, out: x.O != null ? x.O : null, prefix: x.P || '',
       ua: x.U != null ? x.U : 'Wget/' + WGET_VERSION, verify: !x['no-check-certificate'], tries: x.t != null ? (parseInt(x.t, 10) || Infinity) : 20,
-      timeout: x.T != null ? parseFloat(x.T) : 30, noClobber: nc && !nv ? true : !!x['no-clobber'] && nc, maxRedirect: x['max-redirect'] != null ? parseInt(x['max-redirect'], 10) : 20,
-      post: x['post-data'], extra: g.all.header || [],
-      user: x.user, password: x.password,
+      timeout: x.T != null ? parseFloat(x.T) : 30, noClobber: !!x['no-clobber'], maxRedirect: x['max-redirect'] != null ? parseInt(x['max-redirect'], 10) : 20,
+      post: x['post-data'], extra: g.all.header || [], cont: !!x.c,
+      user: x['http-user'] != null ? x['http-user'] : x.user, password: x['http-password'] != null ? x['http-password'] : x.password, referer: x.referer,
+      recursive: !!x.r || !!x.m, level: x.m && x.l == null ? Infinity : x.l != null ? (parseInt(x.l, 10) === 0 ? Infinity : parseInt(x.l, 10)) : 5,
+      noParent: !!x['no-parent'], noHostDirs: !!x['no-host-directories'], noDirs: !!x['no-directories'], robots: exec('robots') !== 'off',
+      accept: x.A ? String(x.A).split(',') : [], reject: x.R ? String(x.R).split(',') : [], files: 0, bytes: 0, log: null,
     };
-    if (x.n && !x.v && !x.c) { ctx.eprintln('wget: invalid option -- \'n\''); ctx.err(WGET_USAGE + WGET_TRY); return 2; }
-    if (!g.rest.length) { ctx.eprintln('wget: missing URL'); ctx.err(WGET_USAGE + WGET_TRY); return 1; }
-    let status = 0;
-    for (const raw of g.rest) { const c = await wgetFetch(ctx, o, raw); if (c) status = c; }
+    // a log file takes everything wget would print
+    let logText = ''; let wctx = ctx;
+    if (x.o != null || x.a != null) {
+      wctx = Object.assign(Object.create(Object.getPrototypeOf(ctx)), ctx, { err: (s) => { logText += s; }, eprintln: (s) => { logText += s + '\n'; }, errTTY: false });
+      o.log = true;
+    }
+    if (o.out != null && o.out !== '-') {
+      try { ctx.fs.write(o.out, ''); } catch (e) {
+        if (!(e instanceof K.FsError)) throw e;
+        ctx.eprintln(o.out + ': ' + e.message); return 1;
+      }
+    }
+    let urls = g.rest.slice();
+    if (x.i != null) {
+      let text;
+      if (x.i === '-') text = ctx.stdin == null ? '' : ctx.stdin;
+      else { try { text = ctx.fs.read(x.i); } catch (e) { if (!(e instanceof K.FsError)) throw e; ctx.eprintln(x.i + ': ' + e.message); ctx.eprintln('No URLs found in ' + x.i + '.'); return 0; } }
+      const found = text.split('\n').map((l) => l.trim()).filter(Boolean);
+      if (!found.length && !urls.length) { ctx.eprintln('No URLs found in ' + x.i + '.'); return 1; }
+      urls = found.concat(urls);
+    }
+    if (!urls.length) { ctx.eprintln('wget: missing URL'); ctx.err(WGET_USAGE + WGET_TRY); return 1; }
+    let status = 0; const t0 = K.clock.now();
+    try {
+      if (o.recursive) status = await wgetMirror(wctx, o, urls);
+      else for (const raw of urls) { const c = await wgetFetch(wctx, o, raw); if (c) status = c; }
+    } finally {
+      if (x.o != null) { try { ctx.fs.write(x.o, logText); } catch (e) { if (!(e instanceof K.FsError)) throw e; } }
+      else if (x.a != null) { try { ctx.fs.append(x.a, logText); } catch (e) { if (!(e instanceof K.FsError)) throw e; } }
+    }
+    if ((o.files > 1 || (o.recursive && o.files > 0)) && !o.quiet && !o.nv) {
+      const ms = Math.max(K.clock.now() - t0, 1);
+      const w = ms < 1000 ? (ms / 1000).toFixed(ms < 100 ? 3 : 2) : (ms / 1000).toFixed(1);
+      wctx.err('FINISHED --' + wgetStamp() + '--\nTotal wall clock time: ' + w + 's\nDownloaded: ' + o.files + ' files, ' + wgetSize(o.bytes) + ' in ' + Math.floor(ms / 1000) + 's (' + wgetRate(o.bytes, ms, ' ') + ')\n');
+    }
     return status;
   }
 
-  async function wgetFetch(ctx, o, raw) {
+  /** Does `name` match an -A / -R list entry (suffix such as "jpg" or a glob such as "*.jpg")? */
+  function wgetListMatch(list, name) {
+    return list.some((p) => {
+      if (/[*?\[]/.test(p)) return new RegExp('^' + p.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$').test(name);
+      return name.endsWith(p.replace(/^\./, '').length ? '.' + p.replace(/^\./, '') : p) || name.endsWith(p);
+    });
+  }
+
+  /** wget -r / -m: breadth-first walk of the links of every HTML page on the start host. */
+  async function wgetMirror(ctx, o, urls) {
+    let status = 0; const seen = new Set();
+    for (const raw of urls) {
+      const start = parseUrl(raw);
+      if (!start || (start.scheme !== 'http' && start.scheme !== 'https')) { const c = await wgetFetch(ctx, o, raw); if (c) status = c; continue; }
+      const startDir = start.path.replace(/[?].*$/, '').replace(/[^\/]*$/, '');
+      const disallow = [];
+      const queue = [{ url: urlString(start), depth: 0 }];
+      seen.add(urlString(start));
+      if (o.robots) {
+        const rurl = start.scheme + '://' + start.hostport + '/robots.txt';
+        if (!o.quiet) ctx.eprintln('Loading robots.txt; please ignore errors.');
+        const hook = { nameFor: (u) => wgetRecName(o, u), result: null };
+        await wgetFetch(ctx, o, rurl, hook);
+        if (hook.result) {
+          let applies = false;
+          for (const line of hook.result.resp.body.split(/\r?\n/)) {
+            const m = /^\s*([A-Za-z-]+)\s*:\s*(.*?)\s*(?:#.*)?$/.exec(line); if (!m) continue;
+            const k = m[1].toLowerCase();
+            if (k === 'user-agent') applies = m[2] === '*' || /wget/i.test(m[2]);
+            else if (k === 'disallow' && applies && m[2]) disallow.push(m[2]);
+          }
+        }
+      }
+      while (queue.length) {
+        ctx.checkAbort();
+        const item = queue.shift();
+        const hook = { nameFor: (u) => wgetRecName(o, u), result: null };
+        const c = await wgetFetch(ctx, o, item.url, hook);
+        if (c) { status = status || c; continue; }
+        const r = hook.result;
+        if (!r || item.depth >= o.level || !/html/i.test(r.resp.headers['content-type'] || '')) continue;
+        const re = /(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi; let m;
+        while ((m = re.exec(r.resp.body))) {
+          const link = (m[1] != null ? m[1] : m[2] != null ? m[2] : m[3]).trim().replace(/#.*$/, '');
+          if (!link || /^(mailto|javascript|tel|data):/i.test(link)) continue;
+          const next = parseUrl(joinUrl(r.u, link));
+          if (!next || (next.scheme !== 'http' && next.scheme !== 'https') || next.hostport !== start.hostport) continue;
+          const key = urlString(next);
+          if (seen.has(key)) continue;
+          const np = next.path.replace(/[?].*$/, '');
+          if (o.noParent && !np.startsWith(startDir)) continue;
+          if (disallow.some((d) => np.startsWith(d))) continue;
+          const leaf = np.replace(/^.*\//, '');
+          if (leaf && !/\.html?$/i.test(leaf) && ((o.accept.length && !wgetListMatch(o.accept, leaf)) || wgetListMatch(o.reject, leaf))) continue;
+          seen.add(key); queue.push({ url: key, depth: item.depth + 1 });
+        }
+      }
+    }
+    return status;
+  }
+
+  async function wgetFetch(ctx, o, raw, hook) {
     const say = (s) => { if (!o.quiet && !o.nv) ctx.err(s); };
     const note = (s) => { if (!o.quiet) ctx.eprintln(s); };
     let u = parseUrl(raw);
@@ -714,6 +834,10 @@
       if (u && !o.quiet) ctx.eprintln(raw + ': Unsupported scheme ' + wq(u.scheme + '://') + '.');
       else if (!o.quiet) ctx.eprintln(raw + ': Invalid host name.');
       return 1;
+    }
+    if (!hook && o.out == null && o.noClobber && ctx.fs.exists(wgetOutName(o, u))) {
+      note('File ' + wq(wgetOutName(o, u)) + ' already there; not retrieving.\n');
+      return 0;
     }
     if (o.spider) say('Spider mode enabled. Check if remote file exists.\n');
     let method = o.spider ? 'HEAD' : o.post != null ? 'POST' : 'GET';
@@ -739,6 +863,7 @@
       const target = U.isIPv4(u.host) ? u.host + ':' + u.port : u.host + ' (' + u.host + ')|' + ip + '|:' + u.port;
       const headers = { 'user-agent': o.ua, accept: '*/*', 'accept-encoding': 'identity', connection: 'Keep-Alive' };
       for (const h of o.extra) { const c = h.indexOf(':'); if (c > 0) headers[h.slice(0, c).trim().toLowerCase()] = h.slice(c + 1).trim(); }
+      if (o.referer) headers.referer = o.referer;
       if (o.user != null) headers.authorization = 'Basic ' + base64(o.user + ':' + (o.password || ''));
       if (o.post != null) { headers['content-type'] = 'application/x-www-form-urlencoded'; headers['content-length'] = String(U.byteLen(o.post)); }
       const ex = exchange(ctx, { u, method, headers, body: o.post || '' }, { verify: o.verify, resolve: null });
@@ -767,7 +892,14 @@
       say(connecting + 'connected.\n');
       const resp = ex.resp;
       await ctx.sleep(resp.ms);
-      const line = resp.status + ' ' + resp.statusText;
+      const length = parseInt(resp.headers['content-length'], 10);
+      // wget -c on a file that is already complete
+      const contName = o.cont && o.out == null && !hook && o.post == null ? wgetOutName(o, u) : null;
+      let have = 0;
+      if (contName && ctx.fs.exists(contName) && ctx.fs.isFile(contName)) { try { have = U.byteLen(ctx.fs.read(contName)); } catch (e) { if (!(e instanceof K.FsError)) throw e; } }
+      const complete = have > 0 && !isNaN(length) && have >= length && resp.status < 300;
+      const canRange = String(resp.headers['accept-ranges'] || '').toLowerCase() === 'bytes';
+      const line = complete && canRange ? '416 Requested Range Not Satisfiable' : have > 0 && canRange && resp.status === 200 && have < length ? '206 Partial Content' : resp.status + ' ' + resp.statusText;
       if (o.headers) {
         say('HTTP request sent, awaiting response... \n');
         say('  HTTP/1.1 ' + line + '\n' + headerList(resp).map((h) => '  ' + h[0] + ': ' + h[1] + '\n').join(''));
@@ -787,36 +919,41 @@
         else note(stamp + ' ERROR ' + resp.status + ': ' + resp.statusText + '.');
         return 8;
       }
-      const length = parseInt(resp.headers['content-length'], 10);
       const type = (resp.headers['content-type'] || 'application/octet-stream').replace(/;.*$/, '');
       const sizeText = isNaN(length) ? 'unspecified' : length < 1024 ? String(length) : length + ' (' + wgetSize(length) + ')';
-      say('Length: ' + sizeText + ' [' + type + ']\n');
+      if (complete) { note('\n    The file is already fully retrieved; nothing to do.\n'); return 0; }
+      const resume = have > 0 && !isNaN(length) && have < length && canRange;
+      say('Length: ' + (resume ? sizeText + ', ' + (length - have) + ' (' + wgetSize(length - have) + ') remaining' : sizeText) + ' [' + type + ']\n');
       if (o.spider) {
         say(/html/.test(type) ? 'Remote file exists and could contain further links,\nbut recursion is disabled -- not retrieving.\n\n' : 'Remote file exists.\n\n');
         return 0;
       }
-      const size = U.byteLen(resp.body);
+      const body = resume ? resp.body.slice(have) : resp.body;
+      const size = U.byteLen(body);
       const toStdout = o.out === '-';
-      let name = o.out != null ? o.out : wgetTarget(ctx, wgetOutName(o, u), o.noClobber);
+      let name = o.out != null ? o.out : hook ? hook.nameFor(u) : resume ? contName : wgetTarget(ctx, wgetOutName(o, u), o.noClobber);
       if (name == null) {
         note('File ' + wq(wgetOutName(o, u)) + ' already there; not retrieving.\n');
         return 0;
       }
-      if (o.prefix && o.out == null) { try { ctx.fs.mkdir(o.prefix, { parents: true }); } catch (e) { if (!(e instanceof K.FsError)) throw e; } }
+      if (o.prefix && o.out == null && !hook) { try { ctx.fs.mkdir(o.prefix, { parents: true }); } catch (e) { if (!(e instanceof K.FsError)) throw e; } }
+      if (hook && name.indexOf('/') > 0) { try { ctx.fs.mkdir(name.replace(/\/[^\/]*$/, ''), { parents: true }); } catch (e) { if (!(e instanceof K.FsError)) throw e; } }
       say('Saving to: ' + wq(toStdout ? 'STDOUT' : name) + '\n\n');
       await ctx.sleep(Math.max(0, size / 2000));
-      if (toStdout) ctx.out(resp.body);
+      if (toStdout) ctx.out(body);
       else {
-        try { ctx.fs.write(name, resp.body); } catch (e) {
+        try { if (resume) ctx.fs.append(name, body); else ctx.fs.write(name, body); } catch (e) {
           if (!(e instanceof K.FsError)) throw e;
           note(name + ': ' + e.message + '\n\nCannot write to ' + wq(name) + ' (' + e.message + ').');
           return 3;
         }
       }
+      o.files++; o.bytes += size;
+      if (hook) hook.result = { u, resp, name, size };
       const tty = !!ctx.errTTY;
       say(wgetProgress(ctx, toStdout ? '-' : name.replace(/^.*\//, ''), size, resp.ms, tty) + '\n');
       if (o.nv && !o.quiet) ctx.eprintln(stamp + ' URL:' + urlString(u) + ' [' + size + '/' + size + '] -> "' + (toStdout ? '-' : name) + '" [1]');
-      else say(wgetStamp() + ' (' + wgetRate(size, resp.ms, ' ') + ') - ' + (toStdout ? wq('STDOUT') : wq(name)) + ' saved [' + size + '/' + size + ']\n\n');
+      else say(wgetStamp() + ' (' + wgetRate(size, resp.ms, ' ') + ') - ' + (toStdout ? 'written to stdout' : wq(name) + ' saved') + ' [' + size + '/' + size + ']\n\n');
       return 0;
     }
   }

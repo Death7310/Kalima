@@ -263,7 +263,7 @@ test('wget: downloads a file with the GNU Wget 1.25 transcript', async () => {
   assert.equal(lines[3], 'HTTP request sent, awaiting response... 200 OK');
   assert.equal(lines[4], 'Length: 51 [text/plain]');
   assert.equal(lines[5], 'Saving to: ‘robots.txt’');
-  assert.match(lines[7], /^ {5}0K \. {53,54}100% +\d+(\.\d+)?[KMG]=0s$/);
+  assert.match(lines[7], /^ {5}0K {55}100% +\d+(\.\d+)?[KMG]=0s$/);
   assert.match(lines[9], /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \([\d.]+ [KM]B\/s\) - ‘robots\.txt’ saved \[51\/51\]$/);
   assert.match((await sim.run('cat /tmp/robots.txt')).out, /^User-agent/);
 });
@@ -622,4 +622,58 @@ test('curl -c writes a Netscape cookie jar; -x to a dead proxy fails with 7; --c
   assert.equal(nodir.code, 23);
   const mk = await sim.run('curl -s --create-dirs -o a/b/c http://web01.halcyon.lab/robots.txt && cat a/b/c');
   assert.match(mk.out, /^User-agent/);
+});
+
+test('wget: -O checks the output file before connecting, -nc before connecting, -c on a complete file', async () => {
+  const sim = await boot();
+  const d = await sim.run('wget -O /nonexist/x http://web01.halcyon.lab/robots.txt');
+  assert.deepEqual([d.err, d.code], ['/nonexist/x: No such file or directory\n', 1]);
+  const dir = await sim.run('wget -O /tmp http://web01.halcyon.lab/robots.txt');
+  assert.deepEqual([dir.err, dir.code], ['/tmp: Is a directory\n', 1]);
+  await sim.run('wget -q http://web01.halcyon.lab/robots.txt');
+  const nc = await sim.run('wget -nc http://web01.halcyon.lab/robots.txt');
+  assert.deepEqual([nc.err, nc.code], ['File \u2018robots.txt\u2019 already there; not retrieving.\n\n', 0]);
+  const c = await sim.run('wget -c http://web01.halcyon.lab/robots.txt');
+  assert.match(c.err, /awaiting response\.\.\. 416 Requested Range Not Satisfiable\n\n {4}The file is already fully retrieved; nothing to do\.\n\n$/);
+  assert.equal(c.code, 0);
+  assert.equal((await sim.run('ls robots.txt*')).out, 'robots.txt\n');
+});
+
+test('wget: a file under 1 KiB has no progress dots; -O - says written to stdout', async () => {
+  const sim = await boot();
+  const r = await sim.run('wget -O - http://web01.halcyon.lab/robots.txt');
+  assert.match(r.err, /\n {5}0K {55}100% +[\d.]+K=0s\n/);
+  assert.match(r.err, /\) - written to stdout \[51\/51\]\n\n$/);
+});
+
+test('wget -r: mirrors into host/ directories, honours robots.txt, -np and -l, prints FINISHED', async () => {
+  const sim = await boot();
+  const r = await sim.run('wget -r -l 1 http://web01.halcyon.lab/');
+  assert.equal(r.code, 0);
+  assert.match(r.err, /^Loading robots\.txt; please ignore errors\.\n--/);
+  assert.match(r.err, /Saving to: \u2018web01\.halcyon\.lab\/index\.html\u2019/);
+  assert.match(r.err, /FINISHED --[\d-]+ [\d:]+--\nTotal wall clock time: [\d.]+s\nDownloaded: \d+ files, /);
+  const files = (await sim.run('find web01.halcyon.lab -type f | sort')).out;
+  assert.match(files, /web01\.halcyon\.lab\/index\.html\n/);
+  assert.match(files, /web01\.halcyon\.lab\/docs\/index\.html\n/);
+  assert.doesNotMatch(files, /\/staff\//, 'robots.txt disallows /staff/');
+  const np = await sim.run('wget -q -r -np -nH -P out http://web01.halcyon.lab/docs/');
+  assert.equal(np.code, 0);
+  const got = (await sim.run('find out -type f | sort')).out;
+  assert.match(got, /out\/docs\/index\.html\n/);
+  assert.doesNotMatch(got, /out\/index\.html|css\//);
+  const e = await sim.run('wget -q -r -e robots=off -l 1 -P free http://web01.halcyon.lab/');
+  assert.match((await sim.run('find free -type f')).out, /staff/);
+});
+
+test('wget: -i reads URLs from a file, -o writes the log to a file, -nv/-nc spellings', async () => {
+  const sim = await boot();
+  await sim.run('printf "http://web01.halcyon.lab/robots.txt\\nhttp://web01.halcyon.lab/status.json\\n" > urls.txt');
+  const r = await sim.run('wget -q -i urls.txt && ls');
+  assert.match(r.out, /robots\.txt\nstatus\.json\n|robots\.txt\n[\s\S]*status\.json/);
+  const log = await sim.run('wget -o dl.log http://web01.halcyon.lab/robots.txt; echo "[$?]"; head -1 dl.log');
+  assert.equal(log.err, '');
+  assert.match(log.out, /^\[0\]\n--[\d-]+ [\d:]+--  http:\/\/web01\.halcyon\.lab\/robots\.txt\n/);
+  const miss = await sim.run('wget -i /nonexistent');
+  assert.equal(miss.err, '/nonexistent: No such file or directory\nNo URLs found in /nonexistent.\n');
 });
