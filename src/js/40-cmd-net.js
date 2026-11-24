@@ -291,7 +291,7 @@
     return addrList(i).map((a, n) => {
       const first = addrList(i).findIndex((b) => U.inCidr(a.ip, b.ip + '/' + b.bits) && b.bits === a.bits);
       const lo = i.kind === 'loopback';
-      const e = { family: 'inet', local: a.ip, prefixlen: a.bits, scope: lo ? 'host' : 'global', label: i.name, forever: true };
+      const e = { family: 'inet', local: a.ip, prefixlen: a.bits, scope: lo ? 'host' : 'global', label: a.label || i.name, forever: true };
       if (a.bits < 31 && !lo) e.broadcast = U.intToIp((U.parseCidr(a.ip + '/' + a.bits).broadcast));
       if (first !== n) e.secondary = true;
       else if (n === 0 && dyn && !lo) { e.dynamic = true; e.noprefixroute = true; e.forever = false; }
@@ -316,7 +316,7 @@
     if (e.secondary) bits.push('secondary');
     if (e.dynamic) bits.push('dynamic');
     if (e.noprefixroute) bits.push('noprefixroute');
-    if (e.family === 'inet') bits.push(p('ifname', i.name));
+    if (e.family === 'inet') bits.push(p('ifname', e.label || i.name));
     const life = e.forever ? 'forever' : leaseLeft(m) + 'sec';
     return { head: indent + bits.join(' ') + (e.family === 'inet6' ? ' ' : ''), tail: 'valid_lft ' + life + ' preferred_lft ' + life };
   }
@@ -363,7 +363,7 @@
           a.scope = e.scope;
           if (e.dynamic) a.dynamic = true;
           if (e.noprefixroute) a.noprefixroute = true;
-          if (e.family === 'inet') a.label = i.name;
+          if (e.family === 'inet') a.label = e.label;
           a.valid_life_time = e.forever ? 4294967295 : leaseLeft(m); a.preferred_life_time = a.valid_life_time;
           return a;
         });
@@ -1036,7 +1036,7 @@
   }
 
   async function mtrRun(ctx) {
-    const g = K.getopt(ctx.args, { short: '46bgspxtTUCeJzhvrwnc:i:m:o:P:a:f:B:S:', long: ['help', 'version', 'report', 'report-wide', 'no-dns', 'show-ips', 'report-cycles=', 'interval=', 'max-ttl=', 'psize=', 'address=', 'curses', 'displaymode=', 'udp', 'tcp', 'json', 'csv'], alias: { help: 'h', version: 'v', report: 'r', 'report-wide': 'w', 'no-dns': 'n', 'show-ips': 'b', 'report-cycles': 'c', interval: 'i', 'max-ttl': 'm', psize: 's' } });
+    const g = K.getopt(ctx.args, { short: '46bgpxtTuUCeJzhvrwnc:i:m:o:P:a:f:B:S:s:', long: ['help', 'version', 'report', 'report-wide', 'no-dns', 'show-ips', 'report-cycles=', 'interval=', 'max-ttl=', 'psize=', 'address=', 'curses', 'displaymode=', 'udp', 'tcp', 'json', 'csv'], alias: { help: 'h', version: 'v', report: 'r', 'report-wide': 'w', 'no-dns': 'n', 'show-ips': 'b', 'report-cycles': 'c', interval: 'i', 'max-ttl': 'm', psize: 's' } });
     if (g.err) { ctx.eprintln('mtr: ' + g.err); ctx.err(MTR_USAGE); return 1; }
     const o = g.opts;
     if (o.h) { ctx.out(MTR_USAGE); return 0; }
@@ -1051,10 +1051,11 @@
     if (!rt.ok && rt.err === 'ENETUNREACH') { ctx.eprintln('mtr: Failed to start: Network is unreachable'); return 1; }
     const hopCount = Math.min(maxTtl, rt.ok ? (rt.hops || []).length + 1 : 1);
     const hops = Array.from({ length: hopCount }, () => ({ sent: 0, rtts: [], ip: null, name: null }));
-    const proto = o.T || o.tcp ? 'tcp' : o.U || o.udp ? 'udp' : 'icmp';
+    const proto = o.T || o.tcp ? 'tcp' : o.u || o.U || o.udp ? 'udp' : 'icmp';
+    const port = o.P != null && parseInt(o.P, 10) > 0 ? parseInt(o.P, 10) : 80;
     const cycle = () => hops.forEach((h, n) => {
       h.sent++;
-      const r = rt.ok ? probeHop(ctx, rt, dest.ip, n + 1, proto, 80) : null;
+      const r = rt.ok ? probeHop(ctx, rt, dest.ip, n + 1, proto, port) : null;
       if (r) { h.rtts.push(r.rtt); h.ip = r.ip; h.name = r.name; }
     });
     const label = (h, n) => {
@@ -1365,6 +1366,13 @@
     const s = nlStats(m, i);
     lines.push('        RX packets ' + s.rxp + '  bytes ' + humanBytes(s.rx), '        RX errors 0  dropped 0  overruns 0  frame 0',
       '        TX packets ' + s.txp + '  bytes ' + humanBytes(s.tx), '        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0', '');
+    for (const a of (i.secondary || [])) {
+      if (!a.label) continue;
+      const c = U.parseCidr(a.ip + '/' + a.bits);
+      lines.push(a.label + ': flags=' + num + '<' + names.join(',') + '>  mtu ' + (i.mtu || 1500),
+        '        inet ' + a.ip + '  netmask ' + U.maskFromBits(a.bits) + (a.bits < 31 ? '  broadcast ' + U.intToIp(c.broadcast) : ''),
+        '        ether ' + i.mac + '  txqueuelen 1000  (Ethernet)', '');
+    }
     return lines.join('\n');
   }
   /** Netmask argument as a prefix length, or null. */
@@ -1376,11 +1384,12 @@
   }
   const classfulBits = (ip) => { const a = +ip.split('.')[0]; return a < 128 ? 8 : a < 192 ? 16 : 24; };
 
-  function ifconfigSet(ctx, i, args) {
-    const m = ctx.machine; let ip = null; let bits = null;
+  function ifconfigSet(ctx, i, args, label) {
+    const m = ctx.machine; let ip = null; let bits = null; let del = null;
     const deny = (what) => { ctx.eprintln(what + ': Operation not permitted'); return 255; };
     for (let n = 0; n < args.length; n++) {
       const a = args[n];
+      if (label && (a === 'up' || a === 'down')) continue;
       if (a === 'up' || a === 'down' || a === '-promisc' || a === 'promisc') {
         if (!ctx.isRoot) return deny('SIOCSIFFLAGS');
         if (a === 'up') setLinkState(m, i, true); else if (a === 'down') setLinkState(m, i, false); else i.promisc = a === 'promisc';
@@ -1396,10 +1405,33 @@
         if (!MAC_RE.test(mac || '')) { ctx.eprintln('ifconfig: bad hardware address'); return 255; }
         i.mac = mac.toLowerCase();
       } else if (['broadcast', 'pointopoint', 'dstaddr', 'txqueuelen', 'metric'].includes(a)) n++;
-      else if (a === 'add' || a === 'del') n++;
+      else if (a === 'add') { ip = args[++n]; }
+      else if (a === 'del') { del = args[++n]; }
       else if (U.isIPv4(a.split('/')[0])) { ip = a; } else { ctx.eprintln('ifconfig: `--help\' gives usage information.'); return 255; }
     }
-    if (ip) {
+    if (del != null) {
+      if (!ctx.isRoot) return deny('SIOCDIFADDR');
+      const [addr, len] = del.split('/');
+      const list = addrList(i); const at = list.findIndex((a) => a.ip === addr && (len == null || a.bits === +len));
+      if (at < 0) { ctx.eprintln('SIOCDIFADDR: Cannot assign requested address'); return 255; }
+      list.splice(at, 1); setAddrList(i, list); pruneRoutes(m); sortRoutes(m);
+      return 0;
+    }
+    if (label && ip == null && args.includes('down')) {
+      const list = addrList(i).filter((a) => a.label !== label);
+      setAddrList(i, list); pruneRoutes(m); sortRoutes(m);
+      return 0;
+    }
+    if (ip && (label || args.includes('add'))) {
+      if (!ctx.isRoot) return deny('SIOCSIFADDR');
+      const [addr, len] = ip.split('/');
+      const b = len != null ? parseInt(len, 10) : bits != null ? bits : classfulBits(addr);
+      const list = addrList(i).filter((a) => !(label && a.label === label));
+      if (!list.some((a) => a.ip === addr && a.bits === b)) list.push(label ? { ip: addr, bits: b, label } : { ip: addr, bits: b });
+      setAddrList(i, list);
+      if (isUp(i) && i.kind !== 'loopback') { const r = connectedRoute(i, { ip: addr, bits: b }); if (!m.routes.some((x) => x.dst === r.dst && x.dev === i.name)) m.routes.push(r); }
+      pruneRoutes(m); sortRoutes(m);
+    } else if (ip) {
       if (!ctx.isRoot) return deny('SIOCSIFADDR');
       const [addr, len] = ip.split('/');
       const b = len != null ? parseInt(len, 10) : bits != null ? bits : classfulBits(addr);
@@ -1431,9 +1463,18 @@
       else if (list.length) ctx.println(list.map((i) => ifconfigBlock(m, i)).join('\n'));
       return 0;
     }
-    const i = ifaceByName(m, name.replace(/:\d+$/, ''));
+    const label = /:[^:]+$/.test(name) ? name : null;
+    const i = ifaceByName(m, name.replace(/:[^:]+$/, ''));
     if (!i) { ctx.eprintln(name + ': error fetching interface information: Device not found'); return 1; }
-    if (args.length) return ifconfigSet(ctx, i, args);
+    if (label && !args.length && !addrList(i).some((a) => a.label === label)) { ctx.eprintln(name + ': error fetching interface information: Device not found'); return 1; }
+    if (args.length) return ifconfigSet(ctx, i, args, label);
+    if (label) {
+      const a = addrList(i).find((x) => x.label === label); const c = U.parseCidr(a.ip + '/' + a.bits);
+      ctx.println([label + ': flags=' + ifFlagNames(i).reduce((x, n) => x + IFF[n], 0) + '<' + ifFlagNames(i).join(',') + '>  mtu ' + (i.mtu || 1500),
+        '        inet ' + a.ip + '  netmask ' + U.maskFromBits(a.bits) + (a.bits < 31 ? '  broadcast ' + U.intToIp(c.broadcast) : ''),
+        '        ether ' + i.mac + '  txqueuelen 1000  (Ethernet)', ''].join('\n'));
+      return 0;
+    }
     ctx.println(flags.s ? [IFACE_STATS_HEAD, ifaceStatsRow(m, i)].join('\n') : ifconfigBlock(m, i));
     return 0;
   }
@@ -1666,7 +1707,9 @@
     kv('connection.id', d.profile); kv('connection.uuid', d.uuid); kv('connection.stable-id', '--'); kv('connection.type', eth ? '802-3-ethernet' : 'loopback'); kv('connection.interface-name', eth ? d.name : 'lo');
     kv('connection.autoconnect', 'yes'); kv('connection.autoconnect-priority', 0); kv('connection.timestamp', Math.floor(K.clock.now() / 1000) - 3600);
     if (eth) { kv('802-3-ethernet.mac-address', '--'); kv('802-3-ethernet.mtu', 'auto'); }
-    kv('ipv4.method', eth ? 'auto' : 'disabled'); kv('ipv4.dns', '--'); kv('ipv4.addresses', '--'); kv('ipv4.gateway', '--'); kv('ipv4.never-default', 'no');
+    const pr = ((m.state.nmcli || {}).profiles || {})[d.profile] || {};
+    const pv = (k, dflt) => (pr[k] != null && pr[k] !== '' ? pr[k] : dflt);
+    kv('ipv4.method', pv('ipv4.method', eth ? 'auto' : 'disabled')); kv('ipv4.dns', pv('ipv4.dns', '--')); kv('ipv4.addresses', pv('ipv4.addresses', '--')); kv('ipv4.gateway', pv('ipv4.gateway', '--')); kv('ipv4.never-default', 'no');
     kv('ipv6.method', eth ? 'auto' : 'disabled');
     if (d.up) {
       kv('GENERAL.NAME', d.profile); kv('GENERAL.UUID', d.uuid); kv('GENERAL.DEVICES', d.name); kv('GENERAL.STATE', 'activated');
@@ -1676,6 +1719,24 @@
       if (eth) m.dns.forEach((s, n) => kv('IP4.DNS[' + (n + 1) + ']', s));
     }
     return out.join('\n');
+  }
+
+  /** Apply a modified profile to the interface on activation (static address, gateway, DNS) or restore the DHCP lease. */
+  function nmApplyProfile(m, d, pr) {
+    const nst = m.state.nmcli;
+    if (!pr && !nst.orig) return;
+    if (!nst.orig) nst.orig = { addrs: addrList(d.i).map((a) => ({ ip: a.ip, bits: a.bits })), dns: m.dns.slice(), gw: (m.routes.find((r) => r.dev === d.name && r.dst === 'default') || {}).via };
+    const manual = pr && pr['ipv4.method'] === 'manual' && pr['ipv4.addresses'];
+    const addrs = manual ? pr['ipv4.addresses'].split(',').map((x) => { const c = U.parseCidr(x.trim()); return { ip: U.intToIp(c.ip), bits: c.bits }; }) : nst.orig.addrs;
+    const gw = manual ? (pr['ipv4.gateway'] || null) : nst.orig.gw;
+    m.routes.splice(0, m.routes.length, ...m.routes.filter((r) => r.dev !== d.name));
+    const stash = state(m).stash; delete stash[d.name];
+    setAddrList(d.i, addrs);
+    for (const a of addrs) m.routes.push(Object.assign(connectedRoute(d.i, a), { metric: 100 }));
+    if (gw) m.routes.push({ dst: 'default', via: gw, dev: d.name, proto: manual ? 'static' : 'dhcp', src: manual ? undefined : addrs[0].ip, metric: 100 });
+    const dnsProp = pr && pr['ipv4.dns'];
+    m.dns.splice(0, m.dns.length, ...(manual && dnsProp ? dnsProp.split(/[ ,]+/).filter(Boolean) : nst.orig.dns));
+    pruneRoutes(m); sortRoutes(m);
   }
 
   async function nmcliRun(ctx) {
@@ -1759,13 +1820,38 @@
     }
     if (obj === 'connection') {
       if (!cmdWord || abbr(cmdWord, 'show')) {
+        const active = args[0] === '--active' || args[0] === '-a' || args[0] === '--active-only';
+        if (active) args.shift();
         if (args[0]) {
           const d = devs.find((x) => x.profile === args[0] || x.uuid === args[0]);
           if (!d) { ctx.eprintln('Error: ' + args[0] + ' - no such connection profile.'); return 10; }
           ctx.println(nmFilterKv(o, nmProfileShow(ctx, d)));
           return 0;
         }
-        return nmPrint(ctx, o, ['NAME', 'UUID', 'TYPE', 'DEVICE'], devs.map((d) => [d.profile, d.uuid, d.type, d.up ? d.name : '--']));
+        return nmPrint(ctx, o, ['NAME', 'UUID', 'TYPE', 'DEVICE'], devs.filter((d) => !active || d.up).map((d) => [d.profile, d.uuid, d.type, d.up ? d.name : '--']));
+      }
+      if (abbr(cmdWord, 'modify') || cmdWord === 'mod') {
+        if (!args[0]) { ctx.eprintln('Error: connection ID, UUID, or path is missing.'); return 2; }
+        const d = devs.find((x) => x.profile === args[0] || x.uuid === args[0]);
+        if (!d) { ctx.eprintln("Error: unknown connection '" + args[0] + "'."); return 10; }
+        const pr = (nst.profiles = nst.profiles || {})[d.profile] = (nst.profiles || {})[d.profile] || {};
+        const KNOWN = ['ipv4.method', 'ipv4.addresses', 'ipv4.gateway', 'ipv4.dns', 'connection.autoconnect', 'ipv6.method'];
+        for (let n = 1; n < args.length; n += 2) {
+          let key = args[n]; const val = args[n + 1];
+          const plus = key[0] === '+' || key[0] === '-'; const sign = plus ? key[0] : '';
+          if (plus) key = key.slice(1);
+          if (val == null) { ctx.eprintln("Error: value for '" + args[n] + "' is missing."); return 2; }
+          if (!KNOWN.includes(key)) { ctx.eprintln("Error: invalid or not allowed setting '" + key.split('.')[0] + "': '" + key + "' is not supported by the simulator."); return 2; }
+          if (key === 'ipv4.method' && !['auto', 'manual', 'disabled', 'link-local', 'shared'].includes(val)) { ctx.eprintln("Error: Failed to modify ipv4.method: invalid method '" + val + "'; use 'auto', 'disabled', 'link-local', 'manual' or 'shared'."); return 2; }
+          if (key === 'ipv4.addresses' && !val.split(',').every((x) => U.parseCidr(x.trim()))) { ctx.eprintln("Error: failed to modify ipv4.addresses: invalid IP address: " + val + '.'); return 2; }
+          if (key === 'ipv4.gateway' && val !== '' && !U.isIPv4(val)) { ctx.eprintln("Error: failed to modify ipv4.gateway: '" + val + "' is not a valid IPv4 address."); return 2; }
+          if (key === 'ipv4.dns' && !val.split(/[ ,]+/).filter(Boolean).every((x) => U.isIPv4(x))) { ctx.eprintln("Error: failed to modify ipv4.dns: invalid IP address: " + val + '.'); return 2; }
+          if (sign === '+' && pr[key] && val) pr[key] = pr[key] + (key === 'ipv4.dns' ? ',' : ', ') + val;
+          else if (sign === '-') pr[key] = (pr[key] || '').split(/,\s*/).filter((x) => x && x !== val).join(', ');
+          else pr[key] = val;
+          if (key === 'ipv4.addresses' && !pr['ipv4.method']) pr['ipv4.method'] = 'manual';
+        }
+        return 0;
       }
       if (abbr(cmdWord, 'up') || abbr(cmdWord, 'down')) {
         if (!args[0]) { ctx.eprintln('Error: connection ID, UUID, or path is missing.'); return 2; }
@@ -1773,6 +1859,7 @@
         if (!d) { ctx.eprintln('Error: unknown connection \'' + args[0] + "'."); return 10; }
         const up = abbr(cmdWord, 'up');
         if (!up && !d.up) { ctx.eprintln("Error: '" + args[0] + "' is not an active connection.\nError: not all active connections found."); return 2; }
+        if (up && d.type === 'ethernet') nmApplyProfile(m, d, (nst.profiles || {})[d.profile]);
         setLinkState(m, d.i, up);
         ctx.println(up ? 'Connection successfully activated (D-Bus active path: /org/freedesktop/NetworkManager/ActiveConnection/' + (m.ifaces.indexOf(d.i) + 1) + ')' : "Connection '" + d.profile + "' successfully deactivated (D-Bus active path: /org/freedesktop/NetworkManager/ActiveConnection/" + (m.ifaces.indexOf(d.i)) + ')');
         return 0;

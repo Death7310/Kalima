@@ -486,3 +486,10 @@ test('shell review: zsh scripts fail on unmatched globs, Kali interactive zsh an
   // [[ never globs its operands
   assert.equal((await sim.run('cd /etc; [[ passwd == pass* ]] && echo yes')).out, 'yes\n');
 });
+
+test('net: a secondary address of the machine itself answers locally', async () => {
+  const sim = await boot();
+  sim.machine.ifaces.find((i) => i.name === 'eth0').secondary = [{ ip: '10.10.10.99', bits: 24 }];
+  const rt = sim.K.net.route(sim.machine, '10.10.10.99');
+  assert.equal(rt.ok && rt.self, true);
+});

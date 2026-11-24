@@ -683,3 +683,52 @@ test('nmcli: -g and -f filter device show, networking and radio switches work', 
   await sim.run('sudo nmcli radio wifi off');
   assert.match(await sim.out('nmcli radio'), /enabled\s+disabled\s+enabled\s+enabled/);
 });
+
+/* ------------------------------------------------------------ review fixes */
+
+test('ifconfig: eth0:1 adds an alias instead of replacing the address; add/del and alias down', async () => {
+  const sim = await net();
+  await sim.run('sudo ifconfig eth0:1 10.10.10.78');
+  const all = await sim.out('ifconfig');
+  assert.match(all, /TX errors 0 .*\n\neth0:1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST> {2}mtu 1500\n {8}inet 10\.10\.10\.78 {2}netmask 255\.0\.0\.0 {2}broadcast 10\.255\.255\.255\n {8}ether 08:00:27:1d:77:55 {2}txqueuelen 1000 {2}\(Ethernet\)\n\nlo: /);
+  assert.match(await sim.out('ifconfig eth0:1'), /^eth0:1: flags=/);
+  assert.match(await sim.out('ip -br a'), /10\.10\.10\.5\/24 10\.10\.10\.78\/8/);
+  assert.match(await sim.out('ip a show eth0'), /inet 10\.10\.10\.78\/8 brd 10\.255\.255\.255 scope global eth0:1/);
+  assert.match(await sim.out('ping -c 1 10.10.10.78'), /64 bytes from 10\.10\.10\.78: icmp_seq=1 ttl=64/);
+  await sim.run('sudo ifconfig eth0 add 10.1.1.1/24');
+  assert.match(await sim.out('ip -br a'), /10\.1\.1\.1\/24/);
+  await sim.run('sudo ifconfig eth0 del 10.1.1.1');
+  assert.doesNotMatch(await sim.out('ip -br a'), /10\.1\.1\.1/);
+  await sim.run('sudo ifconfig eth0:1 down');
+  assert.doesNotMatch(await sim.out('ip -br a'), /10\.10\.10\.78/);
+  assert.match(await sim.out('ip -br a'), /eth0 +UP +10\.10\.10\.5\/24/);
+  const r = await sim.run('ifconfig eth0:1');
+  assert.equal(r.code, 1);
+  assert.match(r.err, /eth0:1: error fetching interface information: Device not found/);
+});
+
+test('nmcli: connection show --active, connection modify applies on up', async () => {
+  const sim = await net();
+  assert.match(await sim.out('nmcli con show --active'), /Wired connection 1 .*ethernet +eth0/);
+  assert.equal((await sim.run('nmcli con mod "Wired connection 1" ipv4.method manual ipv4.addresses 10.10.10.77/24 ipv4.gateway 10.10.10.1 ipv4.dns 8.8.8.8')).code, 0);
+  assert.match(await sim.out('nmcli con show "Wired connection 1"'), /ipv4\.addresses: +10\.10\.10\.77\/24/);
+  assert.match(await sim.out('ip -br a'), /10\.10\.10\.5\/24/);   // not applied until the connection is brought up
+  await sim.run('nmcli con up "Wired connection 1"');
+  assert.match(await sim.out('ip -br a'), /eth0 +UP +10\.10\.10\.77\/24/);
+  assert.match(await sim.out('ip r'), /^default via 10\.10\.10\.1 dev eth0 proto static metric 100/);
+  assert.match(await sim.out('cat /etc/resolv.conf'), /nameserver 8\.8\.8\.8/);
+  await sim.run('nmcli con mod "Wired connection 1" ipv4.method auto');
+  await sim.run('nmcli con up "Wired connection 1"');
+  assert.match(await sim.out('ip -br a'), /10\.10\.10\.5\/24/);
+  assert.match(await sim.out('cat /etc/resolv.conf'), /nameserver 10\.10\.10\.53/);
+  const bad = await sim.run('nmcli con mod nosuch ipv4.dns 1.1.1.1');
+  assert.equal(bad.code, 10);
+});
+
+test('mtr: -s takes a size, -u selects UDP, -P sets the port', async () => {
+  const sim = await net();
+  const r = await sim.run('mtr -rn -c 2 -s 100 10.10.10.10');
+  assert.equal(r.code, 0);
+  assert.match(r.out, /1\.\|-- 10\.10\.10\.10/);
+  assert.equal((await sim.run('mtr -rn -c 2 -u 10.10.10.10')).code, 0);
+});

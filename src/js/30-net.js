@@ -157,7 +157,7 @@
      */
     route(machine, dstIp) {
       if (!U.isIPv4(dstIp)) return { ok: false, err: 'ENETUNREACH', hops: [] };
-      if (U.inCidr(dstIp, '127.0.0.0/8') || machine.ifaces.some((i) => i.ip === dstIp)) {
+      if (U.inCidr(dstIp, '127.0.0.0/8') || machine.ifaces.some((i) => i.ip === dstIp || (i.secondary || []).some((a) => a.ip === dstIp))) {
         return { ok: true, self: true, dev: 'lo', src: U.inCidr(dstIp, '127.0.0.0/8') ? '127.0.0.1' : dstIp, hops: [], rtt: 0.035, host: this.hostOf(machine) };
       }
       for (const i of machine.ifaces) {
