@@ -55,7 +55,24 @@
     const s = stops(o); const fields = [dot(r.name)]; const at = [];
     if (o.showTtl) { fields.push(String(r.ttl)); at.push(s[0]); }
     if (o.showClass) { fields.push(o.cls); at.push(s[1]); }
-    fields.push(r.type, rdata(r)); at.push(s[2], s[3]);
+    const text = rdata(r);
+    if (o.multiline && r.type === 'SOA' && text.split(' ').length === 7) {
+      const p = text.split(' ');
+      const span = (n) => {
+        const parts = []; n = +n;
+        for (const [u, sec] of [['week', 604800], ['day', 86400], ['hour', 3600], ['minute', 60], ['second', 1]]) {
+          const c = Math.floor(n / sec); n -= c * sec;
+          if (c) parts.push(c + ' ' + u + (c > 1 ? 's' : ''));
+        }
+        return parts.length ? ' (' + parts.join(' ') + ')' : '';
+      };
+      fields.push(r.type, p[0] + ' ' + p[1] + ' (');
+      at.push(s[2], s[3]);
+      const pad = '\t'.repeat(5);
+      return tabulate(fields, at) + '\n' + pad + p[2].padEnd(10) + ' ; serial\n' +
+        ['refresh', 'retry', 'expire', 'minimum'].map((k, i) => pad + p[3 + i].padEnd(10) + ' ; ' + k + span(p[3 + i]) + '\n').join('') + pad + ')';
+    }
+    fields.push(r.type, text); at.push(s[2], s[3]);
     return tabulate(fields, at);
   }
   function questionLine(q, o) {
@@ -287,6 +304,7 @@
       case 'defname': cur.search = state; return null;
       case 'class': cur.showClass = state; return null;
       case 'ttlid': cur.showTtl = state; return null;
+      case 'multiline': cur.multiline = state; return null;
       case 'cmd': glob.cmd = state; return null;
       case 'short':
         glob.short = state;
@@ -331,7 +349,7 @@
       if (a[0] === '-' && a.length > 1) {
         for (let j = 1; j < a.length; j++) {
           const ch = a[j];
-          if ('4mr'.indexOf(ch) >= 0) continue;
+          if ('46mr'.indexOf(ch) >= 0) continue;
           if (ch === 'u') { glob.usec = true; continue; }
           if (ch === 'h') { ctx.out(DIG_HELP); return { exit: 0 }; }
           if (ch === 'v') { ctx.eprintln('DiG ' + BIND); return { exit: 0 }; }
@@ -349,7 +367,7 @@
             cur.port = +value;
           } else if (ch === 'x') {
             const name = reverseName(value);
-            if (!name) { ctx.eprintln('Invalid IP address ' + value); return { exit: 1 }; }
+            if (!name || (value.indexOf(':') < 0 && !U.isIPv4(value))) { ctx.eprintln('Invalid IP address ' + value); return { exit: 1 }; }
             begin({ name, type: defaults.type === 'A' ? 'PTR' : defaults.type });
           }
           break;
@@ -525,6 +543,7 @@
     '        q-type   is one of (a,any,mx,ns,soa,hinfo,axfr,txt,...) [default:a]\n' +
     '        q-opt    is one of:\n' +
     '                 -4                  (use IPv4 query transport only)\n' +
+    '                 -6                  (use IPv6 query transport only)\n' +
     '                 -b address[#port]   (bind to source address/port)\n' +
     '                 -c class            (specify query class)\n' +
     '                 -m                  (enable memory usage debugging)\n' +
@@ -600,7 +619,8 @@
     '       -V print version number and exit\n' +
     '       -w specifies to wait forever for a reply\n' +
     '       -W specifies how long to wait for a reply\n' +
-    '       -4 use IPv4 query transport only\n';
+    '       -4 use IPv4 query transport only\n' +
+    '       -6 use IPv6 query transport only\n';
   const HOST_PHRASE = { A: 'has address', AAAA: 'has IPv6 address', NS: 'name server', CNAME: 'is an alias for', PTR: 'domain name pointer', MX: 'mail is handled by', TXT: 'descriptive text', HINFO: 'host information' };
   const hostSays = (r) => r.name + ' ' + (HOST_PHRASE[r.type] || 'has ' + r.type + ' record') + ' ' + rdata(r) + '\n';
 
@@ -612,7 +632,7 @@
   }
 
   function hostOptions(ctx) {
-    const g = K.getopt(ctx.args, { short: 'aAc:Cdlm:N:p:rR:st:TUvVwW:4' });
+    const g = K.getopt(ctx.args, { short: 'aAc:Cdlm:N:p:rR:st:TUvVwW:46' });
     const usage = () => { ctx.err(HOST_USAGE); return { exit: 1 }; };
     const fatal = (msg) => { ctx.eprintln('host: ' + msg); return { exit: 1 }; };
     if (g.err) { ctx.eprintln('host: ' + iscOptError(g.err)); return usage(); }
@@ -649,7 +669,7 @@
       if (!introduced) { out += 'Using domain server:\nName: ' + st.serverArg + '\nAddress: ' + res.server + '#' + st.port + '\nAliases: \n\n'; introduced = true; }
       if (res.status !== 'NOERROR') {
         failed = true;
-        out += 'Host ' + (res.status === 'NXDOMAIN' ? st.name : res.question.name) + ' not found: ' + RCODES[res.status] + '(' + res.status + ')\n';
+        out += 'Host ' + (isAddress(st.name) ? reverseName(st.name) + '.' : res.status === 'NXDOMAIN' ? st.name : res.question.name) + ' not found: ' + RCODES[res.status] + '(' + res.status + ')\n';
       } else if (st.verbose) out += hostVerbose(ctx, res, st);
       else {
         out += res.answers.map(hostSays).join('');

@@ -489,3 +489,22 @@ test('every command has help metadata and reacts to Ctrl-C while waiting', async
     assert.ok(sim.machine.commandAt('/usr/bin/' + name), name + ' is installed on Kali');
   }
 });
+
+test('review: host reverse not-found names the arpa record, dig -x validates, -6 accepted', async () => {
+  const sim = await dnsSim();
+  const h = await sim.run('host 10.10.10.99');
+  assert.equal(h.code, 1);
+  assert.equal(h.out, 'Host 99.10.10.10.in-addr.arpa. not found: 3(NXDOMAIN)\n');
+  const x = await sim.run('dig -x notanip');
+  assert.equal(x.code, 1);
+  assert.match(x.err, /^Invalid IP address notanip/);
+  assert.equal((await sim.run('dig -6 +short web01.halcyon.lab')).out, '10.10.10.10\n');
+  assert.equal((await sim.run('host -6 web01.halcyon.lab')).code, 0);
+});
+
+test('review: dig +multiline lays out the SOA record', async () => {
+  const sim = await dnsSim();
+  const r = await sim.run('dig halcyon.lab SOA +multiline +noall +answer');
+  assert.match(r.out, /SOA\tns1\.halcyon\.lab\. hostmaster\.halcyon\.lab\. \(\n\t{5}2026111201 ; serial\n\t{5}3600       ; refresh \(1 hour\)\n/);
+  assert.match(r.out, /\t{5}86400      ; minimum \(1 day\)\n\t{5}\)\n$/);
+});
