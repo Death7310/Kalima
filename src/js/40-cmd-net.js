@@ -730,8 +730,14 @@
     const m = ctx.machine; const p = painter(g.color);
     const dev = args.includes('dev') ? args[args.indexOf('dev') + 1] : args.find((a) => ifaceByName(m, a));
     if (dev && !ifaceByName(m, dev)) { ctx.eprintln('Cannot find device "' + dev + '"'); return 1; }
+    const ents = g.family === 6 ? [] : Array.from((m.arp || new Map()).values()).filter((e) => !dev || e.dev === dev);
+    if (g.json) {
+      const rows = ents.map((e) => { const st = neighState(e); const o = { dst: e.ip, dev: e.dev }; if (st !== 'FAILED') o.lladdr = e.mac; o.state = [st]; return o; });
+      ctx.println(g.pretty ? JSON.stringify(rows, null, 4) : JSON.stringify(rows));
+      return 0;
+    }
     if (g.family === 6) return 0;
-    const lines = Array.from((m.arp || new Map()).values()).filter((e) => !dev || e.dev === dev).map((e) => {
+    const lines = ents.map((e) => {
       const st = neighState(e);
       const ll = st === 'FAILED' ? ' ' : ' lladdr ' + p('mac', e.mac);
       const extra = g.stats ? ' ref 1 used 0/0/0 probes ' + (st === 'FAILED' ? 3 : 1) : '';
@@ -1572,7 +1578,7 @@
   }
   async function routeRun(ctx) {
     const args = ctx.args.slice(); let numeric = false;
-    while (args.length && /^-[nNveFC]+$/.test(args[0])) { if (args.shift().includes('n')) numeric = true; }
+    while (args.length && /^-[nNveFC46]+$/.test(args[0])) { if (args.shift().includes('n')) numeric = true; }
     if (args[0] === '-V' || args[0] === '--version') { ctx.println(NET_TOOLS_VERSION); return 0; }
     if (args[0] === '-h' || args[0] === '--help') { ctx.out(ROUTE_USAGE); return 0; }
     if (args[0] && args[0][0] === '-' && !['-net', '-host'].includes(args[0])) { ctx.eprintln("route: invalid option -- '" + args[0].replace(/^-+/, '')[0] + "'"); ctx.err(ROUTE_USAGE); return 1; }

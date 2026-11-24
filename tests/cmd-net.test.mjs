@@ -779,3 +779,21 @@ test('ping -M do: packets larger than the MTU fail locally, and a lowered MTU is
   assert.match((await sim.run('ping -c 1 -M do -s 1400 10.10.10.10')).err, /mtu=1400/);
   assert.equal((await sim.run('ping -c 1 -M bogus 10.10.10.10')).err, "ping: invalid argument: 'bogus'\n");
 });
+
+test('route accepts -4 and -6 as address-family flags', async () => {
+  const sim = await net();
+  const r = await sim.run('route -4n');
+  assert.equal(r.code, 0);
+  assert.match(r.out, /^Kernel IP routing table\nDestination/);
+});
+
+test('ip -j neigh prints JSON, [] when the table is empty', async () => {
+  const sim = await net();
+  await sim.run('sudo ip neigh flush all');
+  assert.equal(await sim.out('ip -j neigh'), '[]\n');
+  await sim.run('ping -c 1 10.10.10.10');
+  const rows = JSON.parse(await sim.out('ip -j neigh'));
+  assert.equal(rows[0].dst, '10.10.10.10');
+  assert.deepEqual(rows[0].state, ['REACHABLE']);
+  assert.match(rows[0].lladdr, /^00:0c:29:/);
+});
