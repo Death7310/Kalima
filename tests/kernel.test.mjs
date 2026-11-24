@@ -515,3 +515,15 @@ test('shell review: arithmetic assignment operators, heredoc backticks, fatal ${
   const r = await sim.run('bash /tmp/fa.sh');
   assert.equal(r.out, ''); assert.equal(r.err, '/tmp/fa.sh: line 1: nope: parameter null or not set\n'); assert.equal(r.code, 1);
 });
+
+test('shell review: process substitution, status of assignment from $(...), exit inside $(...)', async () => {
+  const sim = await kernelSim();
+  const out = async (l) => (await sim.run(l)).out;
+  assert.equal(await out('cat <(echo one) <(echo two)'), 'one\ntwo\n');
+  assert.equal(await out("while read l; do echo \"got $l\"; done < <(printf 'x\\ny\\n')"), 'got x\ngot y\n');
+  assert.equal(await out("echo b > /tmp/pa; echo a > /tmp/pb; diff <(cat /tmp/pa) <(cat /tmp/pb) | head -1"), '1c1\n');
+  assert.equal(await out('echo hi > >(k-upper)'), 'HI\n');
+  assert.equal(await out('echo <(true) | grep -c /dev/fd/'), '1\n');
+  assert.equal(sim.shell.fs.exists('/dev/fd/63'), false, 'temporary files are removed');
+  assert.equal(await out('x=$(false); echo $?; x=$(true); echo $?; x=$(exit 3) || echo "failed $?"; echo alive'), '1\n0\nfailed 3\nalive\n');
+});

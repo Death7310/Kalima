@@ -584,6 +584,29 @@
       return [word];
     }
 
+    /** <(cmd) / >(cmd): the command's output (or input) lives in a temporary /dev/fd/N file until the enclosing list item ends. */
+    async procSub(part, io) {
+      const vfs = this.machine.vfs; const root = this.rootShell;
+      root._psubN = (root._psubN || 64) - 1; if (root._psubN < 3) root._psubN = 63;
+      const path = '/dev/fd/' + root._psubN;
+      try { vfs.mkdir('/dev/fd', { parents: true }); } catch (e) { /* exists */ }
+      const ent = { path, dir: part.dir, cmd: part.cmd };
+      if (part.dir === '<') vfs.write(path, await this.captureSource(part.cmd, io), { mode: 0o666, umask: 0 });
+      else vfs.write(path, '', { mode: 0o666, umask: 0 });
+      (root._psubs = root._psubs || []).push(ent);
+      return path;
+    }
+    async procSubCleanup(mark, io) {
+      const list = this.rootShell._psubs;
+      if (!list) return;
+      while (list.length > mark) {
+        const ent = list.pop();
+        let data = null;
+        try { if (ent.dir === '>') data = this.machine.vfs.read(ent.path); this.machine.vfs.unlink(ent.path); } catch (e) { /* gone */ }
+        if (data != null) { try { await this.execSource(ent.cmd, Object.assign({}, io, { stdin: data })); } catch (e) { if (!(e instanceof K.ExitSignal)) throw e; } }
+      }
+    }
+
     /** Expand one word token to zero or more argument strings. */
     async expandWord(word, io, o) {
       o = o || {};
@@ -595,6 +618,7 @@
         const cur = () => fields[fields.length - 1];
         for (let pi = 0; pi < w.parts.length; pi++) {
           const part = w.parts[pi];
+          if (part.q === 'p') { cur().push({ s: await this.procSub(part, io), glob: false }); any = true; continue; }
           if (part.q === 's') { cur().push({ s: part.s, glob: false }); any = true; continue; }
           let text = part.s;
           if (part.q === 'n' && pi === 0 && text[0] === '~') {
@@ -745,7 +769,8 @@
       let buf = '';
       const sub = { stdin: io ? io.stdin : null, out: (s) => { if (buf.length < MAX_CAPTURE) buf += s; }, err: io ? io.err : () => {}, outTTY: false, errTTY: io ? io.errTTY : false, sig: io ? io.sig : this.term.signal };
       const saveCwd = this.cwd;
-      await this.execSource(src, sub);
+      try { this.lastSubst = await this.execSource(src, sub); }
+      catch (e) { if (!(e instanceof K.ExitSignal)) throw e; this.lastSubst = e.code; }
       this.cwd = saveCwd;
       return buf;
     }
@@ -785,12 +810,13 @@
           for (const it of node.items) {
             if (it.bg) st = this.startJob(it.node, io);
             else {
+              const mark = (this.rootShell._psubs || []).length;
               try { st = await this.execNode(it.node, io); }
               catch (e) {
                 if (!(e instanceof ShellError)) throw e;
                 io.err(e.message + '\n'); st = 1;
                 if (e.fatal && !this.interactive) throw new K.ExitSignal(1);
-              }
+              } finally { if ((this.rootShell._psubs || []).length > mark) await this.procSubCleanup(mark, io); }
             }
             this.status = st;
             if (st !== 0 && !this.noErrexit && !it.bg) {
@@ -1087,12 +1113,13 @@
       if (r.error) { io.err(r.error + '\n'); this.status = 1; return 1; }
       const cio = r.io;
       if (bare) {
+        this.lastSubst = 0;
         try { for (const a of node.assigns) await this.runAssign(a, cio, this.exported.has(a.name)); }
         catch (e) {
           if (e instanceof ShellError) { io.err(e.message + '\n'); this.status = 1; return 1; }
           throw e;
         }
-        return node.assigns.length ? 0 : this.status;
+        return node.assigns.length ? (this.lastSubst || 0) : this.status;
       }
       if (this.opts.xtrace) cio.err('+ ' + argv.join(' ') + '\n');
       // temporary environment for this command only

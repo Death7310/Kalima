@@ -250,6 +250,12 @@
       }
       if (ch === '\n') { toks.push({ type: 'nl' }); i++; readHeredocs(); continue; }
       if (ch === '#') { while (i < n && src[i] !== '\n') i++; continue; }
+      if ((ch === '<' || ch === '>') && src[i + 1] === '(') {
+        // process substitution <(cmd) / >(cmd)
+        const e = i + dollarEnd('$' + src.slice(i + 1), 0);
+        toks.push({ type: 'word', parts: [{ q: 'p', s: src.slice(i, e), dir: ch, cmd: src.slice(i + 2, e - 1) }], quoted: true, raw: src.slice(i, e) });
+        i = e; continue;
+      }
       // redirection with an explicit fd, e.g. 2> or 2>&1
       let fd = null; let j = i;
       if (/[0-9]/.test(ch)) {
