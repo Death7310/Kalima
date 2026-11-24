@@ -78,7 +78,7 @@ test('curl: https to a lab host fails with 60 unless -k is given', async () => {
   assert.equal(r.code, 60);
   assert.equal(r.out, '');
   const loud = await sim.run('curl https://web01.halcyon.lab/');
-  assert.match(loud.err, /^curl: \(60\) SSL certificate problem: self-signed certificate\nMore details here: https:\/\/curl\.se\/docs\/sslcerts\.html\n/);
+  assert.match(loud.err, /\ncurl: \(60\) SSL certificate problem: self-signed certificate\nMore details here: https:\/\/curl\.se\/docs\/sslcerts\.html\n/);
   const k = await sim.run('curl -sk https://web01.halcyon.lab/robots.txt');
   assert.equal(k.code, 0);
   assert.match(k.out, /^User-agent/);
@@ -218,7 +218,7 @@ test('curl -o saves a file; -O names it after the URL; the meter is shown', asyn
 test('curl: usage errors', async () => {
   const sim = await boot();
   const none = await sim.run('curl');
-  assert.deepEqual([none.err, none.code], ["curl: try 'curl --help' or 'curl --manual' for more information\n", 2]);
+  assert.deepEqual([none.err, none.code], ["curl: (2) no URL specified\ncurl: try 'curl --help' or 'curl --manual' for more information\n", 2]);
   const unk = await sim.run('curl --bogus http://x/');
   assert.equal(unk.code, 2);
   assert.match(unk.err, /^curl: option --bogus: is unknown\ncurl: try 'curl --help'/);
@@ -567,6 +567,59 @@ test('TLS: lab certificates are self-signed, internet ones come from the CA and 
   // without -k: the handshake is shown before the alert
   r = await sim.run('curl -v https://web01.halcyon.lab/status');
   assert.equal(r.code, 60);
-  assert.match(r.err, /^\* Host web01\.halcyon\.lab:443 was resolved\.\n\* IPv6: \(none\)\n\* IPv4: 10\.10\.10\.10\n\*   Trying 10\.10\.10\.10:443\.\.\.\n.*\* TLSv1\.3 \(IN\), TLS handshake, Certificate \(11\):\n\* TLSv1\.3 \(OUT\), TLS alert, unknown CA \(560\):\n\* SSL certificate problem: self-signed certificate\n/s);
+  assert.match(r.err, /\n\* Host web01\.halcyon\.lab:443 was resolved\.\n\* IPv6: \(none\)\n\* IPv4: 10\.10\.10\.10\n\*   Trying 10\.10\.10\.10:443\.\.\.\n.*\* TLSv1\.3 \(IN\), TLS handshake, Certificate \(11\):\n\* TLSv1\.3 \(OUT\), TLS alert, unknown CA \(560\):\n\* SSL certificate problem: self-signed certificate\n/s);
   assert.match(r.err, /curl: \(60\) SSL certificate problem/);
+});
+
+/* ------------------------------------------------------- review additions */
+
+test('curl: failures print the progress meter header when stderr is not silenced (resolve ends without newline)', async () => {
+  const sim = await boot();
+  const dns = await sim.run('curl http://nonexist.invalid');
+  assert.match(dns.err, /^ {2}% Total {4}% Received[^\n]*\n {33}Dload[^\n]*\n\r {2}0 {5}0 {4}0 {5}0 {4}0 {5}0 {6}0 {6}0 --:--:-- --:--:-- --:--:-- {5}0curl: \(6\) Could not resolve host: nonexist\.invalid\n$/);
+  const refused = await sim.run('curl -o /tmp/x.out http://10.10.10.10:81');
+  assert.match(refused.err, /--:--:-- {5}0\r {2}0 {5}0 [^\n]*--:--:-- {5}0\ncurl: \(7\) Failed to connect/);
+  const f = await sim.run('curl -o /dev/null -f http://web01.halcyon.lab/nope');
+  assert.deepEqual(f.code, 22);
+  assert.match(f.err, /\r {2}0 {3}153 {4}0 [^\n]*\ncurl: \(22\) The requested URL returned error: 404\n$/);
+  const quiet = await sim.run('curl -s http://nonexist.invalid');
+  assert.equal(quiet.err, '');
+});
+
+test('curl -vk-less cert failure prints "Connected to" before the TLS handshake', async () => {
+  const sim = await boot();
+  const r = await sim.run('curl -v https://web01.halcyon.lab/');
+  assert.match(r.err, /\*   Trying 10\.10\.10\.10:443\.\.\.\n\* Connected to web01\.halcyon\.lab \(10\.10\.10\.10\) port 443\n\* ALPN: curl offers h2,http\/1\.1\n/);
+  assert.doesNotMatch(r.err, /\n\n\n$/);
+});
+
+test('curl -F builds a multipart body, --json sets the JSON headers', async () => {
+  const sim = await boot();
+  await sim.run('echo hi > /tmp/h.txt');
+  const f = await sim.run('curl -sv -F a=b -F f=@/tmp/h.txt http://web01.halcyon.lab/ -o /dev/null');
+  assert.match(f.err, /> POST \/ HTTP\/1\.1\r\n/);
+  assert.match(f.err, /> Content-Type: multipart\/form-data; boundary=-{24}[0-9a-f]{16}\r\n/);
+  assert.match(f.err, /\} \[\d+ bytes data\]/);
+  const j = await sim.run('curl -sv --json \'{"a":1}\' http://web01.halcyon.lab/ -o /dev/null');
+  assert.match(j.err, /> Accept: application\/json\r\n/);
+  assert.match(j.err, /> Content-Type: application\/json\r\n/);
+  assert.match(j.err, /> Content-Length: 7\r\n/);
+  const miss = await sim.run('curl -F f=@/nonexist http://web01.halcyon.lab/');
+  assert.deepEqual([miss.code, miss.err], [26, 'curl: (26) Failed to open/read local data from file/application\n']);
+  const bad = await sim.run('curl -F x http://web01.halcyon.lab/');
+  assert.equal(bad.code, 2);
+});
+
+test('curl -c writes a Netscape cookie jar; -x to a dead proxy fails with 7; --create-dirs', async () => {
+  const sim = await boot();
+  const jar = await sim.run('curl -sc - http://web01.halcyon.lab/ -o /dev/null');
+  assert.match(jar.out, /^# Netscape HTTP Cookie File\n# https:\/\/curl\.se\/docs\/http-cookies\.html\n# This file was generated by libcurl! Edit at your own risk\.\n\n/);
+  const px = await sim.run('curl -sS -x http://127.0.0.1:8080 http://web01.halcyon.lab/');
+  assert.deepEqual([px.code, px.err], [7, "curl: (7) Failed to connect to 127.0.0.1 port 8080 after 1 ms: Couldn't connect to server\n"]);
+  const nop = await sim.run('curl -sS -x nosuch.invalid:3128 http://web01.halcyon.lab/');
+  assert.deepEqual([nop.code, nop.err], [5, 'curl: (5) Could not resolve proxy: nosuch.invalid\n']);
+  const nodir = await sim.run('curl -sS -o a/b/c http://web01.halcyon.lab/robots.txt');
+  assert.equal(nodir.code, 23);
+  const mk = await sim.run('curl -s --create-dirs -o a/b/c http://web01.halcyon.lab/robots.txt && cat a/b/c');
+  assert.match(mk.out, /^User-agent/);
 });

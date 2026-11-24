@@ -107,8 +107,8 @@
   }
 
   /* =================================================================== curl */
-  const CURL_LONG = ['help', 'version', 'head', 'include', 'verbose', 'silent', 'show-error', 'output=', 'remote-name', 'location', 'max-redirs=', 'request=', 'header=', 'data=', 'data-raw=', 'data-binary=', 'data-ascii=', 'data-urlencode=', 'user-agent=', 'referer=', 'user=', 'insecure', 'max-time=', 'connect-timeout=', 'write-out=', 'fail', 'resolve=', 'get', 'cookie=', 'dump-header=', 'upload-file=', 'compressed', 'url=', 'http1.1', 'http1.0', 'ipv4', 'ipv6', 'no-keepalive', 'output-dir=', 'create-dirs', 'path-as-is', 'post301', 'post302', 'fail-with-body', 'no-progress-meter'];
-  const CURL_ALIAS = { help: 'h', version: 'V', head: 'I', include: 'i', verbose: 'v', silent: 's', 'show-error': 'S', output: 'o', 'remote-name': 'O', location: 'L', request: 'X', header: 'H', data: 'd', 'data-ascii': 'd', 'user-agent': 'A', referer: 'e', user: 'u', insecure: 'k', 'max-time': 'm', 'write-out': 'w', fail: 'f', get: 'G', cookie: 'b', 'dump-header': 'D', 'upload-file': 'T', ipv4: '4', ipv6: '6' };
+  const CURL_LONG = ['help', 'version', 'head', 'include', 'verbose', 'silent', 'show-error', 'output=', 'remote-name', 'location', 'max-redirs=', 'request=', 'header=', 'data=', 'data-raw=', 'data-binary=', 'data-ascii=', 'data-urlencode=', 'user-agent=', 'referer=', 'user=', 'insecure', 'max-time=', 'connect-timeout=', 'write-out=', 'fail', 'resolve=', 'get', 'cookie=', 'dump-header=', 'upload-file=', 'compressed', 'url=', 'http1.1', 'http1.0', 'ipv4', 'ipv6', 'no-keepalive', 'output-dir=', 'create-dirs', 'path-as-is', 'post301', 'post302', 'fail-with-body', 'no-progress-meter', 'form=', 'form-string=', 'json=', 'cookie-jar=', 'proxy=', 'retry=', 'retry-delay=', 'retry-max-time=', 'retry-connrefused', 'http2', 'basic', 'location-trusted', 'remote-header-name', 'remote-time', 'globoff', 'tlsv1.2', 'tlsv1.3', 'no-buffer', 'progress-bar', 'proxy-insecure'];
+  const CURL_ALIAS = { help: 'h', version: 'V', head: 'I', include: 'i', verbose: 'v', silent: 's', 'show-error': 'S', output: 'o', 'remote-name': 'O', location: 'L', request: 'X', header: 'H', data: 'd', 'data-ascii': 'd', 'user-agent': 'A', referer: 'e', user: 'u', insecure: 'k', 'max-time': 'm', 'write-out': 'w', fail: 'f', get: 'G', cookie: 'b', 'dump-header': 'D', 'upload-file': 'T', ipv4: '4', ipv6: '6', form: 'F', 'cookie-jar': 'c', proxy: 'x', 'remote-header-name': 'J', 'remote-time': 'R', globoff: 'g', 'no-buffer': 'N', 'progress-bar': '#' };
 
   const CURL_HELP = [
     'Usage: curl [options...] <url>',
@@ -154,6 +154,17 @@
   }
   const clock = (s) => (s < 1 ? '--:--:--' : Math.floor(s / 3600) + ':' + U.pad2(Math.floor(s / 60) % 60) + ':' + U.pad2(s % 60));
 
+  const METER_HEAD = '  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n';
+  /** The first meter row, as curl prints it before anything arrived. */
+  const meterRow0 = () => '\r' + U.padStart(0, 3) + U.padStart(0, 6) + U.padStart(0, 5) + U.padStart(0, 6) + U.padStart(0, 5) + U.padStart(0, 6) + U.padStart(0, 7) + U.padStart(0, 7) + ' --:--:-- --:--:-- --:--:--' + U.padStart(0, 6);
+  /** What curl leaves on stderr when a transfer fails: the header and rows, with no newline after the last row when the name did not resolve (the error text follows it). */
+  function failMeter(kind, size) {
+    if (kind === 'resolve') return METER_HEAD + meterRow0();
+    const P = U.padStart;
+    const second = size != null ? '\r' + P(0, 3) + P(max5(size), 6) + P(0, 5) + P(0, 6) + P(0, 5) + P(0, 6) + P(0, 7) + P(0, 7) + ' --:--:-- --:--:-- --:--:--' + P(0, 6) : meterRow0();
+    return METER_HEAD + meterRow0() + second + '\n';
+  }
+
   function progressMeter(size, ms) {
     const speed = ms > 0 ? Math.floor(size / (ms / 1000)) : size;
     const secs = Math.floor(ms / 1000);
@@ -189,6 +200,69 @@
     return parts.length ? parts.join('&') : null;
   }
 
+  /** Build a multipart/form-data body from -F / --form-string options. Returns {body, type} or {error: message}. */
+  async function curlForm(ctx, g) {
+    const items = [];
+    for (const f of g.all.F || []) items.push([f, true]);
+    for (const f of g.all['form-string'] || []) items.push([f, false]);
+    if (!items.length) return null;
+    let boundary = '------------------------';
+    for (let i = 0; i < 16; i++) boundary += '0123456789abcdef'[Math.floor(K.net.rand() * 16)];
+    let body = '';
+    for (const [spec, special] of items) {
+      const eq = spec.indexOf('=');
+      if (eq < 0) return { error: "Illegal or missing form field: " + spec };
+      const name = spec.slice(0, eq); let value = spec.slice(eq + 1);
+      body += '--' + boundary + '\r\n';
+      if (special && (value[0] === '@' || value[0] === '<')) {
+        const asFile = value[0] === '@';
+        const m = /^[@<]([^;]*)((?:;.*)?)$/.exec(value);
+        const path = m[1]; let type = null; let fname = null;
+        for (const opt of m[2].split(';')) { const t = /^type=(.*)$/.exec(opt); const f = /^filename=(.*)$/.exec(opt); if (t) type = t[1]; if (f) fname = f[1].replace(/^"|"$/g, ''); }
+        const data = path === '-' ? (ctx.stdin == null ? '' : ctx.stdin) : await readFileOrFail(ctx, path);
+        if (data == null) return { error: 'read', code: 26 };
+        const base = fname != null ? fname : path.replace(/^.*\//, '');
+        body += 'Content-Disposition: form-data; name="' + name + '"' + (asFile ? '; filename="' + base + '"' : '') + '\r\n';
+        if (asFile) body += 'Content-Type: ' + (type || mimeOf(base)) + '\r\n';
+        else if (type) body += 'Content-Type: ' + type + '\r\n';
+        body += '\r\n' + data + '\r\n';
+      } else {
+        body += 'Content-Disposition: form-data; name="' + name + '"\r\n\r\n' + value + '\r\n';
+      }
+    }
+    body += '--' + boundary + '--\r\n';
+    return { body, type: 'multipart/form-data; boundary=' + boundary };
+  }
+
+  /** Parse Set-Cookie header text into [{name, value, domain, path, secure, httpOnly, subdomains}]. */
+  function parseSetCookies(text, host) {
+    const out = [];
+    for (const c of String(text || '').split(/,\s*(?=[^;,]+=)/)) {
+      const parts = c.split(';').map((x) => x.trim()); const eq = parts[0].indexOf('=');
+      if (eq <= 0) continue;
+      const k = { name: parts[0].slice(0, eq), value: parts[0].slice(eq + 1), domain: host, path: '/', secure: false, httpOnly: false, subdomains: false };
+      for (const a of parts.slice(1)) {
+        const [an, ...av] = a.split('='); const lower = an.toLowerCase(); const v = av.join('=');
+        if (lower === 'domain' && v) { k.domain = v.replace(/^\./, ''); k.subdomains = true; } else if (lower === 'path' && v) k.path = v;
+        else if (lower === 'secure') k.secure = true; else if (lower === 'httponly') k.httpOnly = true;
+      }
+      out.push(k);
+    }
+    return out;
+  }
+  const JAR_HEAD = '# Netscape HTTP Cookie File\n# https://curl.se/docs/http-cookies.html\n# This file was generated by libcurl! Edit at your own risk.\n\n';
+  const jarLine = (k) => (k.httpOnly ? '#HttpOnly_' : '') + (k.subdomains ? '.' : '') + k.domain + '\t' + (k.subdomains ? 'TRUE' : 'FALSE') + '\t' + k.path + '\t' + (k.secure ? 'TRUE' : 'FALSE') + '\t0\t' + k.name + '\t' + k.value;
+  /** Cookies from a -b argument: either name=value text or a Netscape jar file. */
+  function jarCookies(text) {
+    const out = [];
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      const f = line.replace(/^#HttpOnly_/, '').split('\t');
+      if (f.length >= 7 && line[0] !== '#' || (f.length >= 7 && /^#HttpOnly_/.test(line))) out.push({ name: f[5], value: f.slice(6).join('\t').replace(/\r$/, '') });
+    }
+    return out;
+  }
+
   /** Apply -H headers on top of the defaults, in curl's order. Returns [[name, value]]. */
   function curlHeaders(defaults, custom) {
     const list = defaults.slice();
@@ -220,6 +294,7 @@
     const say = (s) => { if (verbose) ctx.eprintln(s); };
     const report = (code, msg) => { if (!o.silent || o.showError) ctx.eprintln('curl: (' + code + ') ' + msg); return code; };
     const dest = (ex.ip || u.host) + ' port ' + u.port;
+    if (o.meter) ctx.err(failMeter(f.kind));
     if (f.kind === 'resolve') {
       await ctx.sleep(20);
       say('* Could not resolve host: ' + u.host); say('* shutting down connection #0');
@@ -230,6 +305,7 @@
       if (verbose) {
         if (!U.isIPv4(u.host)) { say('* Host ' + u.host + ':' + u.port + ' was resolved.'); say('* IPv6: (none)'); say('* IPv4: ' + ex.ip); }
         say('*   Trying ' + ex.ip + ':' + u.port + '...');
+        say('* Connected to ' + u.host + ' (' + ex.ip + ') port ' + u.port);
         for (const l of ['* ALPN: curl offers h2,http/1.1', '* TLSv1.3 (OUT), TLS handshake, Client hello (1):', '*  CAfile: /etc/ssl/certs/ca-certificates.crt', '*  CApath: /etc/ssl/certs', '* TLSv1.3 (IN), TLS handshake, Server hello (2):', '* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):', '* TLSv1.3 (IN), TLS handshake, Certificate (11):']) say(l);
       }
       say('* TLSv1.3 (OUT), TLS alert, unknown CA (560):'); say('* SSL certificate problem: self-signed certificate'); say('* closing connection #0');
@@ -274,7 +350,7 @@
 
   async function curlRun(ctx) {
     const fail = (msg, code) => { ctx.eprintln('curl: ' + msg); ctx.err(curlExtra); return code; };
-    const g = K.getopt(ctx.args, { short: 'hVIivsSo:OLX:H:d:A:e:u:kfm:w:Gb:D:T:46gjNq#', long: CURL_LONG, alias: CURL_ALIAS });
+    const g = K.getopt(ctx.args, { short: 'hVIivsSo:OLX:H:d:A:e:u:kfm:w:Gb:D:T:46gjNq#F:c:x:JR', long: CURL_LONG, alias: CURL_ALIAS });
     if (g.err) {
       const m = /^invalid option -- '(.)'/.exec(g.err); const l = /^unrecognized option '(.*)'/.exec(g.err);
       const rq = /^option requires an argument -- '(.)'/.exec(g.err); const lr = /^option '(--[^']+)' requires an argument/.exec(g.err);
@@ -288,7 +364,7 @@
     if (x.h) { ctx.out(CURL_HELP); return 0; }
     if (x.V) { ctx.out(CURL_VERSION_TEXT); return 0; }
     const urls = (g.all.url || []).concat(g.rest);
-    if (!urls.length) { ctx.err(curlExtra); return 2; }
+    if (!urls.length) { ctx.eprintln('curl: (2) no URL specified'); ctx.err(curlExtra); return 2; }
     const o = {
       silent: !!x.s, showError: !!x.S, verbose: !!x.v, head: !!x.I, include: !!x.i || !!x.I, fail: !!x.f, insecure: !!x.k,
       follow: !!x.L, maxRedirs: x['max-redirs'] != null ? parseInt(x['max-redirs'], 10) : 50,
@@ -300,7 +376,20 @@
     }
     const resolve = {};
     for (const r of g.all.resolve || []) { const m = /^\[?([^:\]]+)\]?:(\d+):(.+)$/.exec(r); if (m) resolve[m[1].toLowerCase() + ':' + m[2]] = m[3].split(',')[0]; }
-    const body = await curlBody(ctx, g);
+    let body = await curlBody(ctx, g);
+    let bodyType = 'application/x-www-form-urlencoded';
+    const form = await curlForm(ctx, g);
+    if (form && form.error) {
+      if (form.code === 26) { if (!o.silent || o.showError) ctx.eprintln('curl: (26) Failed to open/read local data from file/application'); return 26; }
+      return fail('option -F: is badly used here', 2);
+    }
+    if (form) { body = form.body; bodyType = form.type; }
+    if ((g.all.json || []).length) {
+      const parts = [];
+      for (const j of g.all.json) parts.push(j[0] === '@' ? (await readFileOrFail(ctx, j.slice(1))) || '' : j);
+      body = parts.join(''); bodyType = 'application/json'; o.json = true;
+    }
+    o.createDirs = !!x['create-dirs'];
     const upload = x.T != null ? (x.T === '-' ? ctx.stdin || '' : await readFileOrFail(ctx, x.T)) : null;
     if (x.T != null && upload == null) { if (!o.silent || o.showError) ctx.eprintln('curl: (26) Failed to open/read local data from file/application'); return 26; }
     let user = x.u != null ? String(x.u) : null;
@@ -311,7 +400,7 @@
     let code = 0; let outIndex = 0;
     const outs = g.all.o || []; const dumps = g.all.D || [];
     for (const raw of urls) {
-      const r = await curlTransfer(ctx, o, { x, g, raw, resolve, body, upload, user, out: x.O ? null : outs[outIndex] != null ? outs[outIndex] : null, dump: dumps[0], toFile: !!x.O || outs[outIndex] != null });
+      const r = await curlTransfer(ctx, o, { x, g, raw, resolve, body, bodyType, upload, user, out: x.O ? null : outs[outIndex] != null ? outs[outIndex] : null, dump: dumps[0], toFile: !!x.O || outs[outIndex] != null });
       if (!x.O) outIndex++;
       if (r) code = r;
     }
@@ -338,24 +427,44 @@
     } else if (fileName != null && x['output-dir'] && fileName !== '-') fileName = x['output-dir'].replace(/\/$/, '') + '/' + fileName;
     if (fileName === '-') fileName = null;
     const toTerminal = fileName == null;
+    o.meter = !o.silent && (!toTerminal || !ctx.isTTY);
     let hdrDump = '';
     let ex; let resp; let lastCode = 0; let first = true; let prevHost = null;
+    const session = [];
+    if (x.x != null) {
+      const pm = /^(?:[A-Za-z0-9+.-]+:\/\/)?(?:[^@\/]*@)?(\[[^\]]*\]|[^:\/]+)(?::(\d+))?/.exec(String(x.x));
+      const phost = pm ? pm[1].toLowerCase() : ''; const pport = pm && pm[2] ? parseInt(pm[2], 10) : 1080;
+      const pip = U.isIPv4(phost) ? phost : (K.net.resolve(ctx.machine, phost) || {}).ip;
+      if (!phost) { /* an empty --proxy means no proxy */ } else if (!pip) {
+        if (o.meter) ctx.err(failMeter('resolve'));
+        return report(5, 'Could not resolve proxy: ' + phost);
+      } else {
+        const pt = K.net.tcp(ctx.machine, pip, pport, { kind: 'http' });
+        if (pt.state !== 'open') {
+          if (o.meter) ctx.err(failMeter('net'));
+          await ctx.sleep(pt.state === 'filtered' ? 127000 : 1);
+          return report(7, 'Failed to connect to ' + phost + ' port ' + pport + ' after ' + (pt.state === 'filtered' ? 127000 : 1) + " ms: Couldn't connect to server");
+        }
+      }
+    }
     for (;;) {
       const defaults = [['Host', u.hostport], ['User-Agent', 'curl/' + CURL_VERSION], ['Accept', '*/*']];
       const credUser = t.user != null ? t.user : u.user != null ? u.user + ':' + (u.pass == null ? '' : u.pass) : null;
       if (credUser != null) defaults.splice(1, 0, ['Authorization', 'Basic ' + base64(credUser)]);
       if (x.A != null) defaults[defaults.findIndex((h) => h[0] === 'User-Agent')][1] = x.A;
       if (x.e != null) defaults.push(['Referer', String(x.e).replace(/;auto$/, '')]);
-      if (x.b != null) {
-        const ck = String(x.b).indexOf('=') >= 0 ? String(x.b) : ((await readFileOrFail(ctx, x.b)) || '').trim();
+      if (x.b != null || x.c != null) {
+        const raw = x.b == null ? '' : String(x.b).indexOf('=') >= 0 ? String(x.b) : ((await readFileOrFail(ctx, x.b)) || '');
+        const fromFile = raw.indexOf('\t') >= 0 ? jarCookies(raw).map((k) => k.name + '=' + k.value) : [];
+        const ck = (fromFile.length || raw.indexOf('\t') >= 0 ? fromFile : raw.trim() ? [raw.trim()] : []).concat(session.map((k) => k.name + '=' + k.value)).join('; ');
         if (ck) defaults.push(['Cookie', ck]);
       }
       if (x.compressed) defaults.push(['Accept-Encoding', 'deflate, gzip, br, zstd']);
       if (reqBody !== '' || method === 'POST' || method === 'PUT') {
         if (method !== 'GET' || t.body != null) defaults.push(['Content-Length', String(U.byteLen(reqBody))]);
-        if (t.body != null && !x.G && t.upload == null) defaults.push(['Content-Type', 'application/x-www-form-urlencoded']);
+        if (t.body != null && !x.G && t.upload == null) defaults.push(['Content-Type', t.bodyType]);
       }
-      const hdrs = curlHeaders(defaults, g.all.H || []);
+      const hdrs = curlHeaders(defaults, (o.json ? ['Accept: application/json'] : []).concat(g.all.H || []));
       const headerObj = {}; for (const h of hdrs) headerObj[h[0].toLowerCase()] = h[1];
       const pinKey = u.host + ':' + u.port;
       if (verbose && t.resolve[pinKey] && first) eln('* Added ' + pinKey + ':' + t.resolve[pinKey] + ' to DNS cache');
@@ -380,6 +489,9 @@
       info.headerBytes = head.length;
       hdrDump += head;
       info.status = resp.status;
+      if ((x.c != null || x.b != null) && resp.headers['set-cookie']) {
+        for (const k of parseSetCookies(resp.headers['set-cookie'], u.host)) { const i = session.findIndex((y) => y.name === k.name && y.domain === k.domain && y.path === k.path); if (i >= 0) session[i] = k; else session.push(k); }
+      }
       const redirect = o.follow && REDIRECTS.indexOf(resp.status) >= 0 && resp.headers.location;
       if (o.include && t.dump == null && toTerminal) ctx.out(head);
       if (!redirect) break;
@@ -397,6 +509,14 @@
       info.lastLocation = next;
       u = nu; first = false;
     }
+    if (resp && x.J && x.O) {
+        const cd = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(resp.headers['content-disposition'] || '');
+        if (cd && cd[1].replace(/^.*\//, '')) fileName = (x['output-dir'] ? x['output-dir'].replace(/\/$/, '') + '/' : '') + cd[1].replace(/^.*\//, '');
+    }
+    if (resp && x.c != null) {
+      const text = JAR_HEAD + session.map((k) => jarLine(k) + '\n').join('');
+      if (x.c === '-') ctx.out(text); else { try { ctx.fs.write(x.c, text); } catch (e) { if (!(e instanceof K.FsError)) throw e; if (!o.silent || o.showError) ctx.eprintln('Warning: Failed to open the file ' + x.c + ': ' + e.message); } }
+    }
     if (resp) {
       const failed = o.fail && resp.status >= 400;
       const text = resp.body;
@@ -411,6 +531,7 @@
       if (verbose) { eln('* Connection #0 to host ' + u.host + ' left intact'); }
       if (t.dump != null) await curlDump(ctx, t.dump, hdrDump);
       if (!o.silent && !o.head && (!toTerminal || !ctx.isTTY) && !failed) ctx.err(progressMeter(info.bytes, resp.ms));
+      if (failed && o.meter) ctx.err(failMeter('http', info.bytes));
       if (failed) lastCode = report(22, 'The requested URL returned error: ' + resp.status);
     }
     if (x.w != null) {
@@ -422,7 +543,10 @@
 
   async function curlSave(ctx, o, name, data) {
     if (name === '/dev/null') return true;
-    try { ctx.fs.write(name, data); return true; } catch (e) {
+    try {
+      if (o.createDirs && name.indexOf('/') > 0) ctx.fs.mkdir(name.replace(/\/[^\/]*$/, '') || '/', { parents: true });
+      ctx.fs.write(name, data); return true;
+    } catch (e) {
       if (!(e instanceof K.FsError)) throw e;
       if (!o.silent) ctx.eprintln('Warning: Failed to open the file ' + name + ': ' + e.message);
       if (!o.silent || o.showError) ctx.eprintln('curl: (23) Failure writing output to destination, passed ' + U.byteLen(data) + ' returned 0');
